@@ -22,6 +22,12 @@ _NO_FORMAT = (
     "or any markdown formatting. Output flowing sentences and paragraphs."
 )
 
+def _looks_like_a_list(text: str) -> bool:
+    """True when the text already carries list lines the model must preserve."""
+    return bool(re.search(r"^\s*(?:[-•*]|\d+[.)])\s+\S", text or "",
+                          re.MULTILINE))
+
+
 REFINE_PROMPTS = {
     # "Fix All" in the refine popup. A full grammar-checker pass in the Grammarly
     # mould: every mechanical error is in scope, but the writer's words and voice
@@ -249,6 +255,19 @@ class AIRefiner:
 
         prompt = custom_prompt or REFINE_PROMPTS.get(mode, REFINE_PROMPTS["punctuation"])
 
+        # _NO_FORMAT bans lists so the model never invents them. When the text
+        # HANDED to it already is one (list_format laid out a spoken "first …
+        # second …"), that ban would flatten the app's own output back into
+        # prose on the first refine — so say plainly that an existing list is
+        # to be kept. Inventing one is still forbidden.
+        if _looks_like_a_list(text):
+            prompt += (
+                " The text already contains a numbered or bulleted list. Keep "
+                "that list exactly as it is — same items, same order, same "
+                "line breaks and same markers. Do not turn it back into "
+                "prose, and do not add any list that is not already there."
+            )
+
         # Email sign-off: hand the model the sender's real name so a bare
         # sign-off ("Thanks,") gets a name and no placeholder is invented.
         name = (sender_name or "").strip()
@@ -400,6 +419,14 @@ class AIRefiner:
             return text
         result = self.refine(text, mode="context_fix")
         if result == text:
+            return text
+        # Structural guard, not just a prompt instruction: context_fix runs in
+        # the background and its result is offered without the user having
+        # asked for it, so a pass that flattened a laid-out list back into
+        # prose would silently undo the app's own formatting. Same words, so
+        # neither the count nor the substitution guard below would catch it.
+        if _looks_like_a_list(text) and not _looks_like_a_list(result):
+            print("[AIRefiner] context_fix rejected: it flattened a list")
             return text
         # Guard against the LLM adding/removing content, but tolerate small
         # count shifts from legitimate corrections (contractions like

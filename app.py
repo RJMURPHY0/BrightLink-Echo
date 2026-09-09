@@ -37,6 +37,7 @@ from config import Config
 # window could paint. They are imported inside _init_core (background thread)
 # so first paint is near-instant; _core_ready gates everything that needs them.
 from spoken_commands import apply_spoken_commands
+from list_format import format_lists
 from hotkey_manager import HotkeyManager, TriggerHotkeyManager, AppState
 from feedback import Feedback
 from popup import FloatingPopup, _MONITORINFO, _monitor_user32
@@ -47,7 +48,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.6.75"
+APP_VERSION = "1.6.76"
 
 
 class _RECT(ctypes.Structure):
@@ -1592,6 +1593,19 @@ class WhisperFlowApp:
             if _sc != transcribed_text:
                 print(f"[App] Spoken symbols: '{transcribed_text}' -> '{_sc}'")
                 transcribed_text = _sc
+
+        # Spoken lists: "first … second …" becomes a numbered list, an
+        # announced comma series becomes bullets. Before the user libraries so
+        # a snippet BODY is never re-shaped — a body is verbatim, and one
+        # holding "First Floor, Second Avenue" is not a list. Skipped under
+        # Live Typing, where the words are already in the user's document and
+        # a restructure would mean deleting and retyping most of them.
+        if (transcribed_text and getattr(self.config, "auto_lists", True)
+                and not getattr(self.config, "live_inject", False)):
+            _lf = format_lists(transcribed_text)
+            if _lf != transcribed_text:
+                print("[App] Spoken list laid out")
+                transcribed_text = _lf
 
         # The user's own vocabulary corrections, then their snippets — same
         # single post-processing point, for the same reason. Vocabulary first,

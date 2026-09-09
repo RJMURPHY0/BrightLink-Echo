@@ -6960,6 +6960,11 @@ class AppWindow:
                     "end_punctuation",
                     _END_FROM_LABEL.get(_end_var.get(), "smart"))
         _end_var.trace_add("write", _on_end_change)
+        _toggle_card("auto_lists", "Auto Lists",
+                     "When you clearly list things (\"first\u2026 second\u2026\", or "
+                     "\"here are the three things\"), lay them out as a numbered "
+                     "or bulleted list. Never while Live Typing is on",
+                     True, icon="punct")
         _toggle_card("auto_paragraphs", "Auto Paragraphs",
                      "Start a new paragraph when you pause clearly after a "
                      "finished sentence (never breaks mid-sentence thinking pauses)",

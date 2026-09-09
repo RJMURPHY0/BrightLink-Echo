@@ -109,6 +109,7 @@ class Config:
     end_punctuation: str = "smart"  # Full stop at the end of a dictation: "smart" (only when the utterance reads finished — see sentence_end), "always" (the pre-1.6.75 behaviour), "never"
     live_captions: bool = False   # Show live text of what you're saying (replaces the waveform bar while recording)
     live_inject: bool = False     # Type words into the app live as you speak (Parakeet mode); corrects at hotkey-release
+    auto_lists: bool = True  # Lay out a clearly enumerated dictation as a real list: "first … second …" becomes 1. 2., an announced comma series becomes bullets. Off during Live Typing either way
     auto_paragraphs: bool = True  # Paragraph break after a clear pause (2s+ silence following a finished sentence); Parakeet path, off during Live Typing
     parakeet_version: str = "v2"  # Parakeet model: "v2" (English) or "v3" (multilingual, lower WER); switching triggers a one-time ~660 MB download
     show_popup: bool = True  # Show the cursor-icon popup (Insert/Replace/Upgrade) after each dictation; off = text is injected silently with no popup
