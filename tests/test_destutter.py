@@ -174,12 +174,38 @@ class CorpusRegressionTests(unittest.TestCase):
             self.assertTrue(self._explained(t, out),
                             f"unexplained rewrite:\n  {t!r}\n  {out!r}")
 
+    # The two stutters this feature was built for, kept here VERBATIM as they
+    # were dictated. They used to be read out of history.json, which is a
+    # rolling 200-row cache of whatever Ryan said most recently — so the test
+    # passed until the examples scrolled out of it and then failed for a reason
+    # that had nothing to do with the collapser (which the sibling corpus test
+    # above proves is still behaving). A regression fixture may not be able to
+    # expire; if an example is worth pinning it belongs in the test.
+    # One real example per rule, and each must genuinely CHANGE — a fixture
+    # asserting "unchanged" pins nothing.
+    KNOWN_STUTTERS = (
+        # The reported false start.
+        ("push all most rec recent changes",
+         "push all most recent changes"),
+        # A doubled function word, lifted from a real dictation.
+        ("I also want to add an option, so if like on the the chat bot.",
+         "I also want to add an option, so if like on the chat bot."),
+    )
+
     def test_the_two_known_stutters_are_actually_fixed(self):
-        texts = self._load()
-        hits = [disfluency.destutter(t) for t in texts if "rec recent" in t]
-        self.assertTrue(hits, "corpus no longer contains the known stutter")
-        for h in hits:
-            self.assertNotIn("rec recent", h)
+        for before, after in self.KNOWN_STUTTERS:
+            self.assertNotEqual(before, after, "fixture pins no collapse")
+            self.assertEqual(after, disfluency.destutter(before), before)
+
+    def test_no_known_stutter_survives_in_the_live_corpus(self):
+        """Belt to the braces: if the machine's cache DOES still hold one of
+        them, it must still come out collapsed. Silent when it does not, rather
+        than failing over a fixture nobody controls."""
+        hits = [t for t in self._load() if "rec recent" in t]
+        if not hits:
+            self.skipTest("the rolling corpus no longer holds this example")
+        for t in hits:
+            self.assertNotIn("rec recent", disfluency.destutter(t))
 
 
 if __name__ == "__main__":

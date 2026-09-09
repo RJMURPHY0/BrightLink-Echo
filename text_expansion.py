@@ -318,6 +318,16 @@ def _dm():
         return None
 
 
+_DIGITS_RE = re.compile(r"\d+")
+
+
+def _digits(text: str) -> list:
+    """The digit runs in `text`, in order. Two strings that sound identical to
+    a phonetic encoder can still be different numbers, and only this tells them
+    apart."""
+    return _DIGITS_RE.findall(text or "")
+
+
 def _phonetic_match(term_codes: tuple, cand_codes: tuple) -> bool:
     """True when the term's primary code lines up with either candidate code, or
     the candidate's primary matches the term's secondary. Empty codes never match."""
@@ -492,6 +502,18 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
                 if not _phonetic_match(codes, cand_codes):
                     continue
                 term_key = low.replace(" ", "")
+                # Digits must match EXACTLY. Double Metaphone cannot see them
+                # at all — "company23" and "company342" both encode to KMPN —
+                # so the phonetic firewall, which is the primary gate, waves
+                # them straight through, and the long shared prefix then scores
+                # jw 0.958. That rewrote real dictation ("Company 23" ->
+                # "Company 342", and a bare "company" -> "Company 28"): 65 of
+                # the 150 terms in a live CRM cache carry digits, so this is
+                # most of the managed vocabulary, not an edge case. A number is
+                # data, not a sound, and inventing one the user did not say is
+                # the worst thing this pass can do.
+                if _digits(cand_key) != _digits(term_key):
+                    continue
                 lr = len(cand_key) / float(len(term_key) or 1)
                 len_lo, len_hi = ((MANAGED_LEN_LO, MANAGED_LEN_HI) if strict
                                   else (FUZZY_LEN_LO, FUZZY_LEN_HI))

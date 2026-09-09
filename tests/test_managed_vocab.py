@@ -150,6 +150,50 @@ class StrictTierTests(unittest.TestCase):
                              f"managed vocabulary rewrote ordinary speech: {text!r}")
 
 
+class DigitTests(unittest.TestCase):
+    """A number is data, not a sound.
+
+    Double Metaphone drops digits entirely, so "company23" and "company342"
+    both encode to KMPN and sail through the phonetic firewall — which is the
+    PRIMARY gate here. The long shared prefix then scores jw 0.958, over even
+    the strict floor. That rewrote real dictation: "Company 23" became "Company
+    342", and a bare "company" became "Company 28". It is not an edge case
+    either; 65 of the 150 terms in a live CRM cache carry digits.
+
+    Found by the corpus regression below — but the corpus is a rolling window
+    of whatever was said most recently, so the case is pinned here as well
+    where it cannot scroll away.
+    """
+
+    def test_a_term_differing_only_in_digits_is_refused(self):
+        text = "give like Company 23 context and stuff"
+        self.assertEqual(text, apply_vocabulary_fuzzy(text, managed("Company 342")))
+
+    def test_a_digitless_span_never_gains_a_number(self):
+        # Inventing a number the user did not say is the worst thing this pass
+        # can do, so a span with no digits may not reach a term with some.
+        text = "the company name is on the invoice"
+        self.assertEqual(text, apply_vocabulary_fuzzy(text, managed("Company 28")))
+
+    def test_a_span_never_loses_its_number(self):
+        text = "send it to Company 23 today"
+        self.assertEqual(text, apply_vocabulary_fuzzy(text, managed("Company")))
+
+    def test_the_same_number_still_corrects(self):
+        # The rule is EQUALITY, not a ban: a genuine mishearing of a name that
+        # carries the right number is still fixed.
+        self.assertEqual(
+            "give like Company 342 context",
+            apply_vocabulary_fuzzy("give like Companie 342 context",
+                                   managed("Company 342")))
+
+    def test_a_hand_typed_term_is_held_to_the_same_rule(self):
+        # The hole is in the encoder, not in the tier, so the user's own
+        # vocabulary has it too.
+        text = "open ticket 4471 for them"
+        self.assertEqual(text, apply_vocabulary_fuzzy(text, owned("Ticket 4472")))
+
+
 class PrecedenceTests(unittest.TestCase):
 
     def test_user_entry_wins_when_it_collides_with_a_managed_one(self):
