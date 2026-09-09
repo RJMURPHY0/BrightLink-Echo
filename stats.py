@@ -231,6 +231,16 @@ def _words_by_range(days: dict, carry_words: int, today: datetime.date) -> dict:
     return totals
 
 
+def _words_for(days: dict, carry_words: int, today: datetime.date, rng: str,
+               custom, total_words: int) -> dict:
+    """The five named totals, plus the custom span under its own key so the
+    footer count can be looked up by the same range key the cards use."""
+    totals = _words_by_range(days, carry_words, today)
+    if custom is not None:
+        totals[rng] = int(total_words)
+    return totals
+
+
 class StatsStore:
     """Thread-safe per-user dictation aggregates.
 
@@ -339,7 +349,17 @@ class StatsStore:
         today = _today()
         today_words = int(days.get(today.isoformat(), {}).get("w", 0))
 
+        # An explicit span ("custom:2026-09-01:2026-09-09") behaves exactly like
+        # the named windows: bounded, so the collapsed carry total is excluded.
+        try:
+            from config import parse_custom_range
+            custom = parse_custom_range(rng)
+        except Exception:
+            custom = None
+
         def _in_window(d: datetime.date) -> bool:
+            if custom is not None:
+                return custom[0] <= d <= custom[1]
             if rng == "today":
                 return d == today
             if rng == "week":
@@ -353,7 +373,7 @@ class StatsStore:
         # Carry (collapsed old days) has no date, so it belongs only to an
         # UNBOUNDED window: 'all', or any unrecognised value (which _in_window
         # also treats as lifetime). Only the four bounded windows exclude it.
-        windowed = rng in ("today", "week", "month", "year")
+        windowed = custom is not None or rng in ("today", "week", "month", "year")
 
         # Two accumulations in one pass: the selected window (drives the cards)
         # and lifetime (streak, calendar, and the wpm fallback for thin windows).
@@ -448,7 +468,8 @@ class StatsStore:
             "streak_weekend_grace": streak_weekend_grace,
             "saved_minutes": saved_min,
             "avg_wpm": avg_wpm,
-            "words": _words_by_range(days, carry_words, today),
+            "words": _words_for(days, carry_words, today, rng, custom,
+                                total_words),
             # ── breakdown data (drives the click-through panels) ──────────
             "dictation_saved_minutes": dictation_min,
             "dictation_time_minutes": dictation_time_min,

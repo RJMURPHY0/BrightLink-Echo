@@ -47,7 +47,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.6.74"
+APP_VERSION = "1.6.75"
 
 
 class _RECT(ctypes.Structure):
@@ -328,11 +328,13 @@ class WhisperFlowApp:
 
             config = self.config
             _ap = getattr(config, "auto_punctuate", True)
+            _ep = getattr(config, "end_punctuation", "smart")
             self.transcriber = Transcriber(
                 model_size=config.whisper_model,
                 language=config.language,
                 num_workers=2,
                 auto_punctuate=_ap,
+                end_punctuation=_ep,
             )
             # Fast model: injects text immediately; accurate model refines in background
             # beam_size=1 = greedy decode (2-4x faster than beam search, negligible quality loss for preview)
@@ -341,7 +343,7 @@ class WhisperFlowApp:
             self.fast_transcriber = Transcriber(
                 model_size="base.en", beam_size=1,
                 vad_speech_pad_ms=30, min_silence_duration_ms=100,
-                cpu_threads=4, auto_punctuate=_ap,
+                cpu_threads=4, auto_punctuate=_ap, end_punctuation=_ep,
             )
             # Primary engine: Parakeet TDT 0.6b v2 (int8 ONNX) — better accuracy
             # than whisper-large-v3 at ~20x realtime on CPU with punctuation built
@@ -349,6 +351,7 @@ class WhisperFlowApp:
             # languages, or model not yet downloaded).
             self.parakeet = ParakeetTranscriber(
                 auto_punctuate=_ap,
+                end_punctuation=_ep,
                 vad_gate=bool(getattr(config, "noise_gate", True)),
                 model_version=getattr(config, "parakeet_version", "v2"),
             )
@@ -1128,6 +1131,11 @@ class WhisperFlowApp:
             self.transcriber.auto_punctuate = bool(value)
             self.fast_transcriber.auto_punctuate = bool(value)
             self.parakeet.auto_punctuate = bool(value)
+        elif key == "end_punctuation":
+            import sentence_end
+            mode = value if value in sentence_end.MODES else sentence_end.DEFAULT_MODE
+            for eng in (self.transcriber, self.fast_transcriber, self.parakeet):
+                eng.end_punctuation = mode
         elif key == "live_captions":
             # Live update, no restart. Captions reuse the already-loaded fast
             # model, so there's nothing to build — the next recording picks it up.
@@ -1165,6 +1173,7 @@ class WhisperFlowApp:
             model_size=value,
             language=self.config.language,
             auto_punctuate=_ap,
+            end_punctuation=getattr(self.config, "end_punctuation", "smart"),
         )
         self.transcriber = new_t
         threading.Thread(

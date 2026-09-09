@@ -11,7 +11,7 @@ import time
 import tkinter as tk
 import tkinter.font as tkfont
 import ui_render
-from datetime import datetime, timedelta
+from datetime import date as _date, datetime, timedelta
 from typing import Callable, Optional
 import ctypes
 
@@ -804,6 +804,436 @@ class Dropdown(tk.Canvas):
         if self._menu is not None:
             self.close()
         self._paint()
+
+
+
+
+def _span_label(a, b) -> str:
+    """'1 Sep – 9 Sep', or a single date when the span is one day."""
+    if a == b:
+        return f"{a.day} {a.strftime('%b')}"
+    same_year = a.year == b.year
+    left = f"{a.day} {a.strftime('%b')}" + ("" if same_year else f" {a.year % 100:02d}")
+    right = f"{b.day} {b.strftime('%b')}" + ("" if same_year else f" {b.year % 100:02d}")
+    return f"{left} – {right}"
+
+
+class RangePicker(Dropdown):
+    """Dropdown with a second tab for an explicit from/to span.
+
+    The named windows (today / this week / …) answer most questions, but not
+    "how did the first week of last month go" — so the list gets a sibling tab
+    with two dd/mm/yyyy fields and a month calendar, the same two-tab shape the
+    CRM's date filter uses. Subclasses Dropdown rather than reimplementing it:
+    the closed control, the dismiss-anywhere binding and the lose-foreground
+    watch are all behaviour that took releases to get right and must not fork.
+
+    Only open() and the panel painting are overridden. A period click reports
+    through on_period(label); an applied span through on_custom(start, end).
+    """
+
+    _W = 306
+    _TAB_H = 36
+    _ROW_H = 30
+    _CELL = 30
+    _CAL_TOP = 128          # y of the weekday header row on the custom tab
+
+    def __init__(self, parent, variable: tk.StringVar, values, *, bg=None,
+                 font=("Segoe UI", 10, "bold"), on_period=None, on_custom=None):
+        self._on_period = on_period
+        self._on_custom = on_custom
+        self._tab = "periods"
+        self._hits = []                 # [(x0, y0, x1, y1, fn, hoverable)]
+        self._sel_start = None
+        self._sel_end = None
+        self._cal_month = _date.today().replace(day=1)
+        self._entries = {}
+        self._focus_field = "start"
+        super().__init__(parent, variable, values, bg=bg, font=font)
+
+    # ── the closed control ───────────────────────────────────────────────────
+
+    def _natural_width(self) -> int:
+        # The span label is not in _values, so measure the live value too or a
+        # custom range overflows the control that has to show it.
+        widest = max([self._font.measure(v) for v in self._values]
+                     + [self._font.measure(self._var.get() or "")], default=60)
+        return widest + self._PAD_X * 2 + self._CHEV_W
+
+    def _paint(self) -> None:
+        want = self._natural_width()
+        try:
+            if int(self["width"]) != want:
+                self.configure(width=want)   # re-enters via <Configure>, once
+        except (tk.TclError, ValueError):
+            pass
+        super()._paint()
+
+    def set_custom(self, start, end) -> None:
+        """Seed the calendar from a saved span (restoring config at startup)."""
+        self._sel_start, self._sel_end = start, end
+        if start is not None:
+            self._cal_month = start.replace(day=1)
+            self._tab = "custom"
+
+    # ── the open panel ───────────────────────────────────────────────────────
+
+    def _panel_height(self) -> int:
+        if self._tab == "periods":
+            return self._TAB_H + self._ROW_H * len(self._values) + 14
+        return self._CAL_TOP + 20 + self._CELL * 6 + 46
+
+    def open(self) -> None:
+        if self._menu is not None:
+            return
+        mon_l, mon_t, mon_r, mon_b = _monitor_work_area(self)
+        w = min(self._W, (mon_r - mon_l) - 24)
+        h = self._panel_height()
+        top = tk.Toplevel(self)
+        top.overrideredirect(True)
+        top.configure(bg=C["surface"])
+        try:
+            top.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height() + 4
+        if y + h > mon_b - 8:
+            y = self.winfo_rooty() - h - 4
+        y = max(mon_t + 8, min(y, mon_b - h - 8))
+        x = max(mon_l + 8, min(x, mon_r - w - 8))
+        top.geometry(f"{w}x{h}+{x}+{y}")
+        cv = tk.Canvas(top, bg=C["surface"], highlightthickness=0, bd=0,
+                       width=w, height=h)
+        cv.pack(fill="both", expand=True)
+        self._menu = top
+        self._menu_cv = cv
+        self._menu_w = w
+        self._menu_h = h
+        self._menu_hover = None
+        self._paint_panel()
+        cv.bind("<Motion>", self._on_panel_motion)
+        cv.bind("<Leave>", lambda _e: self._set_panel_hover(None))
+        cv.bind("<Button-1>", self._on_panel_click)
+        top.bind("<Escape>", lambda _e: self.close())
+        try:
+            from popup import _apply_popup_corners
+            top.update_idletasks()
+            _apply_popup_corners(top.winfo_id())
+        except Exception:
+            pass
+        self._watch_foreground()
+        self._paint()
+
+    def close(self) -> None:
+        self._entries = {}
+        super().close()
+
+    def _repaint_panel_window(self) -> None:
+        """Erase-repaint after a geometry change. Resizing a MAPPED
+        overrideredirect window lets Windows blit the old pixels into the new
+        position; RDW_UPDATENOW only validates Tk's update region, so the
+        after(0) twin is what actually drains the Expose queue."""
+        top = self._menu
+        if top is None:
+            return
+        try:
+            u32 = _user32()
+            hwnd = u32.GetAncestor(ctypes.c_void_p(top.winfo_id()), 2)
+            if not hwnd:
+                return
+            flags = 0x0001 | 0x0004 | 0x0080 | 0x0100   # INVAL|ERASE|ALLCHILD|NOW
+            u32.RedrawWindow(ctypes.c_void_p(hwnd), None, None, flags)
+            top.after(0, lambda: u32.RedrawWindow(ctypes.c_void_p(hwnd), None,
+                                                  None, flags))
+        except Exception:
+            pass
+
+    def _set_tab(self, tab: str) -> None:
+        if tab == self._tab or self._menu is None:
+            return
+        self._tab = tab
+        h = self._panel_height()
+        top = self._menu
+        try:
+            mon_l, mon_t, mon_r, mon_b = _monitor_work_area(self)
+            x, y = top.winfo_x(), top.winfo_y()
+            y = max(mon_t + 8, min(y, mon_b - h - 8))
+            top.geometry(f"{self._menu_w}x{h}+{x}+{y}")
+            self._menu_cv.configure(height=h)
+            self._menu_h = h
+            top.update_idletasks()
+        except tk.TclError:
+            return
+        self._paint_panel()
+        self._repaint_panel_window()
+
+    # ── painting ─────────────────────────────────────────────────────────────
+
+    def _hit(self, x0, y0, x1, y1, fn, hover=True) -> None:
+        self._hits.append((x0, y0, x1, y1, fn, hover))
+
+    def _paint_panel(self) -> None:
+        cv = self._menu_cv
+        if cv is None:
+            return
+        w, h = self._menu_w, self._menu_h
+        for e in self._entries.values():
+            try:
+                e.destroy()
+            except tk.TclError:
+                pass
+        self._entries = {}
+        cv.delete("all")
+        self._hits = []
+        try:
+            img = ui_render.round_rect(cv, w, h, 8, C["surface"], C["border"],
+                                       1, C["surface"])
+        except Exception:
+            img = None
+        if img is not None:
+            self._menu_img = img
+            cv.create_image(0, 0, image=img, anchor="nw")
+        else:
+            _rr(cv, 0, 0, w - 1, h - 1, 8, fill=C["surface"], outline=C["border"])
+
+        half = w // 2
+        for i, (key, label) in enumerate((("periods", "Periods"),
+                                          ("custom", "From / to"))):
+            x0 = 1 + i * (half - 1)
+            x1 = x0 + half - 2
+            on = self._tab == key
+            cv.create_text((x0 + x1) // 2, self._TAB_H // 2 + 1, text=label,
+                           fill=C["text"] if on else C["subtext"],
+                           font=("Segoe UI", 9, "bold" if on else "normal"))
+            cv.create_line(x0 + 10, self._TAB_H - 2, x1 - 10, self._TAB_H - 2,
+                           fill=C["accent"] if on else C["surface"], width=2)
+            self._hit(x0, 2, x1, self._TAB_H - 2, lambda k=key: self._set_tab(k))
+        cv.create_line(1, self._TAB_H, w - 1, self._TAB_H, fill=C["divider"])
+
+        if self._tab == "periods":
+            self._paint_periods()
+        else:
+            self._paint_custom()
+        self._paint_hover()
+
+    def _paint_periods(self) -> None:
+        cv, w = self._menu_cv, self._menu_w
+        current = self._var.get()
+        for i, val in enumerate(self._values):
+            y = self._TAB_H + 6 + i * self._ROW_H
+            sel = val == current
+            cv.create_text(16, y + self._ROW_H // 2, text=val, anchor="w",
+                           fill=C["accent"] if sel else C["text"],
+                           font=("Segoe UI", 9, "bold" if sel else "normal"))
+            if sel:
+                cv.create_text(w - 16, y + self._ROW_H // 2, text="✓",
+                               anchor="e", fill=C["accent"],
+                               font=("Segoe UI", 9, "bold"))
+            self._hit(6, y, w - 6, y + self._ROW_H,
+                      lambda v=val: self._choose_period(v))
+
+    def _paint_custom(self) -> None:
+        import calendar as _calmod
+        cv, w = self._menu_cv, self._menu_w
+        # Two dd/mm/yyyy fields. Real Entries, so a span can be typed as well as
+        # clicked — the calendar writes into whichever field has focus.
+        fw = (w - 24 - 22) // 2
+        for i, key in enumerate(("start", "end")):
+            self._make_date_field(key, 12 + i * (fw + 22), 46, fw, 30)
+        cv.create_text(w // 2, 61, text="→", fill=C["subtext"],
+                       font=("Segoe UI", 10))
+
+        m = self._cal_month
+        cv.create_text(w // 2, 100, text=m.strftime("%B %Y"), fill=C["text"],
+                       font=("Segoe UI", 10, "bold"))
+        for dx, step, glyph in ((22, -1, "‹"), (w - 22, 1, "›")):
+            cv.create_text(dx, 100, text=glyph, fill=C["subtext"],
+                           font=("Segoe UI", 14))
+            self._hit(dx - 14, 86, dx + 14, 114,
+                      lambda st=step: self._step_month(st))
+
+        wd_y = self._CAL_TOP
+        for i, name in enumerate(("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su")):
+            cv.create_text(self._cell_x(i), wd_y, text=name, fill=C["subtext"],
+                           font=("Segoe UI", 8))
+
+        first_col = _date(m.year, m.month, 1).weekday()
+        days = _calmod.monthrange(m.year, m.month)[1]
+        today = _date.today()
+        a, b = self._sel_start, self._sel_end
+        for d in range(1, days + 1):
+            idx = first_col + d - 1
+            cx = self._cell_x(idx % 7)
+            cy = wd_y + 20 + (idx // 7) * self._CELL + self._CELL // 2
+            day = _date(m.year, m.month, d)
+            edge = day == a or day == b
+            inside = a is not None and b is not None and a < day < b
+            if edge:
+                _rr(cv, cx - 14, cy - 13, cx + 14, cy + 13, 8,
+                    fill=C["accent"], outline="")
+            elif inside:
+                _rr(cv, cx - 14, cy - 13, cx + 14, cy + 13, 8,
+                    fill=C["accent_dim"], outline="")
+            elif day == today:
+                _rr(cv, cx - 14, cy - 13, cx + 14, cy + 13, 8, fill="",
+                    outline=C["accent"])
+            cv.create_text(cx, cy, text=str(d),
+                           fill=C["bg"] if edge else C["text"],
+                           font=("Segoe UI", 9, "bold" if edge else "normal"))
+            self._hit(cx - 14, cy - 13, cx + 14, cy + 13,
+                      lambda dd=day: self._pick_day(dd))
+
+        fy = self._menu_h - 22
+        cv.create_text(18, fy, text="Clear", anchor="w", fill=C["subtext"],
+                       font=("Segoe UI", 9))
+        self._hit(12, fy - 12, 74, fy + 12, self._clear_custom)
+        ready = self._sel_start is not None
+        cv.create_text(w - 18, fy, text="Apply", anchor="e",
+                       fill=C["accent"] if ready else C["subtext"],
+                       font=("Segoe UI", 9, "bold"))
+        self._hit(w - 74, fy - 12, w - 12, fy + 12, self._apply_custom)
+
+    def _cell_x(self, col: int) -> int:
+        left = (self._menu_w - self._CELL * 7) // 2
+        return left + col * self._CELL + self._CELL // 2
+
+    def _make_date_field(self, key: str, x: int, y: int, w: int, h: int) -> None:
+        cv = self._menu_cv
+        _rr(cv, x, y, x + w, y + h, 7, fill=C["input_bg"],
+            outline=C["accent"] if self._focus_field == key else C["border"])
+        val = self._sel_start if key == "start" else self._sel_end
+        ent = tk.Entry(cv, bg=C["input_bg"], fg=C["text"], relief="flat", bd=0,
+                       highlightthickness=0, insertbackground=C["text"],
+                       font=("Segoe UI", 9), justify="center")
+        if val is not None:
+            ent.insert(0, val.strftime("%d/%m/%Y"))
+        cv.create_window(x + w // 2, y + h // 2, window=ent, width=w - 12,
+                         height=h - 8)
+        ent.bind("<FocusIn>", lambda _e, k=key: self._set_focus_field(k))
+        ent.bind("<KeyRelease>", lambda _e, k=key: self._typed_date(k))
+        ent.bind("<Return>", lambda _e: self._apply_custom())
+        self._entries[key] = ent
+
+    def _set_focus_field(self, key: str) -> None:
+        self._focus_field = key
+
+    def _typed_date(self, key: str) -> None:
+        ent = self._entries.get(key)
+        if ent is None:
+            return
+        raw = ent.get().strip()
+        parsed = None
+        for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(raw, fmt).date()
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            return
+        if key == "start":
+            self._sel_start = parsed
+        else:
+            self._sel_end = parsed
+        self._cal_month = parsed.replace(day=1)
+        self._redraw_keeping_focus()
+
+    def _redraw_keeping_focus(self) -> None:
+        """Repaint without stealing the caret from the field being typed into
+        (every paint rebuilds the Entries)."""
+        keep = None
+        for k, e in self._entries.items():
+            try:
+                if e.focus_get() is e:
+                    keep = (k, e.index("insert"))
+            except (tk.TclError, KeyError):
+                pass
+        self._paint_panel()
+        if keep:
+            ent = self._entries.get(keep[0])
+            if ent is not None:
+                try:
+                    ent.focus_set()
+                    ent.icursor(keep[1])
+                except tk.TclError:
+                    pass
+
+    # ── interaction ──────────────────────────────────────────────────────────
+
+    def _step_month(self, step: int) -> None:
+        m = self._cal_month
+        y, mo = m.year, m.month + step
+        if mo < 1:
+            y, mo = y - 1, 12
+        elif mo > 12:
+            y, mo = y + 1, 1
+        self._cal_month = _date(y, mo, 1)
+        self._paint_panel()
+
+    def _pick_day(self, day) -> None:
+        # Two clicks make a span: the first sets the start, the second closes
+        # it. A click before the start restarts rather than inverting the range.
+        if (self._sel_start is None or self._sel_end is not None
+                or day < self._sel_start):
+            self._sel_start, self._sel_end = day, None
+        else:
+            self._sel_end = day
+        self._paint_panel()
+
+    def _clear_custom(self) -> None:
+        self._sel_start = self._sel_end = None
+        self._paint_panel()
+
+    def _apply_custom(self) -> None:
+        a = self._sel_start
+        if a is None:
+            return
+        b = self._sel_end or a
+        self.close()
+        self._var.set(_span_label(a, b))
+        if self._on_custom:
+            self._on_custom(a, b)
+
+    def _choose_period(self, label: str) -> None:
+        self.close()
+        if label != self._var.get():
+            self._var.set(label)
+        if self._on_period:
+            self._on_period(label)
+
+    def _hit_at(self, x, y):
+        for h in self._hits:
+            if h[0] <= x <= h[2] and h[1] <= y <= h[3]:
+                return h
+        return None
+
+    def _paint_hover(self) -> None:
+        h = self._menu_hover
+        if h is None or self._menu_cv is None:
+            return
+        _rr(self._menu_cv, h[0], h[1], h[2], h[3], 6, fill="",
+            outline=C["accent"], tags="hoverfx")
+
+    def _set_panel_hover(self, h) -> None:
+        if h == self._menu_hover:
+            return
+        self._menu_hover = h
+        if self._menu_cv is not None:
+            try:
+                self._menu_cv.delete("hoverfx")
+            except tk.TclError:
+                return
+            self._paint_hover()
+
+    def _on_panel_motion(self, event) -> None:
+        h = self._hit_at(event.x, event.y)
+        self._set_panel_hover(tuple(h[:4]) if (h and h[5]) else None)
+
+    def _on_panel_click(self, event) -> None:
+        h = self._hit_at(event.x, event.y)
+        if h is not None:
+            h[4]()
 
 
 class RoundedButton(tk.Canvas):
@@ -2868,18 +3298,21 @@ class AppWindow:
         _RANGE_FROM_LABEL = {v: k for k, v in _RANGE_LABELS.items()}
         _cur_range = (getattr(self._config, "impact_range", "all")
                      if self._config else "all")
-        if _cur_range not in _RANGE_LABELS:
+        # A saved span comes back as "custom:<start>:<end>"; anything else that
+        # is not a known key is a stray value and falls back to lifetime.
+        try:
+            from config import parse_custom_range as _parse_span
+        except Exception:
+            _parse_span = lambda _v: None
+        _span = _parse_span(_cur_range)
+        if _span is None and _cur_range not in _RANGE_LABELS:
             _cur_range = "all"
         self._impact_range = _cur_range
 
-        self._impact_range_var = tk.StringVar(value=_RANGE_LABELS[_cur_range])
-        _range_menu = Dropdown(brow, self._impact_range_var,
-                               list(_RANGE_LABELS.values()), bg=C["surface"],
-                               font=("Segoe UI", 10, "bold"))
-        _range_menu.pack(side="left", padx=(6, 0))
+        self._impact_range_var = tk.StringVar(
+            value=_span_label(*_span) if _span else _RANGE_LABELS[_cur_range])
 
-        def _on_range_change(*_a):
-            key = _RANGE_FROM_LABEL.get(self._impact_range_var.get(), "today")
+        def _set_range(key: str) -> None:
             self._impact_range = key
             if self._config is not None:
                 try:
@@ -2889,7 +3322,22 @@ class AppWindow:
                     print(f"[AppWindow] Impact range save failed: {e}")
             self._refresh_impact()
 
-        self._impact_range_var.trace_add("write", _on_range_change)
+        def _on_period(label: str) -> None:
+            _set_range(_RANGE_FROM_LABEL.get(label, "all"))
+
+        def _on_custom(start, end) -> None:
+            _set_range(f"custom:{start.isoformat()}:{end.isoformat()}")
+
+        # RangePicker, not Dropdown: the same list plus a From / to tab, so the
+        # cards can be scoped to any span and not just the five named windows.
+        _range_menu = RangePicker(brow, self._impact_range_var,
+                                  list(_RANGE_LABELS.values()), bg=C["surface"],
+                                  font=("Segoe UI", 10, "bold"),
+                                  on_period=_on_period, on_custom=_on_custom)
+        if _span:
+            _range_menu.set_custom(*_span)
+        _range_menu.pack(side="left", padx=(6, 0))
+        self._impact_range_menu = _range_menu
 
         self._impact_today_lbl = tk.Label(
             brow, text="·  0 words dictated",
@@ -3236,8 +3684,17 @@ class AppWindow:
     def _range_phrase(snap: dict) -> str:
         """'this week' / 'this month' … for the selected window, '' for 'all'.
         Lets the breakdown panels say which period they are showing."""
-        return {"today": "today", "week": "this week", "month": "this month",
-                "year": "this year"}.get(snap.get("range", "all"), "")
+        rng = snap.get("range", "all")
+        named = {"today": "today", "week": "this week", "month": "this month",
+                 "year": "this year"}.get(rng)
+        if named:
+            return named
+        try:
+            from config import parse_custom_range
+            span = parse_custom_range(rng)
+        except Exception:
+            span = None
+        return f"in {_span_label(*span)}" if span else ""
 
     def _layout_impact_detail(self) -> None:
         key = getattr(self, "_impact_open", None)
@@ -3683,8 +4140,7 @@ class AppWindow:
                 sub = "Dictate to keep it"
         else:
             n = int(snap.get("active_in_range", 0))
-            _rlabel = {"today": "today", "week": "this week",
-                       "month": "this month", "year": "this year"}.get(rng, "")
+            _rlabel = self._range_phrase(snap)
             sub = (f"active {_rlabel}".strip() if n
                    else f"No days yet {_rlabel}".strip())
         self._set_impact_card("streak", str(n), "day" if n == 1 else "days", sub)
@@ -5883,6 +6339,16 @@ class AppWindow:
             parent, command=lambda *a: self._scrollbar_command(
                 self._settings_cv, *a))
         self._settings_cv.configure(yscrollcommand=self._settings_sb.set)
+        # Search sits ABOVE the scroll area (packed first, so it takes the top
+        # strip) — a settings page this long is unusable if the search scrolls
+        # away with the content. Same shared control as History and the
+        # vocabulary / snippet pages.
+        self._settings_query = ""
+        self._settings_rows = []
+        self._settings_sections = set()
+        self._settings_search = self._search_bar(
+            parent, "Search settings…", self._apply_settings_search,
+            padx=20, pady=(10, 8))
         self._settings_sb.pack(side="right", fill="y")
         self._settings_cv.pack(side="left", fill="both", expand=True)
 
@@ -5896,6 +6362,9 @@ class AppWindow:
         def _section(icon: str, title: str) -> None:
             row = tk.Frame(parent, bg=C["bg"])
             row.pack(fill="x", padx=22, pady=(16, 6))
+            # Registered so the search filter knows which slaves are headers
+            # (everything else between two headers belongs to the first).
+            self._settings_sections.add(str(row))
             ph = None
             try:
                 import ui_render
@@ -6449,9 +6918,48 @@ class AppWindow:
                    "Say a short phrase and it expands into a full block of "
                    "text: an address, a sign-off, a standard paragraph", "wand")
 
-        _toggle_card("auto_punctuate", "Auto Punctuation",
-                     "Add a trailing period when speech ends without ending punctuation",
-                     True, icon="punct")
+        # Sentence endings — a three-way choice, not the old boolean. The
+        # toggle governed the terminal full stop AND the pause-artefact repair,
+        # so turning it off to stop the unwanted period also lost the cleanup:
+        # that is why it never felt like it worked. Smart adds the stop only
+        # when the utterance reads as finished (see sentence_end).
+        _end_card = self._card(parent, margin=(0, 4))
+        _end_top = tk.Frame(_end_card, bg=C["surface"]); _end_top.pack(fill="x")
+        _card_icon(_end_top, "punct")
+        _end_col = tk.Frame(_end_top, bg=C["surface"])
+        _end_col.pack(side="left", fill="x", expand=True)
+        tk.Label(_end_col, text="Sentence Endings", fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(anchor="w")
+        _end_desc = tk.Label(
+            _end_col,
+            text="Whether a dictation gets a full stop on the end. Smart adds "
+                 "one only when what you said reads as a finished sentence, so "
+                 "fragments dropped mid-sentence stay open.",
+            fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 8),
+            anchor="w", justify="left", wraplength=260)
+        _end_desc.pack(fill="x")
+        self._autowrap(_end_desc)
+
+        # Kept as short as the popup-position labels: a Dropdown sizes itself
+        # to its widest option, and a long one overflows the card it sits in.
+        _END_LABELS = {"smart":  "Smart — finished sentences only",
+                       "always": "Always add a full stop",
+                       "never":  "Never add a full stop"}
+        _END_FROM_LABEL = {v: k for k, v in _END_LABELS.items()}
+        _cur_end = (getattr(cfg, "end_punctuation", "smart") if cfg else "smart")
+        if _cur_end not in _END_LABELS:
+            _cur_end = "smart"
+        _end_var = tk.StringVar(value=_END_LABELS[_cur_end])
+        _end_menu = Dropdown(_end_card, _end_var, list(_END_LABELS.values()),
+                             bg=C["surface_hover"], font=("Segoe UI", 9))
+        _end_menu.pack(fill="x", pady=(6, 0))
+
+        def _on_end_change(*_a):
+            if self._on_settings_change:
+                self._on_settings_change(
+                    "end_punctuation",
+                    _END_FROM_LABEL.get(_end_var.get(), "smart"))
+        _end_var.trace_add("write", _on_end_change)
         _toggle_card("auto_paragraphs", "Auto Paragraphs",
                      "Start a new paragraph when you pause clearly after a "
                      "finished sentence (never breaks mid-sentence thinking pauses)",
@@ -6642,6 +7150,119 @@ class AppWindow:
 
         save_btn = self._surface_btn(save_wrap, "Save Settings", _save)
         save_btn.pack(side="right")
+
+        self._index_settings_search()
+
+    # ── Settings search ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _widget_text(widget) -> str:
+        """Every label/button caption under `widget`, lower-cased and joined.
+        Read once at build time, so a keystroke costs a substring test."""
+        found = []
+        stack = [widget]
+        while stack:
+            w = stack.pop()
+            try:
+                t = w.cget("text")
+            except (tk.TclError, AttributeError):
+                t = ""
+            if isinstance(t, str) and t.strip():
+                found.append(t)
+            try:
+                stack.extend(w.winfo_children())
+            except tk.TclError:
+                pass
+        return " ".join(found).lower()
+
+    def _index_settings_search(self) -> None:
+        """Snapshot the built page: each direct child of the scroll content, in
+        order, with its pack options, the section it sits under and the text it
+        carries. Filtering is then pure pack_forget/pack — nothing is rebuilt,
+        so no widget keeps a stale value and the ScrollPane's wheel/scrollregion
+        machinery is untouched."""
+        pane = getattr(self, "_settings_cv", None)
+        if pane is None:
+            return
+        rows, section = [], None
+        for child in pane.content.pack_slaves():
+            info = child.pack_info()
+            info.pop("in", None)        # implied by the widget's own master
+            text = self._widget_text(child)
+            is_section = str(child) in self._settings_sections
+            if is_section:
+                section = {"title": text, "hits": 0}
+            rows.append({"w": child, "pack": info, "section": section,
+                         "is_section": is_section, "text": text, "show": True})
+        self._settings_rows = rows
+
+    def _apply_settings_search(self, query: str) -> None:
+        """Show only the cards matching `query`; a section header survives only
+        when something under it does."""
+        rows = getattr(self, "_settings_rows", None)
+        if not rows:
+            return
+        q = (query or "").strip().lower()
+        if q == getattr(self, "_settings_query", ""):
+            return
+        self._settings_query = q
+        for r in rows:
+            if r["is_section"]:
+                r["section"]["hits"] = 0
+        for r in rows:
+            if r["is_section"]:
+                continue
+            sec = r["section"]
+            hit = (not q) or q in r["text"] or (sec is not None
+                                               and q in sec["title"])
+            r["show"] = hit
+            if hit and sec is not None:
+                sec["hits"] += 1
+        for r in rows:
+            if r["is_section"]:
+                r["show"] = (not q) or r["section"]["hits"] > 0
+        hits = sum(1 for r in rows if r["show"] and not r["is_section"])
+
+        def _swap():
+            for r in rows:
+                try:
+                    r["w"].pack_forget()
+                except tk.TclError:
+                    pass
+            for r in rows:
+                if r["show"]:
+                    try:
+                        r["w"].pack(**r["pack"])
+                    except tk.TclError:
+                        pass
+            self._show_settings_empty(bool(q) and hits == 0, q)
+
+        # One visual frame: a forget/pack sweep over thirty cards paints every
+        # intermediate layout otherwise.
+        self._atomic_ui(_swap)
+        try:
+            self._settings_cv.yview_moveto(0.0)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _show_settings_empty(self, show: bool, query: str = "") -> None:
+        lbl = getattr(self, "_settings_empty", None)
+        if not show:
+            if lbl is not None:
+                try:
+                    lbl.pack_forget()
+                except tk.TclError:
+                    pass
+            return
+        if lbl is None:
+            lbl = tk.Label(self._settings_cv.content, text="", fg=C["subtext"],
+                           bg=C["bg"], font=("Segoe UI", 9), justify="left")
+            self._settings_empty = lbl
+        lbl.configure(text=f"No settings match “{query}”")
+        try:
+            lbl.pack(fill="x", padx=22, pady=(24, 8))
+        except tk.TclError:
+            pass
 
     # ── Voice training ───────────────────────────────────────────────────────
 

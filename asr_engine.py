@@ -26,6 +26,7 @@ import numpy as np
 
 import hallucination
 import disfluency
+import sentence_end
 
 _MODEL_SAMPLE_RATE = 16000
 
@@ -184,10 +185,19 @@ class ParakeetTranscriber:
     replaced with the user's canonical casing (e.g. "ftc" -> "FTC").
     """
 
+    # Class-level default so an instance built without __init__ (tests build
+    # polish()-only doubles that way) still has a valid mode.
+    end_punctuation = "always"
+
     def __init__(self, auto_punctuate: bool = True, cpu_threads: int = 4,
                  vad_gate: bool = True,
-                 model_version: str = DEFAULT_MODEL_VERSION):
+                 model_version: str = DEFAULT_MODEL_VERSION,
+                 end_punctuation: str = "always"):
         self.auto_punctuate = auto_punctuate
+        # "smart" | "always" | "never" — see sentence_end. Defaults to the
+        # pre-1.6.75 "always" so a bare ParakeetTranscriber() behaves as it did;
+        # the app passes the user's configured mode.
+        self.end_punctuation = end_punctuation
         self._cpu_threads = cpu_threads
         self._vad_gate = vad_gate
         self._vad_failed = False
@@ -477,12 +487,10 @@ class ParakeetTranscriber:
         if text and text[0].islower():
             text = text[0].upper() + text[1:]
         if self.auto_punctuate:
-            # A trailing comma/semicolon/colon is a pause artefact. Replace it,
-            # never stack — appending after it shipped ",." endings.
-            if text and text[-1] in ",;:":
-                text = text[:-1].rstrip()
-            if text and text[-1] not in ".!?":
-                text += "."
+            # Trailing punctuation: strip the pause artefact, then close the
+            # sentence only if the mode (and, under "smart", the text itself)
+            # says it is finished.
+            text = sentence_end.apply(text, self.end_punctuation)
         return text
 
     @staticmethod

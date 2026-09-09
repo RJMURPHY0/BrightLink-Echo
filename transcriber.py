@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Optional
 
 import hallucination
 import disfluency
+import sentence_end
 
 if TYPE_CHECKING:
     from faster_whisper import WhisperModel
@@ -59,6 +60,10 @@ class Transcriber:
         "large-v3-turbo",
     ]
 
+    # Class-level default so an instance built without __init__ still has
+    # a valid mode (see sentence_end.MODES).
+    end_punctuation = "always"
+
     def __init__(
         self,
         model_size: str = "base.en",
@@ -71,6 +76,7 @@ class Transcriber:
         cpu_threads: int = 0,
         num_workers: int = 1,
         auto_punctuate: bool = True,
+        end_punctuation: str = "always",
     ):
         if model_size not in self.VALID_MODELS:
             print(
@@ -99,6 +105,8 @@ class Transcriber:
         self._num_workers = num_workers
         self._cpu_threads = cpu_threads or max(1, multiprocessing.cpu_count())
         self.auto_punctuate = auto_punctuate
+        # "smart" | "always" | "never" — see sentence_end.
+        self.end_punctuation = end_punctuation
 
         print(
             f"[Transcriber] model={model_size!r}  device={device}  "
@@ -286,12 +294,11 @@ class Transcriber:
 
         # Ensure ends with punctuation (only when auto_punctuate is enabled).
         # A trailing comma/semicolon/colon is replaced, never stacked ("then,.").
+        # Under "smart" the stop is added only when the utterance reads as a
+        # finished sentence — see sentence_end.
         text = text.strip()
         if self.auto_punctuate and text:
-            if text[-1] in ",;:":
-                text = text[:-1].rstrip()
-            if text and text[-1] not in ".!?":
-                text += "."
+            text = sentence_end.apply(text, self.end_punctuation)
 
         # Re-capitalise first letter after cleanup
         if text and text[0].islower():

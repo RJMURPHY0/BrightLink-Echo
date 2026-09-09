@@ -54,6 +54,33 @@ _LEGACY_SUPABASE_URLS = ("https://mbxwqtsesxgpcfyicphs.supabase.co",)
 _ASYNC_SAVE_DEBOUNCE_S = 0.03
 
 
+# ── "Your impact" range keys ─────────────────────────────────────────────────
+# Either one of the five named windows or an explicit span written as
+# "custom:YYYY-MM-DD:YYYY-MM-DD" (inclusive, start <= end). Kept here rather
+# than in the UI so config.load() and stats.snapshot() agree on what is legal.
+IMPACT_RANGES = ("today", "week", "month", "year", "all")
+
+
+def parse_custom_range(value):
+    """('2026-09-01', '2026-09-09') for a valid custom key, else None."""
+    import datetime as _dt
+    if not isinstance(value, str) or not value.startswith("custom:"):
+        return None
+    parts = value.split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        a = _dt.date.fromisoformat(parts[1])
+        b = _dt.date.fromisoformat(parts[2])
+    except ValueError:
+        return None
+    return (a, b) if a <= b else (b, a)
+
+
+def _valid_impact_range(value) -> bool:
+    return value in IMPACT_RANGES or parse_custom_range(value) is not None
+
+
 @dataclass
 class Config:
     """Application configuration with defaults."""
@@ -78,7 +105,8 @@ class Config:
     noise_gate: bool = True  # Silero VAD gate on the Parakeet engine — background noise never reaches the model (whisper path has its own)
     spoken_punctuation: bool = True  # Convert dictated symbol names ("slash", "underscore", "hashtag") into the characters themselves
     custom_vocabulary: str = ""  # Comma-separated terms to boost in Whisper (names, acronyms, domain words)
-    auto_punctuate: bool = True   # Add trailing period when Whisper output has no terminal punctuation
+    auto_punctuate: bool = True   # Master punctuation cleanup: pause-artefact repair, leading capital, terminal stop. No UI — the terminal stop is governed by end_punctuation below
+    end_punctuation: str = "smart"  # Full stop at the end of a dictation: "smart" (only when the utterance reads finished — see sentence_end), "always" (the pre-1.6.75 behaviour), "never"
     live_captions: bool = False   # Show live text of what you're saying (replaces the waveform bar while recording)
     live_inject: bool = False     # Type words into the app live as you speak (Parakeet mode); corrects at hotkey-release
     auto_paragraphs: bool = True  # Paragraph break after a clear pause (2s+ silence following a finished sentence); Parakeet path, off during Live Typing
@@ -304,8 +332,19 @@ class Config:
                 # Impact-range footer selector must be a known key; coerce
                 # anything else back to the default so a stray value never
                 # breaks the Home-tab dropdown.
-                if config.impact_range not in ("today", "week", "month", "year", "all"):
+                if not _valid_impact_range(config.impact_range):
                     config.impact_range = "all"
+                # Terminal punctuation. A config written before 1.6.75 has no
+                # end_punctuation key: adopt "smart" (the point of the change)
+                # and force auto_punctuate back on, because that flag ALSO
+                # gates the pause-artefact repair and the leading capital —
+                # turning it off to stop the full stop cost the user those too,
+                # which is why the old toggle never felt like it worked.
+                if "end_punctuation" not in data:
+                    config.end_punctuation = "smart"
+                    config.auto_punctuate = True
+                if config.end_punctuation not in ("smart", "always", "never"):
+                    config.end_punctuation = "smart"
             except (json.JSONDecodeError, IOError) as e:
                 # Reset-to-defaults fallback (kept) — but never silently:
                 # preserve the bad file and flag the reset so app.py can show
