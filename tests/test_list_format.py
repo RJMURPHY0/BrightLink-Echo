@@ -166,7 +166,7 @@ class WiringTests(unittest.TestCase):
         # A snippet BODY is verbatim and must never be re-shaped.
         app = self._src("app.py")
         self.assertLess(app.index("format_lists(transcribed_text)"),
-                        app.index("self._apply_user_libraries(transcribed_text)"))
+                        app.index("self._apply_user_libraries(transcribed_text,"))
 
     def test_default_on_in_config(self):
         self.assertIn("auto_lists: bool = True", self._src("config.py"))

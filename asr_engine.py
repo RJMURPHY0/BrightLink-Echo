@@ -206,6 +206,11 @@ class ParakeetTranscriber:
         self._load_lock = threading.Lock()
         self._transcribe_lock = threading.Lock()
         self._load_failed = False
+        # Timestamped/log-prob adapter, built on first use. Strictly additive:
+        # if this onnx-asr build has no with_timestamps(), the flag latches and
+        # every later call takes the plain text path unchanged.
+        self._ts_model = None
+        self._ts_failed = False
 
     @property
     def is_loaded(self) -> bool:
@@ -256,8 +261,16 @@ class ParakeetTranscriber:
     def transcribe(
         self, audio: np.ndarray, sample_rate: int = 16000, blocking: bool = True,
         context_words: str = "", hotwords_str: str = "", finalize_text: bool = True,
+        conf_out: Optional[list] = None,
     ) -> str:
-        """finalize_text=False skips the forced leading-capital / trailing-period
+        """conf_out, when given, is a list the engine APPENDS (word, confidence)
+        pairs to, in spoken order — the decoder's own per-token probabilities,
+        used by phrase_learning to decide what it may learn from and what it
+        may rewrite. Only call sites whose text is KEPT should pass one: the
+        caption preview throws its hypotheses away, and folding those in would
+        put the same words in the list twice and lose the alignment.
+
+        finalize_text=False skips the forced leading-capital / trailing-period
         polish — used by the streaming session for mid-dictation chunks, which
         may start or end mid-sentence. The session applies polish() once on the
         fully joined text instead."""
@@ -289,7 +302,7 @@ class ParakeetTranscriber:
                 audio = self._vad_clip(audio)
                 if audio is None:
                     return ""  # no speech anywhere in the clip
-            text = self._recognize_long(audio)
+            text = self._recognize_long(audio, conf_out)
         except Exception as e:
             print(f"[ParakeetEngine] Inference error: {e}")
             return ""
@@ -380,18 +393,41 @@ class ParakeetTranscriber:
     _CHUNK_SECONDS = 60.0     # split very long clips (encoder attention is O(n^2))
     _CHUNK_SEARCH = 15.0      # search window for the quietest split point
 
-    def _recognize_long(self, audio: np.ndarray) -> str:
+    def _recognize(self, audio: np.ndarray, conf_out: Optional[list]) -> str:
+        """One model pass. With `conf_out` it goes through the timestamped
+        adapter, which is the SAME decode plus one log-softmax per emitted
+        token (microseconds on a whole dictation) — so asking for confidence
+        never costs stop latency. Any failure there latches `_ts_failed` and
+        falls back to the plain call for the rest of the session."""
+        if conf_out is None or self._ts_failed:
+            return str(self._model.recognize(audio) or "")
+        try:
+            if self._ts_model is None:
+                self._ts_model = self._model.with_timestamps()
+            res = self._ts_model.recognize(audio)
+            import phrase_learning
+            conf_out.extend(
+                phrase_learning.words_from_tokens(res.tokens, res.logprobs))
+            return str(res.text or "")
+        except Exception as e:
+            print(f"[ParakeetEngine] Confidence unavailable ({e}) — text only.")
+            self._ts_failed = True
+            self._ts_model = None
+            return str(self._model.recognize(audio) or "")
+
+    def _recognize_long(self, audio: np.ndarray,
+                        conf_out: Optional[list] = None) -> str:
         rate = _MODEL_SAMPLE_RATE
         max_len = int(self._CHUNK_SECONDS * rate)
         if len(audio) <= max_len:
-            return str(self._model.recognize(audio) or "")
+            return self._recognize(audio, conf_out)
 
         parts = []
         pos = 0
         while pos < len(audio):
             remaining = audio[pos:]
             if len(remaining) <= max_len:
-                parts.append(str(self._model.recognize(remaining) or ""))
+                parts.append(self._recognize(remaining, conf_out))
                 break
             # Split at the quietest 200ms window inside the last _CHUNK_SEARCH
             # seconds of the chunk, so we never cut mid-word.
@@ -405,7 +441,7 @@ class ParakeetTranscriber:
             ]
             best = int(np.argmin(energies))
             split = search_start + best * win + win // 2
-            parts.append(str(self._model.recognize(remaining[:split]) or ""))
+            parts.append(self._recognize(remaining[:split], conf_out))
             pos += split
         return " ".join(p.strip() for p in parts if p.strip())
 

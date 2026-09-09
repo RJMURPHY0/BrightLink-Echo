@@ -130,7 +130,7 @@ class Transcriber:
 
     def transcribe(
         self, audio: np.ndarray, sample_rate: int = 16000, blocking: bool = True,
-        context_words: str = "", hotwords_str: str = "",
+        context_words: str = "", hotwords_str: str = "", conf_out=None,
     ) -> str:
         """
         Transcribe audio to text.
@@ -140,6 +140,11 @@ class Transcriber:
                       already running (used by the streaming preview loop).
             context_words: Recent transcription words to include in initial_prompt.
             hotwords_str: Comma-separated terms to boost via Whisper hotwords param.
+            conf_out: Optional list the engine appends (word, confidence) pairs
+                      to — see the Parakeet engine's own conf_out. Whisper has no
+                      per-word probability, so every word in a segment carries
+                      that segment's avg_logprob: coarser than Parakeet's, and
+                      still a real measure of how sure the model was.
         """
         if self._model is None:
             self.load_model()
@@ -158,12 +163,14 @@ class Transcriber:
         if not acquired:
             return ""  # streaming preview bails out rather than queuing
         try:
-            return self._run(audio, sample_rate, context_words=context_words, hotwords_str=hotwords_str)
+            return self._run(audio, sample_rate, context_words=context_words,
+                             hotwords_str=hotwords_str, conf_out=conf_out)
         finally:
             self._transcribe_lock.release()
 
     def _run(self, audio: np.ndarray, _sample_rate: int,
-             context_words: str = "", hotwords_str: str = "") -> str:
+             context_words: str = "", hotwords_str: str = "",
+             conf_out=None) -> str:
         is_en_model = self.model_size.endswith(".en")
         base_prompt = "Professional business conversation. Clear dictation."
         # Custom vocabulary is passed via the dedicated `hotwords=` param below;
@@ -193,6 +200,20 @@ class Transcriber:
             hotwords=hotwords_str or None,
         )
 
+        segments = list(segments)
+        if conf_out is not None:
+            try:
+                import math
+
+                import phrase_learning
+                for seg in segments:
+                    p = math.exp(float(getattr(seg, "avg_logprob", 0.0) or 0.0))
+                    for raw in (seg.text or "").split():
+                        w = phrase_learning.normalise_word(raw)
+                        if w:
+                            conf_out.append((w, p))
+            except Exception as exc:
+                print(f"[Transcriber] Confidence unavailable (non-fatal): {exc}")
         text = "".join(s.text for s in segments)
         text = self._post_process(text)
         # Prompt-echo guard: on unclear audio whisper sometimes emits part of

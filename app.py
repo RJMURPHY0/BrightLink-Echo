@@ -48,7 +48,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.6.76"
+APP_VERSION = "1.6.77"
 
 
 class _RECT(ctypes.Structure):
@@ -215,6 +215,11 @@ class WhisperFlowApp:
         # The vocab editor's "Suggest mishearings" button uses the refiner (same
         # object throughout, so live key changes are picked up without re-setting).
         self.app_window.set_ai_refiner(self.ai_refiner)
+        # The Phrases page reads and edits the SAME store the dictation path
+        # writes to. A provider rather than the object, because the store is
+        # rebuilt when the signed-in account changes and a handed-over
+        # reference would go on showing the previous person's phrases.
+        self.app_window.set_phrase_provider(self._phrases)
 
         self.feedback = Feedback(
             sound_enabled=config.sound_feedback,
@@ -279,6 +284,11 @@ class WhisperFlowApp:
         # string invents terms that were never in the CRM.
         self._estate_vocab = ""
         self._estate_terms: list = []
+        # Learned phrases (phrase_learning). Built lazily per signed-in account
+        # and rebuilt when the account changes, because these are one person's
+        # speech habits and must never leak to whoever signs in next.
+        self._phrase_store = None
+        self._phrase_store_key = None
         # Model change requested while recording — applied when idle again
         self._pending_model_change: str | None = None
         # Auto-update: restart only after a stretch of inactivity. Seeded with
@@ -1419,6 +1429,10 @@ class WhisperFlowApp:
         seq = self._dictation_seq
 
         transcribed_text: str = ""
+        # The recogniser's own (word, confidence) record for this dictation.
+        # Empty is a valid state (whisper preview paths, a build with no
+        # log-prob support), and every phrase-learning gate fails closed on it.
+        _conf: list = []
         hwnd = self._recording_hwnd
         upgrading = False
         final_audio = None
@@ -1492,6 +1506,7 @@ class WhisperFlowApp:
                         self.hotkey_manager.set_idle()
                         return
                 transcribed_text = text
+                _conf = session.confidence
                 # Upgrade = LLM context-fix only. Parakeet already beats the
                 # local whisper models on English accuracy, so a whisper
                 # re-pass would usually be a downgrade — skip it.
@@ -1536,7 +1551,8 @@ class WhisperFlowApp:
                     f"[App] Transcribing {len(final_audio) / capture_rate:.1f}s of audio at {capture_rate} Hz..."
                 )
                 fast_text = self.fast_transcriber.transcribe(
-                    final_audio, capture_rate, context_words=_ctx, hotwords_str=_hw).strip()
+                    final_audio, capture_rate, context_words=_ctx,
+                    hotwords_str=_hw, conf_out=_conf).strip()
                 if fast_text:
                     transcribed_text = fast_text
                     upgrading = True
@@ -1558,8 +1574,13 @@ class WhisperFlowApp:
                                 len(final_audio) / capture_rate, peak):
                             self.feedback.error_occurred("No speech detected")
                         return
+                    # The fast pass left its own words in _conf; this is a
+                    # different decode of the same audio, so start clean rather
+                    # than align the final text against two overlapping records.
+                    del _conf[:]
                     text = self.transcriber.transcribe(
-                        final_audio, capture_rate, context_words=_ctx, hotwords_str=_hw).strip()
+                        final_audio, capture_rate, context_words=_ctx,
+                        hotwords_str=_hw, conf_out=_conf).strip()
                     if not text:
                         print("[App] Empty transcription result.")
                         if audio_writer is not None:
@@ -1611,7 +1632,7 @@ class WhisperFlowApp:
         # single post-processing point, for the same reason. Vocabulary first,
         # so a corrected term can complete a snippet trigger ("pipe drive link"
         # -> "Pipedrive link" -> the URL) but never the reverse.
-        transcribed_text = self._apply_user_libraries(transcribed_text)
+        transcribed_text = self._apply_user_libraries(transcribed_text, _conf)
 
         # ── Injection — isolated so a failure never prevents the popup ──────────
         # Whole block in try/finally: even if focus/release/inject/feedback throw,
@@ -2103,9 +2124,35 @@ class WhisperFlowApp:
             print(f"[App] {kind} load failed (non-fatal): {exc}")
             return []
 
-    def _apply_user_libraries(self, text: str) -> str:
+    def _phrases(self):
+        """This account's learned-phrase store, or None when the feature is off
+        or the store cannot be opened. Rebuilt on an account change."""
+        if not getattr(self.config, "learned_phrases", True):
+            return None
+        try:
+            key = (self._account_email() or "").strip().lower()
+        except Exception:
+            return None     # auth not up yet — the caller is on the dictation
+                            # path and must never raise for a missing store
+        if self._phrase_store is not None and self._phrase_store_key == key:
+            return self._phrase_store
+        try:
+            import phrase_learning
+            self._phrase_store = phrase_learning.PhraseStore(key)
+            self._phrase_store_key = key
+        except Exception as exc:
+            print(f"[App] Phrase store unavailable (non-fatal): {exc}")
+            self._phrase_store = None
+            self._phrase_store_key = None
+        return self._phrase_store
+
+    def _apply_user_libraries(self, text: str, conf=None) -> str:
         """Vocabulary corrections then snippet expansion. Never raises: a bad
-        entry must degrade to the raw transcript, never lose the dictation."""
+        entry must degrade to the raw transcript, never lose the dictation.
+
+        `conf` is the recogniser's own (word, confidence) record for this
+        dictation. It drives phrase_learning only — nothing else here reads it,
+        and its absence costs a dictation's worth of learning, never the text."""
         if not text:
             return text
         try:
@@ -2125,6 +2172,30 @@ class WhisperFlowApp:
                 # and keeps the first spelling it sees, so a hand-typed term
                 # always beats a managed one that collides with it.
                 fixed = apply_vocabulary_fuzzy(fixed, vocab + self._managed_entries())
+            # Phrases this user actually repeats: rescue the spans the engine
+            # itself was unsure about, then learn from what is left. Learning
+            # runs on the CORRECTED text and BEFORE snippets — a snippet body is
+            # text the user typed once, not something they say, and counting it
+            # would teach the app its own output.
+            # Its own try/except, not the outer one: a bug in the newest pass
+            # here must not cost the user the vocabulary corrections that
+            # already ran above.
+            try:
+                store = self._phrases()
+                if store is not None:
+                    import phrase_learning
+                    word_conf = phrase_learning.align(fixed, conf)
+                    rescued = phrase_learning.apply_learned_phrases(
+                        fixed, store.phrases(), word_conf)
+                    if rescued != fixed:
+                        print(f"[App] Learned phrases: '{fixed}' -> '{rescued}'")
+                        word_conf = phrase_learning.align(rescued, conf)
+                        fixed = rescued
+                    learned = store.observe(fixed, word_conf)
+                    if learned:
+                        print(f"[App] Phrases learned: {learned}")
+            except Exception as exc:
+                print(f"[App] Learned phrases failed (non-fatal): {exc}")
             fixed = apply_snippets(fixed, self._user_entries("snippets"))
         except Exception as exc:
             print(f"[App] User libraries failed (non-fatal): {exc}")
@@ -2215,8 +2286,22 @@ class WhisperFlowApp:
         and the echo guard in `transcriber._run` covers the residual risk.
         Managed terms lose nothing by leaving — they still reach Parakeet's
         casing pass above, and the phonetic corrector in `_apply_user_libraries`
-        is where they do their real work, correcting only spans that exist."""
-        return self._own_hotwords()
+        is where they do their real work, correcting only spans that exist.
+
+        Learned phrases join the user's own terms for the same reason: they are
+        by construction things this person has said, repeatedly and clearly, so
+        biasing towards them is biasing towards the truth. Capped (see
+        phrase_learning.MAX_HOTWORDS) so the prompt stays small."""
+        own = self._own_hotwords()
+        store = self._phrases()
+        if store is None:
+            return own
+        try:
+            import phrase_learning
+            learned = phrase_learning.hotwords(store.phrases())
+        except Exception:
+            return own
+        return ", ".join(p for p in (own, learned) if p)
 
     def _load_estate_vocab(self) -> None:
         """Names the user actually dictates — their CRM contacts and companies

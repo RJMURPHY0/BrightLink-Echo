@@ -2470,10 +2470,12 @@ class AppWindow:
         # Sub-pages of Settings, not tabs — no entry in the tab bar.
         self._vocabulary_frame = tk.Frame(self._dash_content, bg=C["bg"])
         self._snippets_frame   = tk.Frame(self._dash_content, bg=C["bg"])
+        self._phrases_frame    = tk.Frame(self._dash_content, bg=C["bg"])
 
         for f in (self._home_frame, self._hotkey_frame,
                   self._history_frame, self._settings_frame,
-                  self._vocabulary_frame, self._snippets_frame):
+                  self._vocabulary_frame, self._snippets_frame,
+                  self._phrases_frame):
             f.grid(row=0, column=0, sticky="nsew")
 
         self._build_home_tab(self._home_frame)
@@ -2482,6 +2484,7 @@ class AppWindow:
         self._build_settings_tab(self._settings_frame)
         self._build_library_page(self._vocabulary_frame, "vocabulary")
         self._build_library_page(self._snippets_frame, "snippets")
+        self._build_phrases_page(self._phrases_frame)
 
         # Route wheel input exactly once. The previous local + bind_all Hotkey
         # bindings handled the same event twice when the pointer was over Canvas.
@@ -2557,6 +2560,7 @@ class AppWindow:
             "settings": self._settings_frame,
             "vocabulary": self._vocabulary_frame,
             "snippets": self._snippets_frame,
+            "phrases": self._phrases_frame,
         }
 
         # Arriving at a library page shows what is there NOW: a sync may have
@@ -2566,6 +2570,11 @@ class AppWindow:
             st = self._lib_state(name)
             st["editing"] = None
             st["error"] = ""
+
+        # Same reason: phrases are learned in the background, so the list on
+        # arrival must be what the store holds NOW, not what it held last visit.
+        if name == "phrases":
+            self._render_phrases()
 
         # Map/unmap, not just a z-order raise: an unmapped window has NO
         # pixels on screen, so a hidden tab structurally cannot bleed through
@@ -6917,6 +6926,15 @@ class AppWindow:
         _link_card("snippets", "Snippets",
                    "Say a short phrase and it expands into a full block of "
                    "text: an address, a sign-off, a standard paragraph", "wand")
+        _link_card("phrases", "Phrases You Say Often",
+                   "Learned automatically from your own dictation, and used to "
+                   "fix the ones it mishears next time", "mic")
+
+        _toggle_card("learned_phrases", "Learn My Phrases",
+                     "Remember the phrases you repeat and use them to correct "
+                     "the words the app is unsure about. Learns only from what "
+                     "it heard clearly, and only corrects what it heard badly. "
+                     "Stays on this computer.", True, icon="mic")
 
         # Sentence endings — a three-way choice, not the old boolean. The
         # toggle governed the terminal full stop AND the pause-artefact repair,
@@ -7122,14 +7140,25 @@ class AppWindow:
         vt_desc.pack(fill="x")
         self._autowrap(vt_desc)
 
+        # Status and button on SEPARATE rows. Side by side they need the
+        # status sentence and the button label to fit one ~290px card between
+        # them, which they never did — the button ran off the right edge and
+        # its label was cut in half ("Import my past"). Stacked, both are
+        # whole at any window width, and the status can wrap like every other
+        # description on this page.
         vt_actions = tk.Frame(vt_card, bg=C["surface"])
         vt_actions.pack(fill="x", pady=(8, 0))
         self._voice_status = tk.Label(vt_actions, text="Checking…",
                                       fg=C["subtext"], bg=C["surface"],
-                                      font=("Segoe UI", 8), anchor="w")
-        self._voice_status.pack(side="left", fill="x", expand=True)
+                                      font=("Segoe UI", 8), anchor="w",
+                                      justify="left")
+        self._voice_status.pack(fill="x")
+        self._autowrap(self._voice_status)
+
+        vt_btn_row = tk.Frame(vt_card, bg=C["surface"])
+        vt_btn_row.pack(fill="x", pady=(8, 0))
         self._voice_import_btn = self._surface_btn(
-            vt_actions, "Import my past dictations", self._on_voice_backfill)
+            vt_btn_row, "Import my past dictations", self._on_voice_backfill)
         self._voice_import_btn.pack(side="right")
 
         # ── Save button ───────────────────────────────────────────────────────
@@ -7876,10 +7905,233 @@ class AppWindow:
     def _refresh_library_counts(self) -> None:
         """Update the Settings rows' "12 words" summaries after an edit."""
         for kind, lbl in getattr(self, "_lib_count_labels", {}).items():
-            singular, plural = self._LIB_SPECS[kind]["unit"]
-            n = len(self._lib_entries(kind))
+            if kind == "phrases":
+                n = len(self._phrase_rows())
+                unit = "phrase" if n == 1 else "phrases"
+            else:
+                singular, plural = self._LIB_SPECS[kind]["unit"]
+                n = len(self._lib_entries(kind))
+                unit = singular if n == 1 else plural
             try:
-                lbl.configure(text=f"{n} {singular if n == 1 else plural}")
+                lbl.configure(text=f"{n} {unit}")
+            except tk.TclError:
+                pass
+
+    # ── Phrases you say often ───────────────────────
+    #
+    # A read-only library: nothing here was typed, so there is nothing to edit.
+    # A phrase is either right (leave it) or wrong (forget it), which is why the
+    # row carries a Forget action instead of opening an editor. The store is the
+    # APP's, handed over by set_phrase_provider — building a second one against
+    # the same file would mean a phrase forgotten here climbed straight back over
+    # the threshold from the copy still in memory.
+
+    def set_phrase_provider(self, provider) -> None:
+        """`provider()` returns the live phrase_learning.PhraseStore, or None
+        when the feature is off / the store could not be opened."""
+        self._phrase_provider = provider
+
+    def _phrase_store(self):
+        provider = getattr(self, "_phrase_provider", None)
+        if provider is None:
+            return None
+        try:
+            return provider()
+        except Exception as exc:
+            print(f"[UI] phrase store unavailable (non-fatal): {exc}")
+            return None
+
+    def _phrase_rows(self) -> list:
+        store = self._phrase_store()
+        if store is None:
+            return []
+        try:
+            return store.phrases()
+        except Exception as exc:
+            print(f"[UI] phrase list failed (non-fatal): {exc}")
+            return []
+
+    def _build_phrases_page(self, parent: tk.Frame) -> None:
+        state = self._lib_state("phrases")
+
+        head = tk.Frame(parent, bg=C["bg"])
+        head.pack(fill="x", padx=20, pady=(0, 4))
+        back = tk.Label(head, text="‹  Back", fg=C["subtext"], bg=C["bg"],
+                        font=("Segoe UI", 10), cursor="hand2")
+        back.pack(side="left")
+        back.bind("<Button-1>", lambda _e: self._switch_dash_tab("settings"))
+        back.bind("<Enter>", lambda _e: back.configure(fg=C["accent"]))
+        back.bind("<Leave>", lambda _e: back.configure(fg=C["subtext"]))
+        tk.Label(head, text="Phrases You Say Often", fg=C["text"], bg=C["bg"],
+                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=(14, 0))
+        state["count_lbl"] = tk.Label(head, text="", fg=C["subtext"], bg=C["bg"],
+                                      font=("Segoe UI", 9))
+        state["count_lbl"].pack(side="right")
+
+        blurb = tk.Label(
+            parent,
+            text=("Picked up from your own dictation — nothing to type. A "
+                  "phrase you repeat, always heard clearly, is remembered and "
+                  "then used to fix the times it comes out wrong. Kept on this "
+                  "computer only."),
+            fg=C["subtext"], bg=C["bg"], font=("Segoe UI", 8), anchor="w",
+            justify="left")
+        blurb.pack(fill="x", padx=20, pady=(0, 8))
+        self._autowrap(blurb)
+
+        tools = tk.Frame(parent, bg=C["bg"])
+        tools.pack(fill="x", pady=(0, 2))
+        forget_holder = tk.Frame(tools, bg=C["bg"])
+        forget_holder.pack(side="right", padx=(0, 20))
+        state["forget_all"] = self._surface_btn(
+            forget_holder, "Forget all", self._phrases_forget_all,
+            font=("Segoe UI", 9))
+        state["forget_all"].pack()
+
+        search_holder = tk.Frame(tools, bg=C["bg"])
+        search_holder.pack(side="left", fill="x", expand=True)
+
+        def _on_query(q: str) -> None:
+            state["query"] = q
+            self._render_phrases()
+
+        state["search"] = self._search_bar(
+            search_holder, "Search phrases…", _on_query, padx=(20, 10),
+            pady=(0, 8))
+
+        body = tk.Frame(parent, bg=C["bg"])
+        body.pack(fill="both", expand=True)
+        pane = ScrollPane(body, bg=C["bg"])
+        bar = ModernScrollbar(
+            body, command=lambda *a: self._scrollbar_command(pane, *a))
+        pane.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        pane.pack(side="left", fill="both", expand=True)
+        state["pane"] = pane
+        state["list"] = pane.content
+        self._render_phrases()
+
+    def _render_phrases(self) -> None:
+        state = self._lib_state("phrases")
+        holder = state.get("list")
+        if holder is None:
+            return
+
+        def _draw():
+            for child in holder.winfo_children():
+                child.destroy()
+            rows = self._phrase_rows()
+            n = len(rows)
+            if state.get("count_lbl") is not None:
+                state["count_lbl"].configure(
+                    text=f"{n} phrase" + ("" if n == 1 else "s"))
+            query = state.get("query", "")
+            shown = [r for r in rows
+                     if not query or query in (r.get("phrase") or "").lower()]
+            if not rows:
+                self._draw_phrases_empty(holder)
+                return
+            if not shown:
+                tk.Label(holder, text="No matches", fg=C["subtext"], bg=C["bg"],
+                         font=("Segoe UI", 9)).pack(pady=24)
+            for row in shown:
+                self._draw_phrase_row(holder, row)
+
+        self._atomic_ui(_draw)
+
+    def _draw_phrases_empty(self, holder: tk.Frame) -> None:
+        wrap = tk.Frame(holder, bg=C["bg"])
+        wrap.pack(fill="x", pady=(40, 0))
+        try:
+            import ui_render
+            ph = ui_render.icon_glyph(wrap, "mic", 34, C["border"], bg=C["bg"])
+            if ph is not None:
+                lbl = tk.Label(wrap, image=ph, bg=C["bg"])
+                lbl.image = ph
+                lbl.pack(pady=(0, 10))
+        except Exception:
+            pass
+        on = bool(getattr(self._config, "learned_phrases", True))
+        tk.Label(wrap, text="Nothing learned yet" if on else "Learning is off",
+                 fg=C["text"], bg=C["bg"],
+                 font=("Segoe UI", 11, "bold")).pack()
+        sub = tk.Label(
+            wrap,
+            text=("Keep dictating. A phrase appears here once you have said it "
+                  "a few times and the app heard it clearly every time."
+                  if on else
+                  "Turn Learn My Phrases back on in Settings and the app will "
+                  "start picking up the phrases you repeat."),
+            fg=C["subtext"], bg=C["bg"], font=("Segoe UI", 9), justify="center")
+        sub.pack(pady=(4, 14), padx=30, fill="x")
+        self._autowrap(sub)
+
+    def _draw_phrase_row(self, holder: tk.Frame, row: dict) -> None:
+        phrase = row.get("phrase") or ""
+        said = int(row.get("count") or 0)
+        card = self._card(holder, margin=(0, 4), inner_pad=(16, 12))
+        line = tk.Frame(card, bg=C["surface"])
+        line.pack(fill="x")
+
+        col = tk.Frame(line, bg=C["surface"])
+        col.pack(side="left", fill="x", expand=True)
+        tk.Label(col, text=phrase, fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 10), anchor="w").pack(anchor="w")
+        tk.Label(col, text="said " + str(said) + (" time" if said == 1 else " times"),
+                 fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 8),
+                 anchor="w").pack(anchor="w", pady=(1, 0))
+
+        forget = tk.Label(line, text="Forget", fg=C["subtext"], bg=C["surface"],
+                          font=("Segoe UI", 9), cursor="hand2")
+        forget.pack(side="right", padx=(8, 0))
+        forget.bind("<Button-1>", lambda _e, p=phrase: self._phrases_forget(p))
+        forget.bind("<Enter>", lambda _e: forget.configure(fg=C["error"]))
+        forget.bind("<Leave>", lambda _e: forget.configure(fg=C["subtext"]))
+
+    def _phrases_forget(self, phrase: str) -> None:
+        store = self._phrase_store()
+        if store is None:
+            return
+        try:
+            store.forget(phrase)
+        except Exception as exc:
+            print(f"[UI] forget phrase failed (non-fatal): {exc}")
+        self._render_phrases()
+        self._refresh_library_counts()
+
+    def _phrases_forget_all(self) -> None:
+        """Two-step, in the button itself — this throws away weeks of learning
+        and there is no undo, so it must not be one stray click away."""
+        state = self._lib_state("phrases")
+        btn = state.get("forget_all")
+        if btn is None:
+            return
+        if not state.get("confirm_all"):
+            state["confirm_all"] = True
+            try:
+                btn.configure(text="Sure?", fg=C["error"])
+            except tk.TclError:
+                pass
+            if self._root:
+                self._root.after(4000, self._phrases_forget_reset)
+            return
+        self._phrases_forget_reset()
+        store = self._phrase_store()
+        if store is not None:
+            try:
+                store.clear()
+            except Exception as exc:
+                print(f"[UI] clear phrases failed (non-fatal): {exc}")
+        self._render_phrases()
+        self._refresh_library_counts()
+
+    def _phrases_forget_reset(self) -> None:
+        state = self._lib_state("phrases")
+        state["confirm_all"] = False
+        btn = state.get("forget_all")
+        if btn is not None:
+            try:
+                btn.configure(text="Forget all", fg=C["text"])
             except tk.TclError:
                 pass
 

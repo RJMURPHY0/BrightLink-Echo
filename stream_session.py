@@ -98,6 +98,12 @@ class StreamingSession:
         self._carry_quiet = 0.0
 
         self._committed_texts: list[str] = []
+        # (word, confidence) for every KEPT pass, in spoken order — committed
+        # chunks then the tail, which is exactly the order the final text is
+        # assembled in. Caption hypotheses are excluded on purpose: they are
+        # thrown away, and folding them in would repeat words and break the
+        # alignment phrase_learning does against the finished transcript.
+        self._conf: list = []
         self._committed_sample = 0     # absolute sample position of the commit frontier
         self._prev_hyp_words: list[str] = []  # last caption hypothesis (for agreement)
         self._stop_event = threading.Event()
@@ -308,6 +314,7 @@ class StreamingSession:
                 context_words=base_ctx,
                 hotwords_str=self._hotwords,
                 finalize_text=False,
+                conf_out=self._conf,
             ).strip()
             return [(text, False)]
         splits, lead_q, trail_q = self._quiet_profile(chunk, rate)
@@ -334,6 +341,7 @@ class StreamingSession:
                 context_words=ctx,
                 hotwords_str=self._hotwords,
                 finalize_text=False,
+                conf_out=self._conf,
             ).strip()
             if not text:
                 continue
@@ -568,6 +576,13 @@ class StreamingSession:
         t = self._thread
         if t is not None and t.is_alive():
             t.join(timeout=1.0)
+
+    @property
+    def confidence(self) -> list:
+        """The recogniser's own (word, confidence) pairs for this dictation, in
+        spoken order. Empty when the engine could not supply them, which makes
+        every phrase-learning gate fail closed."""
+        return list(self._conf)
 
     @property
     def committed_text(self) -> str:
