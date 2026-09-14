@@ -296,8 +296,13 @@ Log "Done."
     # updates never applied. CREATE_NO_WINDOW alone gives the child its own
     # hidden console, and children outlive their parent by default on Windows.
     flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+    # env: the script's Start-Process hands ITS environment to the new exe. Ours
+    # carries this process's PyInstaller bootloader variables, and a new exe
+    # that inherits them skips unpacking and runs on OUR old native libraries —
+    # which is how v1.6.79 lost every dictation (see pyi_runtime). NEVER drop it.
+    import pyi_runtime
     std = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-               stderr=subprocess.DEVNULL)
+               stderr=subprocess.DEVNULL, env=pyi_runtime.clean_launch_env())
     try:
         # Break out of any job object (Task Scheduler wraps the logon-task app
         # in one) so the swap script can't be reaped when the task's process

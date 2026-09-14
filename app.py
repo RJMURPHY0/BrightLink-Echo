@@ -30,6 +30,16 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+# BEFORE every project import: a frozen process started with another process's
+# bootloader environment is running on that process's unpacked native
+# libraries. Relaunch on our own (see pyi_runtime — v1.6.79 lost every
+# dictation to exactly this after an auto-update).
+if getattr(sys, "frozen", False) and sys.platform == "win32":
+    import pyi_runtime
+    pyi_runtime.relaunch_if_foreign_runtime(log_path=os.path.join(
+        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+        "FTC Whisper", "startup-error.log"))
+
 from config import Config
 # Recorder / Transcriber / asr_engine / StreamingSession / Injector / TrayApp
 # are deliberately NOT imported here: between them they pull in numpy,
@@ -49,7 +59,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.6.79"
+APP_VERSION = "1.6.80"
 
 
 class _RECT(ctypes.Structure):
@@ -3491,10 +3501,14 @@ def _handoff_to_canonical_if_newer() -> None:
         return
     try:
         import subprocess
+        import pyi_runtime
+        # Clean environment: inheriting our bootloader variables would start
+        # the installed exe on THIS copy's unpacked libraries.
         subprocess.Popen(
             [target] + sys.argv[1:],
             cwd=os.path.dirname(target),
             close_fds=True,
+            env=pyi_runtime.clean_launch_env(),
         )
         print(f"[App] This copy is v{'.'.join(map(str, cur_v))}; handing off to "
               f"installed v{'.'.join(map(str, tgt_v))} at {target}.")
@@ -3819,7 +3833,54 @@ def main() -> None:
         raise
 
 
+def _selftest(args: list) -> int:
+    """`FTC Whisper.exe --selftest <wav> <report.json>`: prove the PACKAGED
+    engine works without a microphone, a hotkey or the UI.
+
+    Unit tests run from source and cannot see the frozen bundle. v1.6.79
+    passed every test and still transcribed nothing on a real install, because
+    the exe was running on another build's native libraries. This loads the
+    real Parakeet model through the bundle's onnxruntime, runs the Silero gate
+    and one transcription, and writes what happened. Exit 0 only when words
+    came back. Touches no config, no mutex and no registration."""
+    import json
+    report: dict = {"version": APP_VERSION,
+                    "meipass": getattr(sys, "_MEIPASS", ""),
+                    "frozen": bool(getattr(sys, "frozen", False))}
+    code = 1
+    out = args[1] if len(args) > 1 else ""
+    try:
+        import pyi_runtime
+        report["foreign_runtime"] = pyi_runtime.running_on_foreign_runtime()
+        import onnxruntime
+        report["onnxruntime"] = onnxruntime.__version__
+        import audio_store
+        from asr_engine import ParakeetTranscriber
+        audio, rate = audio_store.read(args[0])
+        report["seconds"] = round(len(audio) / float(rate or 1), 2)
+        eng = ParakeetTranscriber(auto_punctuate=True, end_punctuation="smart")
+        report["model_loaded"] = bool(eng.load_model())
+        t0 = time.time()
+        text = eng.transcribe(audio, rate)
+        report["elapsed"] = round(time.time() - t0, 2)
+        report["vad_ok"] = not getattr(eng, "_vad_failed", True)
+        report["text"] = text
+        code = 0 if (text and report["vad_ok"]) else 1
+    except BaseException as e:
+        report["error"] = f"{type(e).__name__}: {e}"
+    report["passed"] = code == 0
+    try:
+        if out:
+            with open(out, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+    except Exception:
+        pass
+    return code
+
+
 def _main() -> None:
+    if len(sys.argv) >= 3 and sys.argv[1] == "--selftest":
+        os._exit(_selftest(sys.argv[2:]))
     if sys.platform == "win32":
         # BEFORE anything else, including the mutex and the version handoff.
         # This is the UninstallString Windows runs from Installed apps, and the

@@ -73,10 +73,14 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-          cache-dependency-glob: "requirements.txt"
+          cache-dependency-glob: |
+            requirements.txt
+            constraints.txt
 
+      # -c constraints.txt pins every package (PyInstaller included) to a build
+      # proven in use. Unpinned, v1.6.79 silently took onnxruntime 1.30.0.
       - name: Install dependencies
-        run: uv pip install --system -r requirements.txt pyinstaller
+        run: uv pip install --system -r requirements.txt pyinstaller -c constraints.txt
 
       - name: Prepare build-time config (no secrets)
         shell: pwsh
