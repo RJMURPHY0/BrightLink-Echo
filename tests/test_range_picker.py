@@ -175,6 +175,112 @@ class PickerTests(unittest.TestCase):
         self.assertGreater(self.p._natural_width(), narrow)
 
 
+class _FakeWindow:
+    def __init__(self, top, height):
+        self._top, self._height = top, height
+
+    def winfo_rooty(self):
+        return self._top
+
+    def winfo_height(self):
+        return self._height
+
+
+class PlacementTests(unittest.TestCase):
+    """One way out. Reported with screenshots: Periods opened one way, From / to
+    another, and switching back to Periods left the short list floating where
+    the tall panel's top had been. The side is now chosen once per open from
+    the tallest tab, and the edge next to the control stays glued to it."""
+
+    MONITOR = (0, 0, 1280, 752)         # Ryan's laptop work area
+
+    def setUp(self):
+        import app_window
+        self.root = _shared_root()
+        self.host = tk.Frame(self.root, bg=C["bg"])
+        self.host.pack()
+        self.addCleanup(self.host.destroy)
+        self.var = tk.StringVar(value="All time")
+        self.p = RangePicker(self.host, self.var, _LABELS, bg=C["surface"])
+        self.p.pack()
+        self.root.update_idletasks()
+        saved = app_window._monitor_work_area
+        app_window._monitor_work_area = lambda _w: self.MONITOR
+        self.addCleanup(lambda: setattr(app_window, "_monitor_work_area", saved))
+        self.addCleanup(self.p.close)
+
+    def place(self, ctl_top, win_top=60, win_height=658, ctl_left=120):
+        self.p.winfo_rooty = lambda: ctl_top
+        self.p.winfo_rootx = lambda: ctl_left
+        self.p.winfo_height = lambda: 28
+        self.p.winfo_toplevel = lambda: _FakeWindow(win_top, win_height)
+
+    def tall(self):
+        return max(self.p._panel_height("periods"),
+                   self.p._panel_height("custom"))
+
+    def test_a_control_low_in_the_window_opens_above(self):
+        self.place(ctl_top=560)
+        self.assertTrue(self.p._opens_above(0, 752))
+
+    def test_a_control_high_in_the_window_opens_below(self):
+        self.place(ctl_top=140)
+        self.assertFalse(self.p._opens_above(0, 752))
+
+    def test_the_open_tab_never_changes_the_side(self):
+        # Short Periods fits below this control, tall From / to does not: the
+        # old picker dropped Periods DOWN and raised From / to UP.
+        self.place(ctl_top=420, win_top=0)
+        sides = set()
+        for tab in ("periods", "custom"):
+            self.p._tab = tab
+            sides.add(self.p._opens_above(0, 752))
+        self.assertEqual(sides, {True})
+
+    def test_the_monitor_overrides_when_the_tall_tab_cannot_fit(self):
+        # Window dragged up off the top of the screen: the control is low in
+        # the window, but there is no room above it on the monitor.
+        self.place(ctl_top=200, win_top=-400, win_height=658)
+        self.assertLess(200 - 4 - self.tall(), 8)
+        self.assertFalse(self.p._opens_above(0, 752))
+
+    def test_switching_tabs_keeps_the_bottom_edge_on_the_control(self):
+        self.place(ctl_top=560)
+        self.p._menu_above = True
+        edges = set()
+        for tab in ("periods", "custom", "periods"):
+            h = self.p._panel_height(tab)
+            x, y = self.p._panel_xy(306, h)
+            edges.add((x, y + h))
+        self.assertEqual(edges, {(120, 556)})
+
+    def test_switching_tabs_keeps_the_top_edge_on_the_control(self):
+        self.place(ctl_top=140)
+        self.p._menu_above = False
+        edges = {self.p._panel_xy(306, self.p._panel_height(tab))[1]
+                 for tab in ("periods", "custom")}
+        self.assertEqual(edges, {140 + 28 + 4})
+
+    def test_open_and_tab_switches_stay_anchored(self):
+        self.place(ctl_top=560)
+        self.p._tab = "periods"
+        self.p.open()
+        self.assertIsNotNone(self.p._menu)
+
+        def bottom():
+            geo = self.p._menu.geometry()          # "WxH+X+Y"
+            size, x, y = geo.split("+")
+            return int(y) + int(size.split("x")[1])
+
+        self.root.update_idletasks()
+        first = bottom()
+        self.assertEqual(first, 556)
+        self.p._set_tab("custom")
+        self.assertEqual(bottom(), first)
+        self.p._set_tab("periods")
+        self.assertEqual(bottom(), first)
+
+
 class StatsWindowTests(unittest.TestCase):
     """A custom span is a bounded window: it scopes the aggregates and, like
     the named windows, excludes the collapsed carry total."""

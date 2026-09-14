@@ -90,6 +90,14 @@ _KEYEVENTF_UNICODE = 0x0004
 _KEYEVENTF_KEYUP = 0x0002
 _WM_CHAR = 0x0102
 _VK_RETURN = 0x0D
+_VK_SHIFT = 0x10
+
+# How long the paste gate waits for the foreground to come back to the capture
+# target before refusing. The popup's own show-and-hand-focus-back (see
+# popup._show_no_activate) runs on the Tk thread and can land exactly as the
+# gate reads the foreground; refusing on that flicker dropped the dictation onto
+# the typed fallback. A real click into another window stays refused.
+_FOREGROUND_GRACE_SECS = 0.30
 
 # Window classes that use Chromium / Gecko rendering — prefer VK_PACKET
 BROWSER_CLASSES = frozenset(
@@ -523,25 +531,49 @@ def _post_wm_char(text: str, target_child: int = 0) -> tuple[int, int]:
     return posted, failed
 
 
+def _line_break_events() -> list:
+    """Shift+Enter: the key chord for a line break that SENDS nothing.
+
+    A unicode LF is ignored by web inputs, so a line break has to be a real key.
+    A bare Enter is the wrong one: in every chat composer (ChatGPT, Claude,
+    Teams, Slack, WhatsApp) Enter SENDS the message. A dictation with a
+    paragraph break that reached ChatGPT through this path was sent at the
+    break, and the rest of it was typed into the box after the send (v1.6.79).
+    Shift+Enter is a new line in those composers and in ordinary editors and
+    text boxes alike."""
+    return [
+        _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=_VK_SHIFT)),
+        _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=_VK_RETURN)),
+        _Input(type=_INPUT_KEYBOARD,
+               ki=_KbdInput(wVk=_VK_RETURN, dwFlags=_KEYEVENTF_KEYUP)),
+        _Input(type=_INPUT_KEYBOARD,
+               ki=_KbdInput(wVk=_VK_SHIFT, dwFlags=_KEYEVENTF_KEYUP)),
+    ]
+
+
 def _send_unicode(text: str) -> bool:
     """
     Inject via SendInput / KEYEVENTF_UNICODE (VK_PACKET) in one batched call.
     Used for browsers which don't process external WM_CHAR.
     Returns True if SendInput reported all events were sent.
     """
-    if not text:
-        return True
+    sent, total = _send_unicode_counted(text)
+    return sent == total
 
+
+def _send_unicode_counted(text: str) -> tuple[int, int]:
+    """_send_unicode, returning (events SendInput accepted, events built).
+
+    0 < sent < total is a PARTIAL send: those keystrokes are already on their
+    way to the app, so the caller must not re-send the text another way."""
+    if not text:
+        return 0, 0
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     events: list[_Input] = []
     for ch in text:
         if ch == "\n":
-            # Inject a real Enter keypress rather than a literal LF — web inputs
-            # and editors treat VK_RETURN as a newline but ignore a unicode \n.
-            events.append(_Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=_VK_RETURN)))
-            events.append(_Input(
-                type=_INPUT_KEYBOARD,
-                ki=_KbdInput(wVk=_VK_RETURN, dwFlags=_KEYEVENTF_KEYUP),
-            ))
+            events.extend(_line_break_events())
             continue
         code = ord(ch)
         if code > 0xFFFF:
@@ -581,7 +613,18 @@ def _send_unicode(text: str) -> bool:
 
     arr = (_Input * len(events))(*events)
     sent = ctypes.windll.user32.SendInput(len(events), arr, ctypes.sizeof(_Input))
-    return sent == len(events)
+    return int(sent or 0), len(events)
+
+
+def _await_foreground(u32, target: int, grace: float) -> int:
+    """Poll GetForegroundWindow for up to *grace* seconds until it is *target*.
+    Returns the last foreground seen."""
+    fg = u32.GetForegroundWindow()
+    deadline = time.monotonic() + grace
+    while fg != target and time.monotonic() < deadline:
+        time.sleep(0.015)
+        fg = u32.GetForegroundWindow()
+    return fg
 
 
 def _release_modifiers() -> None:
@@ -642,6 +685,9 @@ class Injector:
         # sets these, so its focus contract is untouched.
         self._target_hwnd = 0
         self._target_child = 0
+        # Why the last clipboard paste did not happen ("" when it did), for the
+        # fallback-to-typing log line.
+        self._paste_refusal = ""
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -807,6 +853,7 @@ class Injector:
             if self._clipboard_paste(text):
                 return True
             print("[Injector] Browser clipboard failed -> VK_PACKET fallback")
+            self._note_typed_fallback(text, cls)
             return self._direct_inject(text)
 
         # Native (non-browser) target with non-text on the clipboard (a screenshot
@@ -833,6 +880,7 @@ class Injector:
             if self._clipboard_paste(text):
                 return True
             print("[Injector] Clipboard mode fallback -> direct methods")
+            self._note_typed_fallback(text, cls)
             return self._direct_inject(text)
 
         if self.method == "keystrokes":
@@ -846,7 +894,18 @@ class Injector:
         if self._clipboard_paste(text):
             return True
         print("[Injector] Auto mode fallback -> direct methods")
+        self._note_typed_fallback(text, cls)
         return self._direct_inject(text)
+
+    def _note_typed_fallback(self, text: str, cls: str) -> None:
+        """The paste did not happen, so the dictation is about to be TYPED.
+        Record why in the local log. The frozen exe discards stdout, so without
+        this a "it typed my text in line by line and sent it early" report has
+        no way to say what refused the paste."""
+        _log_inject_failure(
+            f"fallback-to-typing: {self._paste_refusal or 'paste failed'} "
+            f"target={_get_fg_exe() or '?'} class={cls!r} chars={len(text)} "
+            f"line_breaks={text.count(chr(10))}")
 
     def _direct_inject(self, text: str) -> bool:
         cls = _get_fg_class()
@@ -859,8 +918,15 @@ class Injector:
 
         if _is_browser_class(cls):
             # Browsers: VK_PACKET via SendInput
-            ok = _send_unicode(text)
+            sent, total = _send_unicode_counted(text)
+            ok = sent == total
             method = "SendInput/VK_PACKET"
+            if not ok and sent > 0:
+                # Partial: those keystrokes are already queued for the app. A
+                # WM_CHAR re-send of the WHOLE text would type it twice.
+                self._partial_direct = True
+                print(f"[Injector] Partial SendInput ({sent}/{total}): not retrying to avoid duplicates")
+                return False
             if not ok:
                 posted, failed = _post_wm_char(text, self._target_child)
                 ok = posted > 0 and failed == 0
@@ -882,7 +948,10 @@ class Injector:
                     print("[Injector] Partial WM_CHAR injection — not retrying to avoid duplicates")
                     return False
                 # Nothing landed at all — safe to try VK_PACKET
-                ok = _send_unicode(text)
+                sent, total = _send_unicode_counted(text)
+                ok = sent == total
+                if not ok and sent > 0:
+                    self._partial_direct = True
                 method = "SendInput/VK_PACKET (fallback)"
 
         if ok:
@@ -997,7 +1066,17 @@ class Injector:
                 # Readback: verify the clipboard now contains what we wrote.
                 time.sleep(0.01)
                 verified = False
-                if _u32.OpenClipboard(None):
+                opened = False
+                for _open_try in range(5):
+                    # A clipboard listener (clipboard history, a sync client, a
+                    # manager) opens the clipboard the moment our write lands.
+                    # Failing to OPEN it is not a mismatch: wait, rather than
+                    # re-writing and waking the listener all over again.
+                    if _u32.OpenClipboard(None):
+                        opened = True
+                        break
+                    time.sleep(0.01)
+                if opened:
                     try:
                         rh = _u32.GetClipboardData(CF_UNICODETEXT)
                         if rh:
@@ -1096,11 +1175,13 @@ class Injector:
         (a password, an old copy) into the target would be far worse than
         falling back to direct injection.
         """
+        self._paste_refusal = ""
         try:
             u32 = ctypes.windll.user32
 
             ok, original = self._clipboard_set(text)
             if not ok:
+                self._paste_refusal = "clipboard write could not be verified"
                 return False
             with _clip_lock:
                 my_gen = _clip_gen
@@ -1115,6 +1196,11 @@ class Injector:
             VK_CTRL = 0x11
             VK_V = 0x56
             fg_now = u32.GetForegroundWindow()
+            if self._target_hwnd and fg_now != self._target_hwnd:
+                # A flicker, not a move: give the foreground a moment to come
+                # back (see _FOREGROUND_GRACE_SECS) before refusing.
+                fg_now = _await_foreground(u32, self._target_hwnd,
+                                           _FOREGROUND_GRACE_SECS)
             # Never paste into a window that is not the capture target. If the
             # user clicked elsewhere mid-dictation the foreground moved, and a
             # Ctrl+V here would dump the text into that other window. Bail so the
@@ -1123,6 +1209,8 @@ class Injector:
             if self._target_hwnd and fg_now != self._target_hwnd:
                 print(f"[Injector] Foreground {fg_now:#x} != target "
                       f"{self._target_hwnd:#x} — skip Ctrl+V, fall back to direct")
+                self._paste_refusal = (f"foreground {fg_now:#x} != target "
+                                       f"{self._target_hwnd:#x}")
                 return False
             print(f"[Injector] Sending Ctrl+V, fg_hwnd={fg_now:#x}")
             ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
@@ -1144,6 +1232,7 @@ class Injector:
                 # SendInput was blocked (commonly UIPI: the foreground window is
                 # elevated and we are not). The keystrokes never reached the app.
                 print(f"[Injector] Ctrl+V SendInput blocked (sent={sent}/4)")
+                self._paste_refusal = f"Ctrl+V SendInput blocked ({sent}/4)"
                 if foreground_is_elevated_blocked():
                     print("[Injector] Foreground window is elevated — run FTC Whisper as admin to type into it.")
                 return False
@@ -1154,6 +1243,7 @@ class Injector:
 
         except Exception as e:
             print(f"[Injector] Clipboard paste failed: {e}")
+            self._paste_refusal = f"exception: {str(e)[:120]}"
             return False
 
     def _terminal_paste(self, text: str) -> bool:

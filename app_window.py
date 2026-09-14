@@ -849,6 +849,7 @@ class RangePicker(Dropdown):
         self._cal_month = _date.today().replace(day=1)
         self._entries = {}
         self._focus_field = "start"
+        self._menu_above = False        # side chosen at open (see _opens_above)
         super().__init__(parent, variable, values, bg=bg, font=font)
 
     # ── the closed control ───────────────────────────────────────────────────
@@ -878,10 +879,58 @@ class RangePicker(Dropdown):
 
     # ── the open panel ───────────────────────────────────────────────────────
 
-    def _panel_height(self) -> int:
-        if self._tab == "periods":
+    def _panel_height(self, tab=None) -> int:
+        if (tab or self._tab) == "periods":
             return self._TAB_H + self._ROW_H * len(self._values) + 14
         return self._CAL_TOP + 20 + self._CELL * 6 + 46
+
+    # ── placement ────────────────────────────────────────────────────────────
+    #
+    # One way out, every time. The first version chose up or down from the
+    # height of whichever tab happened to be open (so Periods dropped DOWN
+    # where From / to rose UP), and a tab switch kept the panel's TOP edge
+    # where it was, so going From / to → Periods left the short list floating
+    # half a screen above the control it belongs to. Now the side is chosen
+    # once per open, from the TALLEST tab, and the edge next to the control
+    # stays glued to it through every tab switch.
+
+    def _opens_above(self, mon_t: int, mon_b: int) -> bool:
+        """Which side of the control the panel opens on.
+
+        Prefers the side with more room INSIDE the app window: this control
+        sits at the bottom of Home, so the panel rises over the app instead of
+        hanging off its bottom edge onto whatever is behind it. The monitor has
+        the last word: if the tallest tab cannot fit on that side, the other
+        side is used."""
+        h = max(self._panel_height("periods"), self._panel_height("custom"))
+        ctl_top = self.winfo_rooty()
+        ctl_bottom = ctl_top + self.winfo_height()
+        try:
+            win = self.winfo_toplevel()
+            win_top = win.winfo_rooty()
+            win_bottom = win_top + win.winfo_height()
+        except tk.TclError:
+            win_top, win_bottom = mon_t, mon_b
+        above = (ctl_top - win_top) >= (win_bottom - ctl_bottom)
+        fits_above = ctl_top - 4 - h >= mon_t + 8
+        fits_below = ctl_bottom + 4 + h <= mon_b - 8
+        if above and not fits_above and fits_below:
+            return False
+        if not above and not fits_below and fits_above:
+            return True
+        return above
+
+    def _panel_xy(self, w: int, h: int) -> tuple:
+        """Top-left for a w×h panel on the side chosen at open time."""
+        mon_l, mon_t, mon_r, mon_b = _monitor_work_area(self)
+        ctl_top = self.winfo_rooty()
+        if getattr(self, "_menu_above", False):
+            y = ctl_top - 4 - h                          # bottom edge glued
+        else:
+            y = ctl_top + self.winfo_height() + 4        # top edge glued
+        y = max(mon_t + 8, min(y, mon_b - h - 8))
+        x = max(mon_l + 8, min(self.winfo_rootx(), mon_r - w - 8))
+        return x, y
 
     def open(self) -> None:
         if self._menu is not None:
@@ -889,6 +938,7 @@ class RangePicker(Dropdown):
         mon_l, mon_t, mon_r, mon_b = _monitor_work_area(self)
         w = min(self._W, (mon_r - mon_l) - 24)
         h = self._panel_height()
+        self._menu_above = self._opens_above(mon_t, mon_b)
         top = tk.Toplevel(self)
         top.overrideredirect(True)
         top.configure(bg=C["surface"])
@@ -896,12 +946,7 @@ class RangePicker(Dropdown):
             top.attributes("-topmost", True)
         except tk.TclError:
             pass
-        x = self.winfo_rootx()
-        y = self.winfo_rooty() + self.winfo_height() + 4
-        if y + h > mon_b - 8:
-            y = self.winfo_rooty() - h - 4
-        y = max(mon_t + 8, min(y, mon_b - h - 8))
-        x = max(mon_l + 8, min(x, mon_r - w - 8))
+        x, y = self._panel_xy(w, h)
         top.geometry(f"{w}x{h}+{x}+{y}")
         cv = tk.Canvas(top, bg=C["surface"], highlightthickness=0, bd=0,
                        width=w, height=h)
@@ -956,15 +1001,17 @@ class RangePicker(Dropdown):
         h = self._panel_height()
         top = self._menu
         try:
-            mon_l, mon_t, mon_r, mon_b = _monitor_work_area(self)
-            x, y = top.winfo_x(), top.winfo_y()
-            y = max(mon_t + 8, min(y, mon_b - h - 8))
+            # Re-anchored to the control, never kept at the old top-left.
+            x, y = self._panel_xy(self._menu_w, h)
             top.geometry(f"{self._menu_w}x{h}+{x}+{y}")
             self._menu_cv.configure(height=h)
             self._menu_h = h
             top.update_idletasks()
         except tk.TclError:
             return
+        # The panel moved under the pointer: a hover outline from the old
+        # layout would sit on the wrong thing until the mouse next moves.
+        self._menu_hover = None
         self._paint_panel()
         self._repaint_panel_window()
 
@@ -6950,7 +6997,7 @@ class AppWindow:
                  font=("Segoe UI", 9), anchor="w").pack(anchor="w")
         _end_desc = tk.Label(
             _end_col,
-            text="Whether a dictation gets a full stop on the end. Smart adds "
+            text="Whether a dictation ends with a full stop. Smart keeps "
                  "one only when what you said reads as a finished sentence, so "
                  "fragments dropped mid-sentence stay open.",
             fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 8),

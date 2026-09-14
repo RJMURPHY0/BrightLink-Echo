@@ -38,6 +38,7 @@ from config import Config
 # so first paint is near-instant; _core_ready gates everything that needs them.
 from spoken_commands import apply_spoken_commands
 from list_format import format_lists
+import sentence_end
 from hotkey_manager import HotkeyManager, TriggerHotkeyManager, AppState
 from feedback import Feedback
 from popup import FloatingPopup, _MONITORINFO, _monitor_user32
@@ -48,7 +49,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.6.78"
+APP_VERSION = "1.6.79"
 
 
 class _RECT(ctypes.Structure):
@@ -521,7 +522,10 @@ class WhisperFlowApp:
         pick = fresh[0] if fresh else candidates[0]
         if self.ai_refiner.is_available and len(pick.split()) >= 4:
             try:
-                pick = self.ai_refiner.context_fix(pick) or pick
+                # The engines already settled the full stop for the user's
+                # Sentence Endings mode; the correction must not reopen it.
+                pick = sentence_end.match_ending(
+                    self.ai_refiner.context_fix(pick) or pick, pick)
             except Exception as e:
                 print(f"[App] Retry context_fix failed: {e}")
         return pick.strip()
@@ -1940,7 +1944,11 @@ class WhisperFlowApp:
                 def _upgrade_llm(_text=transcribed_text, _seq=seq):
                     final = _text
                     try:
-                        fixed = self.ai_refiner.context_fix(_text)
+                        # Same ending as the inserted text: the correction
+                        # likes to close sentences, and accepting it would
+                        # otherwise put back a stop Sentence Endings removed.
+                        fixed = sentence_end.match_ending(
+                            self.ai_refiner.context_fix(_text), _text)
                         if fixed and fixed != _text:
                             print(f"[App] LLM context-fix: '{_text}' -> '{fixed}'")
                             final = fixed
@@ -1976,7 +1984,8 @@ class WhisperFlowApp:
                     final = accurate
                     if self.ai_refiner.is_available:
                         try:
-                            fixed = self.ai_refiner.context_fix(accurate)
+                            fixed = sentence_end.match_ending(
+                                self.ai_refiner.context_fix(accurate), accurate)
                             if fixed and fixed != accurate:
                                 print(f"[App] LLM context-fix: '{accurate}' -> '{fixed}'")
                                 final = fixed
