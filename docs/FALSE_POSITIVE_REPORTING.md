@@ -14,7 +14,7 @@ but they still block users. This is how to clear them.
 
 Every CI release now runs a **VirusTotal scan** (see the "Scan with VirusTotal"
 step in the workflow) if the `VT_API_KEY` secret is set. The workflow log prints
-an analysis URL — open it to see which engines flag `FTC-Whisper.exe`.
+an analysis URL — open it to see which engines flag `BrightLink-Echo.exe`.
 
 To enable it: get a free API key at <https://www.virustotal.com/gui/my-apikey>
 and add it as a repo secret named `VT_API_KEY` (Settings → Secrets and variables

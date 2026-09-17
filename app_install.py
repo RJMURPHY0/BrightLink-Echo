@@ -8,7 +8,13 @@ loose exe someone left in Downloads:
   * a desktop shortcut, created ONCE on first install
   * an "Installed apps" (Add/Remove Programs) entry with publisher, version,
     size, icon and a working uninstaller
-  * an App Paths registration, so Win+R "FTC Whisper" launches it
+  * an App Paths registration, so Win+R with the product name launches it
+
+Names come from brand.py. The DISPLAY name (shortcut names, the Installed apps
+entry, dialogs) may change, and register() carries existing shortcuts across a
+rename. Every folder, registry key and exe name used here is FROZEN, because
+installed copies find them by name: never build a path or a key from
+brand.PRODUCT_NAME.
 
 Everything is per-user (HKCU + %LOCALAPPDATA%/%APPDATA%), so nothing needs
 elevation and nothing touches another account. This is the same shape Slack,
@@ -35,20 +41,18 @@ import subprocess
 import sys
 import time
 
-APP_NAME = "FTC Whisper"
-PUBLISHER = "FTC Safety Solutions"
-APP_URL = "https://github.com/RJMURPHY0/FTC_Whisper"
-SHORTCUT_DESC = "Push-to-talk dictation for Windows"
+import brand
+
+_REG_UNINSTALL = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+_REG_APP_PATHS = r"Software\Microsoft\Windows\CurrentVersion\App Paths"
 
 # Per-user Add/Remove Programs entry. HKCU (not HKLM): no elevation, and it
 # only ever appears for the user who actually installed it.
-UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\FTCWhisper"
-APP_PATHS_KEY = (
-    r"Software\Microsoft\Windows\CurrentVersion\App Paths\FTC Whisper.exe"
-)
+UNINSTALL_KEY = _REG_UNINSTALL + "\\" + brand.UNINSTALL_KEY_NAME
+APP_PATHS_KEY = _REG_APP_PATHS + "\\" + brand.CANONICAL_EXE_NAME
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-URL_PROTOCOL_KEY = r"Software\Classes\ftcwhisper"
-TASK_NAME = "FTC Whisper"
+URL_PROTOCOL_KEY = "Software\\Classes\\" + brand.URL_SCHEME
+TASK_NAME = brand.TASK_NAME
 
 STATE_FILE = "install-state.json"
 
@@ -72,7 +76,7 @@ def _install_dir() -> str:
     base = os.environ.get("LOCALAPPDATA") or os.path.join(
         os.path.expanduser("~"), "AppData", "Local"
     )
-    return os.path.join(base, APP_NAME)
+    return os.path.join(base, brand.DATA_DIR_NAME)
 
 
 def _user_data_dir() -> str:
@@ -80,7 +84,7 @@ def _user_data_dir() -> str:
     base = os.environ.get("APPDATA") or os.path.join(
         os.path.expanduser("~"), "AppData", "Roaming"
     )
-    return os.path.join(base, APP_NAME)
+    return os.path.join(base, brand.DATA_DIR_NAME)
 
 
 def _shell_folder(name: str, fallback: str) -> str:
@@ -129,12 +133,18 @@ def startup_dir() -> str:
     )
 
 
-def start_menu_link() -> str:
-    return os.path.join(start_menu_dir(), f"{APP_NAME}.lnk")
+def start_menu_link(name: str = "") -> str:
+    return os.path.join(start_menu_dir(), f"{name or brand.PRODUCT_NAME}.lnk")
 
 
-def desktop_link() -> str:
-    return os.path.join(desktop_dir(), f"{APP_NAME}.lnk")
+def desktop_link(name: str = "") -> str:
+    return os.path.join(desktop_dir(), f"{name or brand.PRODUCT_NAME}.lnk")
+
+
+def app_paths_key(name: str) -> str:
+    """App Paths key that makes Win+R "<name>" work. The canonical exe's own
+    key (APP_PATHS_KEY) is frozen; one is added per display name."""
+    return _REG_APP_PATHS + "\\" + f"{name}.exe"
 
 
 # ── Install state ────────────────────────────────────────────────────────────
@@ -180,6 +190,68 @@ def shortcuts_needed(state: dict, exe: str, start_lnk: str, desktop_lnk: str,
     return wanted
 
 
+def previous_names(state: dict) -> list:
+    """Display names our shortcuts may still carry: the one recorded at the
+    last registration, then every name the product shipped under before.
+    Installs from before names were recorded simply have no record."""
+    names = []
+    for name in (state.get("shortcut_name"),) + tuple(brand.LEGACY_PRODUCT_NAMES):
+        if name and name != brand.PRODUCT_NAME and name not in names:
+            names.append(name)
+    return names
+
+
+def rename_shortcuts(links: list, old_names: list, listdir=os.listdir,
+                     replace=os.replace, remove=os.remove) -> list:
+    """Carry our shortcuts across a product rename. Returns what it did.
+
+    For each current link (Start menu, desktop), a shortcut still under an old
+    name is RENAMED, so it keeps its place and whatever the user did with it.
+    Only a file that exists is ever moved: a desktop shortcut the user deleted
+    stays deleted. When both names exist the old one goes, or the product
+    would be listed twice.
+
+    Names are matched the way Windows matches them, without regard to case.
+    That makes a case-only change ("Brightlink" to "BrightLink") a rename of
+    the one file, never "a duplicate" whose removal would delete the current
+    shortcut. Every step is independent: a locked file costs that one step.
+    """
+    done = []
+    for link in links:
+        folder, want = os.path.split(link)
+        try:
+            present = {entry.lower(): entry for entry in listdir(folder)}
+        except OSError:
+            continue
+        current = present.get(want.lower())
+        for old in old_names:
+            old_file = f"{old}.lnk"
+            if old_file.lower() == want.lower():
+                continue  # same file on Windows: a case fix, handled below
+            real = present.get(old_file.lower())
+            if not real:
+                continue
+            src = os.path.join(folder, real)
+            try:
+                if current is None:
+                    replace(src, link)
+                    current = want
+                    done.append(f"renamed {src} -> {link}")
+                else:
+                    remove(src)
+                    done.append(f"removed duplicate {src}")
+            except OSError as e:
+                done.append(f"could not move {src}: {e}")
+        if current is not None and current != want:
+            src = os.path.join(folder, current)
+            try:
+                replace(src, link)
+                done.append(f"renamed {src} -> {link}")
+            except OSError as e:
+                done.append(f"could not rename {src}: {e}")
+    return done
+
+
 # ── Shortcuts ────────────────────────────────────────────────────────────────
 
 
@@ -210,7 +282,7 @@ def shortcut_script(paths: list, exe: str) -> str:
         # double quotes out of the reconstructed command line, leaving the
         # comma operator to build an ARRAY, which IShellLink refuses to save.
         "$l.IconLocation = $t + ',0'; "
-        f"$l.Description = '{_ps_quote(SHORTCUT_DESC)}'; "
+        f"$l.Description = '{_ps_quote(brand.SHORTCUT_DESCRIPTION)}'; "
         "$l.Save() }; "
         "Write-Output 'ok'"
     )
@@ -273,17 +345,17 @@ def uninstall_values(exe: str, version: str, install_dir: str,
     except ValueError:
         major, minor = 0, 0
     return [
-        ("DisplayName", False, APP_NAME),
+        ("DisplayName", False, brand.PRODUCT_NAME),
         ("DisplayVersion", False, version),
         ("DisplayIcon", False, f"{exe},0"),
-        ("Publisher", False, PUBLISHER),
+        ("Publisher", False, brand.COMPANY_NAME),
         ("InstallLocation", False, install_dir),
         ("InstallDate", False, install_date),
         # Windows runs these verbatim. Quoted because the path has a space.
         ("UninstallString", False, f'"{exe}" --uninstall'),
         ("QuietUninstallString", False, f'"{exe}" --uninstall /S'),
-        ("URLInfoAbout", False, APP_URL),
-        ("HelpLink", False, APP_URL),
+        ("URLInfoAbout", False, brand.WEBSITE_URL),
+        ("HelpLink", False, brand.WEBSITE_URL),
         ("EstimatedSize", True, size_kb),
         ("VersionMajor", True, major),
         ("VersionMinor", True, minor),
@@ -294,15 +366,34 @@ def uninstall_values(exe: str, version: str, install_dir: str,
     ]
 
 
-def _registered_version() -> str:
+_ENTRY_FIELDS = ("DisplayVersion", "DisplayName", "Publisher")
+
+
+def _registered_entry() -> dict:
+    """The Installed apps fields a launch may need to refresh, as registered."""
+    found = {}
     try:
         import winreg
 
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
-            value, _ = winreg.QueryValueEx(k, "DisplayVersion")
-            return str(value)
+            for field in _ENTRY_FIELDS:
+                try:
+                    value, _ = winreg.QueryValueEx(k, field)
+                    found[field] = str(value)
+                except OSError:
+                    pass
     except Exception:
-        return ""
+        pass
+    return found
+
+
+def entry_is_current(registered: dict, version: str) -> bool:
+    """False when Installed apps shows a different version, name or publisher.
+    Checking the version alone would leave a renamed product listed under its
+    old name until some later release happened to bump the version."""
+    return (registered.get("DisplayVersion") == version
+            and registered.get("DisplayName") == brand.PRODUCT_NAME
+            and registered.get("Publisher") == brand.COMPANY_NAME)
 
 
 def _write_uninstall_entry(exe: str, version: str, install_dir: str) -> None:
@@ -329,12 +420,19 @@ def _write_uninstall_entry(exe: str, version: str, install_dir: str) -> None:
     print(f"[Install] Registered in Installed apps (v{version}).")
 
 
-def _write_app_paths(exe: str) -> None:
+def _write_app_paths(exe: str, old_names: list = ()) -> None:
+    """The canonical exe's key plus one for the current display name, and drop
+    the keys of names we no longer ship under."""
     import winreg
 
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, APP_PATHS_KEY) as k:
-        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, exe)
-        winreg.SetValueEx(k, "Path", 0, winreg.REG_SZ, os.path.dirname(exe))
+    for key in (APP_PATHS_KEY, app_paths_key(brand.PRODUCT_NAME)):
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, exe)
+            winreg.SetValueEx(k, "Path", 0, winreg.REG_SZ, os.path.dirname(exe))
+    for name in old_names:
+        key = app_paths_key(name)
+        if key.lower() != APP_PATHS_KEY.lower():
+            _delete_key_tree(winreg.HKEY_CURRENT_USER, key)
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
@@ -349,13 +447,19 @@ def register(exe: str, version: str) -> None:
 
     install_dir = os.path.dirname(exe)
     state = load_state(install_dir)
+    old_names = previous_names(state)
 
     try:
         start_lnk, desk_lnk = start_menu_link(), desktop_link()
+        # A rename first, so an existing shortcut keeps its place (and a
+        # deleted one stays deleted) before deciding what still needs writing.
+        for step in rename_shortcuts([start_lnk, desk_lnk], old_names):
+            print(f"[Install] Shortcut {step}")
         wanted = shortcuts_needed(state, exe, start_lnk, desk_lnk)
         if not wanted or _write_shortcuts(wanted, exe):
             new_state = dict(state)
             new_state["exe"] = exe
+            new_state["shortcut_name"] = brand.PRODUCT_NAME
             # Latch on a shortcut that is merely PRESENT too (an upgrading user
             # already has one from the old installer). Without this the flag
             # never sticks for them, and the day they delete the shortcut we
@@ -371,13 +475,13 @@ def register(exe: str, version: str) -> None:
         print(f"[Install] Shortcut registration skipped: {e}")
 
     try:
-        if _registered_version() != version:
+        if not entry_is_current(_registered_entry(), version):
             _write_uninstall_entry(exe, version, install_dir)
     except Exception as e:
         print(f"[Install] Installed-apps registration skipped: {e}")
 
     try:
-        _write_app_paths(exe)
+        _write_app_paths(exe, old_names)
     except Exception as e:
         print(f"[Install] App Paths registration skipped: {e}")
 
@@ -415,10 +519,22 @@ def _delete_key_tree(root, path: str) -> None:
         pass
 
 
+def image_names() -> list:
+    """Every exe name a running copy can have: the installed exe, both release
+    assets as downloaded, and each display name. The installed exe is NOT named
+    after the product, which is why the display name alone would miss it."""
+    names = []
+    for image in ((brand.CANONICAL_EXE_NAME, brand.UPDATE_ASSET, brand.DOWNLOAD_ASSET)
+                  + tuple(f"{n}.exe" for n in brand.product_names())):
+        if image.lower() not in (seen.lower() for seen in names):
+            names.append(image)
+    return names
+
+
 def _kill_other_instances() -> None:
     """Stop the resident copy so its loaded image stops locking the exe. The
     filter excludes our own PID; we still have MessageBoxes to show."""
-    for image in (f"{APP_NAME}.exe", "FTC-Whisper.exe"):
+    for image in image_names():
         try:
             subprocess.run(
                 ["taskkill", "/F", "/IM", image, "/FI", f"PID ne {os.getpid()}"],
@@ -443,7 +559,7 @@ def _remove_launchers() -> None:
             winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE
         ) as k:
             try:
-                winreg.DeleteValue(k, APP_NAME)
+                winreg.DeleteValue(k, brand.RUN_VALUE_NAME)
             except FileNotFoundError:
                 pass
     except Exception:
@@ -453,13 +569,18 @@ def _remove_launchers() -> None:
 def _remove_registry_entries() -> None:
     import winreg
 
-    for path in (UNINSTALL_KEY, APP_PATHS_KEY, URL_PROTOCOL_KEY):
+    paths = [UNINSTALL_KEY, APP_PATHS_KEY, URL_PROTOCOL_KEY]
+    paths += [app_paths_key(n) for n in brand.product_names()]
+    for path in paths:
         _delete_key_tree(winreg.HKEY_CURRENT_USER, path)
 
 
 def _remove_shortcuts() -> None:
-    for path in (start_menu_link(), desktop_link(),
-                 os.path.join(startup_dir(), f"{APP_NAME}.lnk")):
+    paths = []
+    for name in brand.product_names():
+        paths += [start_menu_link(name), desktop_link(name),
+                  os.path.join(startup_dir(), f"{name}.lnk")]
+    for path in paths:
         try:
             if os.path.exists(path):
                 os.remove(path)
@@ -475,7 +596,9 @@ def safe_to_delete(path: str) -> bool:
     if not path:
         return False
     p = os.path.normcase(os.path.abspath(path))
-    if os.path.basename(p) != os.path.normcase(APP_NAME):
+    # The frozen folder name, never the display name: a renamed product still
+    # keeps its data in the original folders.
+    if os.path.basename(p) != os.path.normcase(brand.DATA_DIR_NAME):
         return False
     for var in ("LOCALAPPDATA", "APPDATA"):
         root = os.environ.get(var)
@@ -544,11 +667,12 @@ def run_uninstall(silent: bool = False) -> int:
     """Handle `FTC Whisper.exe --uninstall [/S]`, the UninstallString Windows
     runs from Installed apps. Returns 0 when the uninstall ran, 1 if the user
     backed out."""
+    name = brand.PRODUCT_NAME
     if not silent:
         answer = _message_box(
-            "Remove FTC Whisper from this PC?\n\n"
+            f"Remove {name} from this PC?\n\n"
             "Dictation will stop working until you install it again.",
-            "Uninstall FTC Whisper",
+            f"Uninstall {name}",
             _MB_YESNO | _MB_ICONQUESTION | _MB_SETFOREGROUND | _MB_TOPMOST,
         )
         if answer != _IDYES:
@@ -559,7 +683,7 @@ def run_uninstall(silent: bool = False) -> int:
         remove_data = _message_box(
             "Also delete your settings, dictation history and saved "
             "recordings?\n\nChoose No to keep them for a future reinstall.",
-            "Uninstall FTC Whisper",
+            f"Uninstall {name}",
             _MB_YESNO | _MB_ICONQUESTION | _MB_SETFOREGROUND | _MB_TOPMOST,
         ) == _IDYES
 
@@ -574,8 +698,8 @@ def run_uninstall(silent: bool = False) -> int:
 
     if not silent:
         _message_box(
-            "FTC Whisper has been removed.",
-            "FTC Whisper",
+            f"{name} has been removed.",
+            name,
             _MB_ICONINFO | _MB_SETFOREGROUND | _MB_TOPMOST,
         )
 

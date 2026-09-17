@@ -1,11 +1,15 @@
 @echo off
 setlocal enabledelayedexpansion
-title FTC Whisper — Installer
 cd /d "%~dp0"
+
+:: The product name lives in brand.py (plain constants, runs on any Python).
+set "APPNAME=App"
+python -c "import brand" >nul 2>&1 && for /f "delims=" %%n in ('python -c "import brand; print(brand.PRODUCT_NAME)"') do set "APPNAME=%%n"
+title !APPNAME! Installer
 
 echo.
 echo  ==============================================
-echo   FTC Whisper  ^|  Installer
+echo   !APPNAME! Installer
 echo  ==============================================
 echo.
 

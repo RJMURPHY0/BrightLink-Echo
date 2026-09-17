@@ -3,6 +3,7 @@ System tray icon and menu using pystray.
 Provides visual state indication and right-click menu for the app.
 """
 
+import brand
 import os
 import sys
 from typing import Callable, Optional
@@ -80,11 +81,11 @@ class TrayApp:
         processing → amber microphone icon
     """
 
-    APP_NAME = "FTC Whisper"
+    APP_NAME = brand.PRODUCT_NAME
     TOOLTIP_STATES = {
-        "idle":       "FTC Whisper — Ready",
-        "recording":  "FTC Whisper — Recording…",
-        "processing": "FTC Whisper — Transcribing…",
+        "idle":       f"{brand.PRODUCT_NAME} — Ready",
+        "recording":  f"{brand.PRODUCT_NAME} — Recording…",
+        "processing": f"{brand.PRODUCT_NAME} — Transcribing…",
     }
 
     def __init__(
@@ -111,7 +112,7 @@ class TrayApp:
         items = []
 
         if self.on_open:
-            items.append(item("Open FTC Whisper", self._on_open, default=True))
+            items.append(item(f"Open {brand.PRODUCT_NAME}", self._on_open, default=True))
             items.append(pystray.Menu.SEPARATOR)
 
         if self._user_email:

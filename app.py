@@ -36,10 +36,12 @@ if sys.platform == "win32":
 # dictation to exactly this after an auto-update).
 if getattr(sys, "frozen", False) and sys.platform == "win32":
     import pyi_runtime
+    import brand  # constants only, imports nothing: safe ahead of the guard
     pyi_runtime.relaunch_if_foreign_runtime(log_path=os.path.join(
         os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
-        "FTC Whisper", "startup-error.log"))
+        brand.DATA_DIR_NAME, "startup-error.log"))
 
+import brand
 from config import Config
 # Recorder / Transcriber / asr_engine / StreamingSession / Injector / TrayApp
 # are deliberately NOT imported here: between them they pull in numpy,
@@ -160,7 +162,7 @@ class WhisperFlowApp:
 
     def __init__(self, auth: AuthManager, config: Config):
         print("=" * 50)
-        print("  FTC Whisper — Voice-to-Text Desktop App")
+        print(f"  {brand.PRODUCT_NAME} — Voice-to-Text Desktop App")
         print("=" * 50)
 
         self._auth = auth
@@ -784,28 +786,34 @@ class WhisperFlowApp:
         return (time.time() - self._last_dictation_ts) > 120
 
     def _announce_update_if_any(self) -> None:
-        """First run after an update: show a transient 'Updated to vX' toast."""
-        from updater import is_newer, read_last_run_version, write_last_run_version
+        """First run after an update: a transient 'Updated to vX' notice, or
+        'Old name is now New name' when the product was renamed in between."""
+        from updater import (read_last_run_name, read_last_run_version,
+                             update_announcement, write_last_run_name,
+                             write_last_run_version)
 
         try:
             prev = read_last_run_version()
+            prev_name = read_last_run_name()
             write_last_run_version(APP_VERSION)
-            if prev and is_newer(APP_VERSION, prev):
-                print(f"[App] Updated {prev} → {APP_VERSION}")
+            write_last_run_name(brand.PRODUCT_NAME)
+            notice = update_announcement(
+                prev, prev_name, APP_VERSION, brand.PRODUCT_NAME
+            )
+            if notice:
+                print(f"[App] Updated {prev} → {APP_VERSION}: {notice['title']}")
 
                 def _announce():
-                    # Prefer a native tray notification: FTC Whisper runs hidden
-                    # in the tray, so the bottom-right corner toast would float
+                    # Prefer a native tray notification: the app runs hidden in
+                    # the tray, so the bottom-right corner toast would float
                     # over whatever app is in front (e.g. FTC Contacts) and look
-                    # like it belongs to that app. A tray notification is owned by
-                    # the FTC Whisper icon — clearly attributed to FTC Whisper and
-                    # never overlaying another window. Fall back to the toast only
-                    # if the tray can't notify (icon not ready / no support).
-                    if not self.tray.notify(
-                        f"Updated to v{APP_VERSION} ✓", "FTC Whisper"
-                    ):
+                    # like it belongs to that app. A tray notification is owned
+                    # by our own icon and never overlays another window. Fall
+                    # back to the toast only if the tray can't notify (icon not
+                    # ready / no support).
+                    if not self.tray.notify(notice["message"], notice["title"]):
                         self.app_window.show_toast(
-                            f"FTC Whisper updated to v{APP_VERSION} ✓", 6000
+                            notice["toast"], notice["toast_ms"]
                         )
 
                 self.app_window._ui_after(1500, _announce)
@@ -829,8 +837,8 @@ class WhisperFlowApp:
             pass
         try:
             def _announce():
-                if not self.tray.notify(warning, "FTC Whisper — settings reset"):
-                    self.app_window.show_toast(f"FTC Whisper: {warning}", 8000)
+                if not self.tray.notify(warning, f"{brand.PRODUCT_NAME} — settings reset"):
+                    self.app_window.show_toast(f"{brand.PRODUCT_NAME}: {warning}", 8000)
 
             self.app_window._ui_after(1500, _announce)
         except Exception as e:
@@ -861,10 +869,10 @@ class WhisperFlowApp:
         try:
             def _notify():
                 if not self.tray.notify(
-                    f"Dictation failed: {short}", "FTC Whisper"
+                    f"Dictation failed: {short}", brand.PRODUCT_NAME
                 ):
                     self.app_window.show_toast(
-                        f"FTC Whisper — dictation failed: {short}", 6000
+                        f"{brand.PRODUCT_NAME} — dictation failed: {short}", 6000
                     )
 
             self.app_window._ui_after(0, _notify)
@@ -2330,7 +2338,7 @@ class WhisperFlowApp:
         import json as _json
         cache_path = os.path.join(
             os.environ.get("APPDATA") or os.path.expanduser("~"),
-            "FTC Whisper", "estate-vocab.json")
+            brand.DATA_DIR_NAME, "estate-vocab.json")
         if not getattr(self, "_estate_vocab", ""):
             try:
                 with open(cache_path, "r", encoding="utf-8") as f:
@@ -3311,7 +3319,7 @@ def _ensure_single_instance() -> None:
     """
     global _SINGLETON_MUTEX
     ERROR_ALREADY_EXISTS = 183
-    MUTEX_NAME = "Global\\FTC_Whisper_SingleInstance"
+    MUTEX_NAME = brand.MUTEX_NAME
 
     kernel32 = ctypes.windll.kernel32
     mutex = kernel32.CreateMutexW(None, True, MUTEX_NAME)
@@ -3341,7 +3349,7 @@ def _ensure_single_instance() -> None:
     _SINGLETON_MUTEX = mutex
 
 
-TASK_NAME = "FTC Whisper"
+TASK_NAME = brand.TASK_NAME
 
 
 def _app_data_dir() -> str:
@@ -3349,7 +3357,7 @@ def _app_data_dir() -> str:
     base = os.environ.get("LOCALAPPDATA") or os.path.join(
         os.path.expanduser("~"), "AppData", "Local"
     )
-    d = os.path.join(base, "FTC Whisper")
+    d = os.path.join(base, brand.DATA_DIR_NAME)
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:
@@ -3397,7 +3405,7 @@ def _startup_log_path() -> str:
 
 
 def _stable_exe_path() -> str:
-    return os.path.join(_app_data_dir(), "FTC Whisper.exe")
+    return os.path.join(_app_data_dir(), brand.CANONICAL_EXE_NAME)
 
 
 def _ensure_installed_copy() -> str:
@@ -3619,21 +3627,28 @@ def _ensure_startup_task() -> None:
 
 
 def _repair_desktop_shortcut(target: str) -> None:
-    """If a 'FTC Whisper' desktop shortcut exists but points anywhere other
-    than the canonical installed exe (an old Downloads copy, a moved file),
-    retarget it — so the user's original link always opens the version that
-    auto-update maintains. Never creates a shortcut that isn't there."""
+    """If our desktop shortcut exists but points anywhere other than the
+    canonical installed exe (an old Downloads copy, a moved file), retarget it,
+    so the user's original link always opens the version that auto-update
+    maintains. Checks today's name and every older one: registration renames
+    an old-named shortcut on another thread, and either order must end
+    retargeted. Never creates a shortcut that isn't there."""
     if not getattr(sys, "frozen", False):
         return
     import subprocess
     t = target.replace("'", "''")
+    names = ", ".join(
+        "'" + f"{name}.lnk".replace("'", "''") + "'"
+        for name in brand.product_names()
+    )
     ps = (
         "$sh = New-Object -ComObject WScript.Shell; "
-        "$p = Join-Path $sh.SpecialFolders('Desktop') 'FTC Whisper.lnk'; "
-        "if (Test-Path $p) { $lnk = $sh.CreateShortcut($p); "
+        f"foreach ($n in @({names})) {{ "
+        "$p = Join-Path $sh.SpecialFolders('Desktop') $n; "
+        "if (Test-Path -LiteralPath $p) { $lnk = $sh.CreateShortcut($p); "
         f"if ($lnk.TargetPath -ne '{t}') {{ $lnk.TargetPath = '{t}'; "
         f"$lnk.WorkingDirectory = '{os.path.dirname(target).replace(chr(39), chr(39)*2)}'; "
-        "$lnk.Arguments = ''; $lnk.Save(); Write-Output 'retargeted' } }"
+        "$lnk.Arguments = ''; $lnk.Save(); Write-Output 'retargeted' } } }"
     )
     try:
         r = subprocess.run(
@@ -3696,7 +3711,7 @@ def _reconcile_legacy_launchers(task_ok: bool) -> None:
             0, winreg.KEY_SET_VALUE,
         ) as k:
             try:
-                winreg.DeleteValue(k, "FTC Whisper")
+                winreg.DeleteValue(k, brand.RUN_VALUE_NAME)
                 print("[App] Removed duplicate HKCU\\Run launcher.")
             except FileNotFoundError:
                 pass
@@ -3709,7 +3724,8 @@ def _reconcile_legacy_launchers(task_ok: bool) -> None:
             os.environ.get("APPDATA", ""),
             r"Microsoft\Windows\Start Menu\Programs\Startup",
         )
-        for name in ("FTC Whisper.lnk", "FTC Transcribe.lnk"):
+        names = [f"{n}.lnk" for n in brand.product_names()] + ["FTC Transcribe.lnk"]
+        for name in names:
             lnk = os.path.join(startup_dir, name)
             if os.path.exists(lnk):
                 os.remove(lnk)
@@ -3733,9 +3749,11 @@ def _register_url_protocol() -> None:
         cmd    = f'"{target}" "{script}" "%1"'
 
     try:
-        base = r"Software\Classes\ftcwhisper"
+        # The scheme is frozen (the CRM opens ftcwhisper://launch); only the
+        # friendly name a browser shows in "Open ...?" follows the brand.
+        base = "Software\\Classes\\" + brand.URL_SCHEME
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base) as k:
-            winreg.SetValueEx(k, "",             0, winreg.REG_SZ, "URL:FTC Whisper")
+            winreg.SetValueEx(k, "",             0, winreg.REG_SZ, f"URL:{brand.PRODUCT_NAME}")
             winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\shell\open\command") as k:
             winreg.SetValueEx(k, "", 0, winreg.REG_SZ, cmd)
@@ -3749,7 +3767,7 @@ def _ensure_startup_registry_fallback() -> None:
     import winreg
 
     RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    VALUE   = "FTC Whisper"
+    VALUE   = brand.RUN_VALUE_NAME
 
     target = _startup_target()
     if getattr(sys, "frozen", False):
@@ -3786,7 +3804,7 @@ def _log_startup_error(exc: BaseException) -> None:
     try:
         with open(_startup_log_path(), "a", encoding="utf-8") as f:
             f.write("=" * 60 + "\n")
-            f.write(f"FTC Whisper {APP_VERSION} startup crash\n")
+            f.write(f"{brand.PRODUCT_NAME} {APP_VERSION} startup crash\n")
             f.write(f"argv={sys.argv} exe={sys.executable}\n")
             f.write(traceback.format_exc() if exc else "")
             f.write("\n")

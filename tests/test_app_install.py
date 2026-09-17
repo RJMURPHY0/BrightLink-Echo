@@ -12,11 +12,14 @@ Two things must never regress here:
 import inspect
 import os
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import app_install
+import brand
 
 
 EXE = r"C:\Users\jo\AppData\Local\FTC Whisper\FTC Whisper.exe"
@@ -76,6 +79,97 @@ class ShortcutTests(unittest.TestCase):
         self.assertIn("o''brien", script)
 
 
+class _FakeFolder:
+    """A folder that compares names the way Windows does (ignoring case)."""
+
+    def __init__(self, *names):
+        self.files = list(names)
+        self.log = []
+
+    def listdir(self, folder):
+        return list(self.files)
+
+    def _index(self, path):
+        name = os.path.basename(path).lower()
+        return next(i for i, f in enumerate(self.files) if f.lower() == name)
+
+    def replace(self, src, dst):
+        self.files[self._index(src)] = os.path.basename(dst)
+        self.log.append(("replace", os.path.basename(src), os.path.basename(dst)))
+
+    def remove(self, path):
+        del self.files[self._index(path)]
+        self.log.append(("remove", os.path.basename(path)))
+
+    def run(self, want, old_names):
+        return app_install.rename_shortcuts(
+            [os.path.join(r"C:\folder", want)], old_names,
+            listdir=self.listdir, replace=self.replace, remove=self.remove,
+        )
+
+
+class ShortcutRenameTests(unittest.TestCase):
+    """A product rename carries the user's shortcuts over; it never creates one
+    and never deletes the current one."""
+
+    def test_old_shortcut_is_renamed_in_place(self):
+        fs = _FakeFolder("FTC Whisper.lnk", "Other App.lnk")
+        fs.run("BrightLink Echo.lnk", ["FTC Whisper"])
+        self.assertEqual(["BrightLink Echo.lnk", "Other App.lnk"], fs.files)
+
+    def test_a_deleted_shortcut_stays_deleted(self):
+        fs = _FakeFolder("Other App.lnk")
+        fs.run("BrightLink Echo.lnk", ["FTC Whisper"])
+        self.assertEqual(["Other App.lnk"], fs.files)
+        self.assertEqual([], fs.log)
+
+    def test_duplicate_old_name_is_removed_when_both_exist(self):
+        fs = _FakeFolder("BrightLink Echo.lnk", "FTC Whisper.lnk")
+        fs.run("BrightLink Echo.lnk", ["FTC Whisper"])
+        self.assertEqual(["BrightLink Echo.lnk"], fs.files)
+
+    def test_case_only_rename_fixes_the_case_and_deletes_nothing(self):
+        fs = _FakeFolder("Brightlink Echo.lnk")
+        fs.run("BrightLink Echo.lnk", ["Brightlink Echo", "FTC Whisper"])
+        self.assertEqual(["BrightLink Echo.lnk"], fs.files)
+        self.assertNotIn("remove", [step[0] for step in fs.log])
+
+    def test_steady_state_does_nothing(self):
+        fs = _FakeFolder("BrightLink Echo.lnk")
+        fs.run("BrightLink Echo.lnk", ["FTC Whisper"])
+        self.assertEqual([], fs.log)
+
+    def test_unreadable_folder_is_skipped(self):
+        def boom(folder):
+            raise OSError("no such folder")
+
+        self.assertEqual([], app_install.rename_shortcuts(
+            [r"C:\gone\BrightLink Echo.lnk"], ["FTC Whisper"], listdir=boom))
+
+    def test_real_files_on_this_filesystem(self):
+        # Proves os.replace does what the fake assumes, including a case-only
+        # rename, which is a no-op on some filesystems if done carelessly.
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "FTC Whisper.lnk"), "w").close()
+            app_install.rename_shortcuts([os.path.join(d, "Brightlink Echo.lnk")], ["FTC Whisper"])
+            self.assertEqual(["Brightlink Echo.lnk"], os.listdir(d))
+            app_install.rename_shortcuts([os.path.join(d, "BrightLink Echo.lnk")], ["Brightlink Echo"])
+            self.assertEqual(["BrightLink Echo.lnk"], os.listdir(d))
+
+    def test_previous_names_never_include_the_current_one(self):
+        self.assertEqual(list(brand.LEGACY_PRODUCT_NAMES),
+                         app_install.previous_names({}))
+        names = app_install.previous_names({"shortcut_name": "Old Name"})
+        self.assertEqual("Old Name", names[0])
+        self.assertNotIn(brand.PRODUCT_NAME, app_install.previous_names(
+            {"shortcut_name": brand.PRODUCT_NAME}))
+
+    def test_register_renames_before_deciding_what_to_write(self):
+        src = inspect.getsource(app_install.register)
+        self.assertLess(src.index("rename_shortcuts("), src.index("shortcuts_needed("))
+        self.assertIn('new_state["shortcut_name"] = brand.PRODUCT_NAME', src)
+
+
 class UninstallEntryTests(unittest.TestCase):
     def _values(self):
         return dict(
@@ -87,11 +181,24 @@ class UninstallEntryTests(unittest.TestCase):
 
     def test_entry_has_what_installed_apps_shows(self):
         v = self._values()
-        self.assertEqual("FTC Whisper", v["DisplayName"])
+        self.assertEqual(brand.PRODUCT_NAME, v["DisplayName"])
         self.assertEqual("1.6.46", v["DisplayVersion"])
-        self.assertEqual("FTC Safety Solutions", v["Publisher"])
+        self.assertEqual(brand.COMPANY_NAME, v["Publisher"])
         self.assertEqual(f"{EXE},0", v["DisplayIcon"])
         self.assertEqual(700_000, v["EstimatedSize"])
+
+    def test_entry_is_rewritten_when_the_name_or_publisher_changes(self):
+        # Checking only the version would leave a renamed product listed under
+        # its old name until a later release bumped the version again.
+        current = {"DisplayVersion": "1.6.81", "DisplayName": brand.PRODUCT_NAME,
+                   "Publisher": brand.COMPANY_NAME}
+        self.assertTrue(app_install.entry_is_current(current, "1.6.81"))
+        self.assertFalse(app_install.entry_is_current(current, "1.6.82"))
+        self.assertFalse(app_install.entry_is_current(
+            dict(current, DisplayName="FTC Whisper"), "1.6.81"))
+        self.assertFalse(app_install.entry_is_current(
+            dict(current, Publisher="Someone Else"), "1.6.81"))
+        self.assertFalse(app_install.entry_is_current({}, "1.6.81"))
 
     def test_uninstall_string_is_quoted_and_runnable(self):
         v = self._values()
@@ -137,6 +244,21 @@ class DeleteGuardTests(unittest.TestCase):
             self.assertFalse(
                 app_install.safe_to_delete(path), f"must not delete {path!r}"
             )
+
+    def test_guard_follows_the_frozen_folder_not_the_display_name(self):
+        # The data stays in "FTC Whisper" whatever the product is called. A
+        # guard keyed to the display name would refuse the real folder and
+        # leave 660 MB behind, or worse, accept a folder that is not ours.
+        with mock.patch.object(brand, "PRODUCT_NAME", "Some Other Name"):
+            self.assertTrue(app_install.safe_to_delete(os.path.join(self.local, "FTC Whisper")))
+            self.assertFalse(app_install.safe_to_delete(os.path.join(self.local, "Some Other Name")))
+
+    def test_uninstall_stops_every_name_a_running_copy_can_have(self):
+        images = [n.lower() for n in app_install.image_names()]
+        for name in (brand.CANONICAL_EXE_NAME, brand.UPDATE_ASSET, brand.DOWNLOAD_ASSET,
+                     f"{brand.PRODUCT_NAME}.exe"):
+            self.assertIn(name.lower(), images)
+        self.assertEqual(len(set(images)), len(images))
 
     def test_cleanup_script_waits_for_the_process_and_self_deletes(self):
         script = app_install.cleanup_script(

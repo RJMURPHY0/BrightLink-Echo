@@ -4,6 +4,7 @@ Shown on first launch and whenever the session has expired.
 Blocks the app from starting until the user is authenticated.
 """
 
+import brand
 import threading
 import tkinter as tk
 from typing import Callable, Optional
@@ -160,7 +161,7 @@ class LoginWindow:
             x = (sw - WINDOW_W) // 2
             y = (sh - WINDOW_H) // 2
 
-        self._root.title("FTC Whisper")
+        self._root.title(brand.PRODUCT_NAME)
         # Window / taskbar icon — FTC swirl (logo.ico)
         try:
             from logo_cache import get_icon_path
@@ -227,7 +228,7 @@ class LoginWindow:
         else:
             tk.Label(
                 header,
-                text="FTC Whisper",
+                text=brand.PRODUCT_NAME,
                 fg=C["accent"],
                 bg=C["bg"],
                 font=("Segoe UI", 22, "bold"),
@@ -640,11 +641,13 @@ class LoginWindow:
                 self.send_response(200)
                 self.send_header("Content-type", "text/html")
                 self.end_headers()
-                self.wfile.write(
-                    b"<html><body style='font-family:sans-serif;padding:40px'>"
-                    b"<h2>Signed in! You can close this tab and return to FTC Whisper.</h2>"
-                    b"</body></html>"
-                )
+                import html as _html
+                self.wfile.write((
+                    "<html><body style='font-family:sans-serif;padding:40px'>"
+                    "<h2>Signed in! You can close this tab and return to "
+                    f"{_html.escape(brand.PRODUCT_NAME)}.</h2>"
+                    "</body></html>"
+                ).encode("utf-8"))
                 if code:
                     code_holder["code"] = code
                     done.set()

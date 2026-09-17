@@ -8,6 +8,7 @@ by the same Windows user account.
 import ctypes
 import ctypes.wintypes
 import json
+import brand
 import os
 import threading
 import time
@@ -85,7 +86,7 @@ def _session_path() -> str:
     # Store in %APPDATA%\FTC Whisper so the session survives EXE reinstalls
     # or moves to a different folder.
     app_data = os.environ.get("APPDATA") or os.path.expanduser("~")
-    folder = os.path.join(app_data, "FTC Whisper")
+    folder = os.path.join(app_data, brand.DATA_DIR_NAME)
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, ".session")
 
@@ -95,7 +96,7 @@ def _last_email_path() -> str:
     prefill the login field. No password is ever stored here (the DPAPI
     session file handles credentials / auto-login)."""
     app_data = os.environ.get("APPDATA") or os.path.expanduser("~")
-    folder = os.path.join(app_data, "FTC Whisper")
+    folder = os.path.join(app_data, brand.DATA_DIR_NAME)
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, "last-email.txt")
 
@@ -133,7 +134,7 @@ def _restore_log_path() -> str:
     always writable."""
     base = (os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
             or os.path.expanduser("~"))
-    folder = os.path.join(base, "FTC Whisper")
+    folder = os.path.join(base, brand.DATA_DIR_NAME)
     try:
         os.makedirs(folder, exist_ok=True)
     except OSError:

@@ -10,6 +10,7 @@ Three modes:
 import ctypes
 import ctypes.wintypes
 import math
+import brand
 import os
 import threading
 import time
@@ -823,7 +824,7 @@ class FloatingPopup:
         # Distinct title (never rendered — the window is borderless): a second
         # window titled "FTC Whisper" made every FindWindowW-by-title lookup a
         # coin flip between the dashboard and this popup.
-        self.root.title("FTC Whisper Overlay")
+        self.root.title(f"{brand.PRODUCT_NAME} Overlay")
         # Hide immediately and park far off-screen BEFORE anything else, so the
         # freshly-created dark Toplevel can never flash as a little black box at
         # the top-left (0,0) for a frame before it's positioned/withdrawn.

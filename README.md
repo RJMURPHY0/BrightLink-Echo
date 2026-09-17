@@ -1,8 +1,10 @@
-# FTC Whisper
+# BrightLink Echo
 
-> **[⬇ Install FTC Whisper](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest)**
+*Formerly FTC Whisper.*
+
+> **[⬇ Install BrightLink Echo](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest)**
 >
-> [Direct download (always latest)](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest/download/FTC-Whisper.exe)
+> [Direct download (always latest)](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest/download/BrightLink-Echo.exe)
 
 ---
 
@@ -30,13 +32,13 @@ Built for Windows. Transcription runs **fully locally** using [faster-whisper](h
 
 ### Option 1 — Single exe (recommended, no Python needed)
 
-1. [**Download FTC-Whisper.exe**](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest/download/FTC-Whisper.exe)
+1. [**Download BrightLink-Echo.exe**](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest/download/BrightLink-Echo.exe)
 2. Double-click it — if Windows shows a SmartScreen warning, click **More info → Run anyway**
 3. The app starts immediately in your system tray
 4. **Installs itself**: on first run it becomes a proper Windows application: a **Start-menu entry** (so it turns up in Start and in search), a **desktop shortcut**, and an entry in **Settings → Apps → Installed apps** with a working uninstaller. No admin rights needed; everything is per-user.
 5. **Auto-starts with Windows**: the app registers itself as a Task Scheduler logon task, so it launches automatically every time you log in (with above-normal priority to load before Teams, OneDrive, etc.)
 
-To remove it: **Settings → Apps → Installed apps → FTC Whisper → Uninstall**. You're asked whether to keep your settings and history.
+To remove it: **Settings → Apps → Installed apps → BrightLink Echo → Uninstall**. You're asked whether to keep your settings and history.
 
 ### Option 2 — Run from source (developers)
 
@@ -44,7 +46,7 @@ Requires [Python 3.10+](https://www.python.org/downloads/) with **Add to PATH** 
 
 1. Download or clone this repo
 2. Double-click **`install.bat`**
-3. Double-click the **FTC Whisper** shortcut on your desktop
+3. Double-click the **BrightLink Echo** shortcut on your desktop
 
 ---
 
@@ -53,7 +55,7 @@ Requires [Python 3.10+](https://www.python.org/downloads/) with **Add to PATH** 
 The app works out of the box — no sign-in or API keys required.
 
 1. The app starts minimised to the system tray (look for the microphone icon)
-2. Click the tray icon → **Open FTC Whisper** to see the dashboard
+2. Click the tray icon → **Open BrightLink Echo** to see the dashboard
 3. Click inside any text field anywhere on your PC
 4. Hold **Alt+V** and speak → release to transcribe
 
@@ -167,7 +169,7 @@ Some elevated (admin) windows block hotkeys from non-admin processes. Try runnin
 The Whisper model starts loading in the background as soon as the app opens. The first transcription may still take a few seconds while the model finishes loading; all subsequent ones are instant.
 
 **App doesn't appear after double-clicking the shortcut**  
-Check the system tray — the app runs minimised by default. Click the microphone icon → Open FTC Whisper.
+Check the system tray — the app runs minimised by default. Click the microphone icon → Open BrightLink Echo.
 
 **`install.bat` fails with "Python not found"**  
 Re-install Python from [python.org](https://www.python.org/downloads/) and tick **Add Python to PATH**.
@@ -176,22 +178,22 @@ Re-install Python from [python.org](https://www.python.org/downloads/) and tick 
 Make sure a text field is focused before releasing the hotkey. Some apps (e.g. games) block clipboard paste — try switching `inject_method` to `keystrokes` in `config.json`.
 
 **A stray letter appears before the transcribed text (e.g. `vHello world`)**  
-This happens in hold mode when you release the modifier key (Alt) before the base key (V). FTC Whisper now suppresses the bare base key during recording so no stray character reaches the target window.
+This happens in hold mode when you release the modifier key (Alt) before the base key (V). BrightLink Echo now suppresses the bare base key during recording so no stray character reaches the target window.
 
 **Waveform bars are flat / not reacting to voice**  
 The bars always animate gently even at silence. If they aren't responding to speech, check that Windows has microphone access enabled (**Settings → Privacy → Microphone**) and that the correct input device is selected as your default in Windows Sound settings. You can also force a specific mic by setting `input_device` in `config.json`.
 
 **Waveform moves but transcription is empty / inconsistent**  
-Some microphones only open reliably at 44.1/48 kHz. FTC Whisper now auto-detects the active capture rate and resamples to Whisper's expected 16 kHz internally. If this still happens, confirm you're speaking into the selected microphone and try setting `input_device` explicitly in `config.json`.
+Some microphones only open reliably at 44.1/48 kHz. BrightLink Echo now auto-detects the active capture rate and resamples to Whisper's expected 16 kHz internally. If this still happens, confirm you're speaking into the selected microphone and try setting `input_device` explicitly in `config.json`.
 
 **Wrong microphone used**  
-FTC Whisper uses the current Windows default input and automatically falls back across available microphones if one fails. To force a specific mic, set `input_device` in `config.json` to part of the microphone name (e.g. `"USB"`) or a device index from `Recorder.get_input_devices()`.
+BrightLink Echo uses the current Windows default input and automatically falls back across available microphones if one fails. To force a specific mic, set `input_device` in `config.json` to part of the microphone name (e.g. `"USB"`) or a device index from `Recorder.get_input_devices()`.
 
 **Floating badge appears in the wrong place**  
 The badge anchors to the caret position after injection. In apps (like Chrome's address bar) that don't expose caret position via the accessibility API, it falls back to where your cursor was when you started recording. Make sure your cursor is near the text field before pressing the hotkey.
 
 **Outlook shows ribbon key tips when using Alt+V**  
-FTC Whisper normalises modifier key state on hotkey release to prevent stuck Alt/menu mode in Outlook and other Office editors.
+BrightLink Echo normalises modifier key state on hotkey release to prevent stuck Alt/menu mode in Outlook and other Office editors.
 
 ---
 

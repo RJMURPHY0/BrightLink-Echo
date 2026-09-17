@@ -15,6 +15,7 @@ History tab falls back to the generic tile.
 
 import ctypes
 import ctypes.wintypes as wt
+import brand
 import os
 import re
 import sys
@@ -24,12 +25,12 @@ _ICON_SIZE = 36  # rendered size in the history row (fills the row height; the
                  # header's reduced pady keeps the row the same 44px tall)
 
 # ── Our own identity ─────────────────────────────────────────────────────────
-# RENAMING THE APP: change these two lines and rename the matching PNG in
-# assets/brand_icons/. Dictating into our OWN window (the History search box,
-# the refine popup) must be logged as this app with this logo — deriving it
+# The name comes from brand.py. The icon slug is a bundled file name and stays
+# put across renames. Dictating into our OWN window (the History search box,
+# the refine popup) must be logged as this app with this logo: deriving it
 # from the running exe gave "Python3.12" from source and "Ftc Whisper" frozen,
 # each with the interpreter's icon instead of ours.
-SELF_APP_NAME = "FTC Whisper"
+SELF_APP_NAME = brand.PRODUCT_NAME
 SELF_BRAND_SLUG = "ftcwhisper"      # assets/brand_icons/<slug>.png
 
 # Base dir for bundled assets — sys._MEIPASS in a frozen build, else this file's
@@ -554,8 +555,9 @@ _BRAND_ALIASES = {
     "atlassian": "atlassian", "jira": "atlassian", "confluence": "atlassian",
     "google docs": "docs", "docs": "docs",
     "google drive": "drive", "drive": "drive",
-    SELF_APP_NAME.lower(): SELF_BRAND_SLUG,
 }
+# Our own rows, under today's name and every name older rows were written with.
+_BRAND_ALIASES.update({n.lower(): SELF_BRAND_SLUG for n in brand.product_names()})
 
 # Slugs we actually shipped a PNG for (guards a name mapping to a missing file).
 try:

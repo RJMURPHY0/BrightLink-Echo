@@ -6,6 +6,7 @@ should never crash or block the main application.
 """
 
 import json
+import brand
 import os
 import subprocess
 import sys
@@ -15,8 +16,10 @@ import time
 import urllib.request
 from typing import Callable, Optional
 
-_GITHUB_API = "https://api.github.com/repos/RJMURPHY0/FTC_Whisper/releases/latest"
-_DOWNLOAD_FILENAME = "FTC-Whisper.exe"
+_GITHUB_API = f"https://api.github.com/repos/{brand.GITHUB_REPO}/releases/latest"
+# The update channel. Deliberately NOT the download people see: every
+# installed copy, and the CRM's download button, look for this exact name.
+_DOWNLOAD_FILENAME = brand.UPDATE_ASSET
 
 _cached_release: Optional[dict] = None
 
@@ -33,7 +36,7 @@ def _app_data_dir() -> str:
     base = os.environ.get("LOCALAPPDATA") or os.path.join(
         os.path.expanduser("~"), "AppData", "Local"
     )
-    d = os.path.join(base, "FTC Whisper")
+    d = os.path.join(base, brand.DATA_DIR_NAME)
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:
@@ -60,6 +63,59 @@ def write_last_run_version(version: str) -> None:
             f.write(version)
     except Exception:
         pass
+
+
+def _last_name_path() -> str:
+    return os.path.join(_app_data_dir(), "last-product-name.txt")
+
+
+def read_last_run_name() -> str:
+    """Product name the app last ran under, or "" when nothing recorded it:
+    a fresh install, or any version from before names were recorded."""
+    try:
+        with open(_last_name_path(), "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def write_last_run_name(name: str) -> None:
+    try:
+        with open(_last_name_path(), "w", encoding="utf-8") as f:
+            f.write(name)
+    except Exception:
+        pass
+
+
+def update_announcement(prev_version: str, prev_name: str,
+                        version: str, name: str) -> Optional[dict]:
+    """What to tell the user on the first launch after an update, or None.
+
+    Returns {"title", "message", "toast", "toast_ms"}. A rename gets its own
+    wording: an unfamiliar name appearing in the tray after a silent
+    auto-update reads like something else got installed. It is ONE notice, not
+    an update notice plus a rename notice racing for the same tray balloon.
+
+    prev_name is "" for every version from before names were recorded, and
+    all of those shipped as brand.UNRECORDED_PRODUCT_NAME.
+    """
+    if not prev_version or not is_newer(version, prev_version):
+        return None
+    before = prev_name or brand.UNRECORDED_PRODUCT_NAME
+    # Case alone ("Brightlink" to "BrightLink") is a spelling fix, not news.
+    if before.casefold() != name.casefold():
+        return {
+            "title": f"{before} is now {name}",
+            "message": f"Updated to v{version}. Same app and settings, new name.",
+            "toast": f"{before} is now {name} (v{version})",
+            "toast_ms": 9000,
+        }
+    return {
+        "title": name,
+        "message": f"Updated to v{version} ✓",
+        "toast": f"{name} updated to v{version} ✓",
+        "toast_ms": 6000,
+    }
 
 
 def cached_release() -> Optional[dict]:
@@ -99,7 +155,7 @@ def get_latest_release() -> Optional[dict]:
     try:
         req = urllib.request.Request(
             _GITHUB_API,
-            headers={"User-Agent": "FTC-Whisper-Updater/1.0"},
+            headers={"User-Agent": brand.UPDATER_USER_AGENT},
         )
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode())
@@ -155,7 +211,7 @@ def download_update(
     mid-stream cut produces a partial file that still starts with 'MZ' and
     passes the size floor, and installing it bricks the app.
     """
-    req = urllib.request.Request(url, headers={"User-Agent": "FTC-Whisper-Updater/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": brand.UPDATER_USER_AGENT})
     with urllib.request.urlopen(req, timeout=60) as resp:
         total = int(resp.headers.get("Content-Length") or 0)
         done = 0

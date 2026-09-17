@@ -21,6 +21,7 @@ hotkey is still physically held causes its own problems.
 
 import ctypes
 import ctypes.wintypes
+import brand
 import os
 import threading
 import time
@@ -453,7 +454,7 @@ def _log_inject_failure(detail: str) -> None:
     was elevated. %LOCALAPPDATA%\\FTC Whisper\\inject-failures.log"""
     try:
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        folder = os.path.join(base, "FTC Whisper")
+        folder = os.path.join(base, brand.DATA_DIR_NAME)
         os.makedirs(folder, exist_ok=True)
         path = os.path.join(folder, "inject-failures.log")
         lines: list[str] = []
@@ -745,7 +746,7 @@ class Injector:
                         f"method={self.method} chars={len(text)}"
                         + (" partial-direct (no paste retry)"
                            if self._partial_direct else "")
-                        + (" ELEVATED-TARGET (run FTC Whisper as admin)"
+                        + (f" ELEVATED-TARGET (run {brand.PRODUCT_NAME} as admin)"
                            if elevated else "")
                     )
                     print(f"[Injector] FAILED: {detail}")
@@ -1234,7 +1235,7 @@ class Injector:
                 print(f"[Injector] Ctrl+V SendInput blocked (sent={sent}/4)")
                 self._paste_refusal = f"Ctrl+V SendInput blocked ({sent}/4)"
                 if foreground_is_elevated_blocked():
-                    print("[Injector] Foreground window is elevated — run FTC Whisper as admin to type into it.")
+                    print(f"[Injector] Foreground window is elevated — run {brand.PRODUCT_NAME} as admin to type into it.")
                 return False
 
             self.last_method = "clipboard"

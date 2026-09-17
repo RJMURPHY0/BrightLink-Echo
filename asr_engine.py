@@ -16,6 +16,7 @@ If anything fails (download, load, inference) the app silently falls back to
 the faster-whisper pipeline — this engine is strictly additive.
 """
 
+import brand
 import os
 import re
 import threading
@@ -54,7 +55,7 @@ _TOTAL_DOWNLOAD_BYTES = 680_000_000  # rough, for progress reporting
 
 def models_dir(version: str = DEFAULT_MODEL_VERSION) -> str:
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "FTC Whisper", "models",
+    return os.path.join(base, brand.DATA_DIR_NAME, "models",
                         f"parakeet-tdt-0.6b-{version}-onnx")
 
 
@@ -94,7 +95,7 @@ def download_model(
                 continue
             tmp = dest + ".part"
             url = f"{_hf_base(version)}/{name}"
-            req = urllib.request.Request(url, headers={"User-Agent": "FTC-Whisper"})
+            req = urllib.request.Request(url, headers={"User-Agent": brand.HTTP_USER_AGENT})
             with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as f:
                 while True:
                     chunk = resp.read(1024 * 512)

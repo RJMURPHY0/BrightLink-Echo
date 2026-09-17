@@ -11,6 +11,7 @@ Audio never leaves the machine: playback/retry work only for dictations
 made on this device. Files are pruned oldest-first past a count/size cap.
 """
 
+import brand
 import os
 import re
 import threading
@@ -27,7 +28,7 @@ _write_lock = threading.Lock()
 
 def audio_dir() -> str:
     app_data = os.environ.get("APPDATA") or os.path.expanduser("~")
-    folder = os.path.join(app_data, "FTC Whisper", "audio")
+    folder = os.path.join(app_data, brand.DATA_DIR_NAME, "audio")
     os.makedirs(folder, exist_ok=True)
     return folder
 

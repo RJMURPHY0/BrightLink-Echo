@@ -91,6 +91,26 @@ except SystemExit:
 except Exception as _e:
     raise SystemExit(f"[spec] Could not generate bundled config: {_e}")
 
+# ── Product names ─────────────────────────────────────────────────────────────
+# Display names come from brand.py; the exe name and data folder are brand.py's
+# FROZEN values (installed copies and taskbar pins find them by name). The
+# version resource is version_info.txt with its NAME strings replaced from
+# brand.py: its version numbers are used exactly as written, so bumping them
+# stays the manual release step it has always been.
+import time as _time
+import brand as _brand
+
+_version_file = os.path.join(APP_DIR, 'build', 'sanitized', 'version_info.txt')
+try:
+    with open(os.path.join(APP_DIR, 'version_info.txt'), 'r', encoding='utf-8-sig') as _f:
+        _rendered = _brand.render_version_info(_f.read(), _time.localtime().tm_year)
+    with open(_version_file, 'w', encoding='utf-8') as _f:
+        _f.write(_rendered)
+    print(f"[spec] Version resource named {_brand.PRODUCT_NAME!r} "
+          f"({_brand.COMPANY_NAME}), exe {_brand.CANONICAL_EXE_NAME!r}")
+except Exception as _e:
+    raise SystemExit(f"[spec] Could not generate the version resource: {_e}")
+
 datas += [
     (os.path.join(APP_DIR, 'logo.png'),     '.'),
     (os.path.join(APP_DIR, 'logo.ico'),     '.'),
@@ -113,6 +133,7 @@ hiddenimports += [
     # Imported lazily inside functions (registration thread / --uninstall), so
     # spell it out rather than trusting bytecode scanning to find it.
     'app_install',
+    'brand',
     # Imported lazily inside text_expansion._dm() for the vocabulary phonetic
     # net — bytecode scanning misses a function-level import, so name it here.
     # (The feature degrades to a no-op if absent, but we want it in the build.)
@@ -155,7 +176,9 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='FTC Whisper',
+    # FROZEN, never the display name: dist\FTC Whisper.exe is what CI copies to
+    # both release assets, and OriginalFilename names the installed exe.
+    name=_brand.EXE_BASENAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -171,7 +194,7 @@ exe = EXE(
     # ExpandEnvironmentStringsW; the "no expansion" note in --runtime-tmpdir's
     # help applies to POSIX). We already require this folder to be writable —
     # the model, the canonical exe and the logs all live in it.
-    runtime_tmpdir=r'%LOCALAPPDATA%\FTC Whisper\runtime',
+    runtime_tmpdir='%LOCALAPPDATA%\\' + _brand.DATA_DIR_NAME + '\\runtime',
     console=False,          # no black console window
     disable_windowed_traceback=False,
     # Embedded exe icon = the black "FTC whisper" wordmark tile — this is what
@@ -179,5 +202,5 @@ exe = EXE(
     # (set at runtime via iconbitmap(logo.ico)); logo.png (in-app header) also
     # stays the swirl. So: swirl in-app + title bar, wordmark on the exe/pin.
     icon=os.path.join(APP_DIR, 'exe_icon.ico'),
-    version=os.path.join(APP_DIR, 'version_info.txt'),
+    version=_version_file,
 )

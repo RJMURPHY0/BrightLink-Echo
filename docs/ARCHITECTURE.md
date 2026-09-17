@@ -1,8 +1,10 @@
-# FTC Whisper — Architecture
+# BrightLink Echo (formerly FTC Whisper): Architecture
 
 Windows push-to-talk dictation. Hold a hotkey, speak, release — the transcribed text
-appears in whatever app has focus. Python + tkinter, shipped as a single signed
-`FTC-Whisper.exe`.
+appears in whatever app has focus. Python + tkinter, shipped as a single exe,
+published twice per release: `BrightLink-Echo.exe` for downloads and
+`FTC-Whisper.exe`, the frozen name every installed auto-updater fetches.
+Display names live in `brand.py`; folders, keys and that asset name never change.
 
 The whole design serves one goal: **stop-latency stays flat no matter how long you
 talk**. Press, speak, release, text. Everything below exists to protect that.

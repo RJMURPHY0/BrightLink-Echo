@@ -14,6 +14,7 @@ huge history can never block the app or fan out into a big query.
 
 import datetime
 import json
+import brand
 import os
 import threading
 
@@ -39,7 +40,7 @@ _MAX_DAYS_KEPT = 1100
 
 def _stats_path() -> str:
     app_data = os.environ.get("APPDATA") or os.path.expanduser("~")
-    folder = os.path.join(app_data, "FTC Whisper")
+    folder = os.path.join(app_data, brand.DATA_DIR_NAME)
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, "stats.json")
 

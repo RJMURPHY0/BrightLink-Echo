@@ -11,7 +11,11 @@ import shutil
 import subprocess
 import sys
 
+import brand
+
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+NAME = brand.PRODUCT_NAME
+_PS_NAME = NAME.replace("'", "''")  # inside PowerShell single quotes
 PYTHON  = os.path.join(APP_DIR, "venv", "Scripts", "pythonw.exe")
 APP_PY  = os.path.join(APP_DIR, "app.py")
 LOGO_ICO = os.path.join(APP_DIR, "logo.ico")
@@ -91,12 +95,12 @@ def create_shortcut(icon_path: str) -> None:
     ps = (
         "$sh = New-Object -ComObject WScript.Shell; "
         "$d  = $sh.SpecialFolders('Desktop'); "
-        "$lnk = $sh.CreateShortcut($d + '\\FTC Whisper.lnk'); "
+        f"$lnk = $sh.CreateShortcut($d + '\\{_PS_NAME}.lnk'); "
         f"$lnk.TargetPath       = '{PYTHON}'; "
         f"$lnk.Arguments        = '\"{APP_PY}\"'; "
         f"$lnk.WorkingDirectory = '{APP_DIR}'; "
         f"$lnk.IconLocation     = '{icon_loc}'; "
-        "$lnk.Description      = 'FTC Whisper - Voice-to-Text'; "
+        f"$lnk.Description      = '{_PS_NAME} - Voice-to-Text'; "
         "$lnk.Save()"
     )
 
@@ -106,7 +110,7 @@ def create_shortcut(icon_path: str) -> None:
             capture_output=True, text=True, timeout=20,
         )
         if result.returncode == 0:
-            print("  [OK] Desktop shortcut created: 'FTC Whisper'")
+            print(f"  [OK] Desktop shortcut created: '{NAME}'")
         else:
             print(f"  [WARN] Shortcut creation failed:\n{result.stderr.strip()}")
     except Exception as e:
@@ -129,12 +133,12 @@ def add_to_startup() -> None:
     icon_loc = f"{LOGO_ICO},0" if os.path.exists(LOGO_ICO) else f"{PYTHON},0"
     ps = (
         "$sh = New-Object -ComObject WScript.Shell; "
-        f"$lnk = $sh.CreateShortcut('{startup_dir}\\FTC Whisper.lnk'); "
+        f"$lnk = $sh.CreateShortcut('{startup_dir}\\{_PS_NAME}.lnk'); "
         f"$lnk.TargetPath       = '{PYTHON}'; "
         f"$lnk.Arguments        = '\"{APP_PY}\"'; "
         f"$lnk.WorkingDirectory = '{APP_DIR}'; "
         f"$lnk.IconLocation     = '{icon_loc}'; "
-        "$lnk.Description      = 'FTC Whisper - Voice-to-Text'; "
+        f"$lnk.Description      = '{_PS_NAME} - Voice-to-Text'; "
         "$lnk.Save()"
     )
     try:
@@ -155,9 +159,9 @@ def register_url_protocol() -> None:
     try:
         import winreg
         cmd = f'"{PYTHON}" "{APP_PY}" "%1"'
-        base = r"Software\Classes\ftcwhisper"
+        base = "Software\\Classes\\" + brand.URL_SCHEME
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base) as k:
-            winreg.SetValueEx(k, "",             0, winreg.REG_SZ, "URL:FTC Whisper")
+            winreg.SetValueEx(k, "",             0, winreg.REG_SZ, f"URL:{NAME}")
             winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\shell\open\command") as k:
             winreg.SetValueEx(k, "", 0, winreg.REG_SZ, cmd)
@@ -169,7 +173,7 @@ def register_url_protocol() -> None:
 def main() -> None:
     print()
     print("  ==============================================")
-    print("   FTC Whisper  |  Post-install setup")
+    print(f"   {NAME}  |  Post-install setup")
     print("  ==============================================")
 
     _banner("Setting up config...")
@@ -193,7 +197,7 @@ def main() -> None:
 
     print()
     print("  ==============================================")
-    print("   All done!  Double-click 'FTC Whisper'")
+    print(f"   All done!  Double-click '{NAME}'")
     print("   on your desktop to launch the app.")
     print("  ==============================================")
     print()

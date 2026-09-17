@@ -5,6 +5,7 @@ Dashboard: Home / Hotkey / History tabs.
 Dark theme with rounded-corner cards via Canvas.
 """
 
+import brand
 import bisect
 import threading
 import time
@@ -2140,7 +2141,7 @@ class AppWindow:
 
         self._root = tk.Tk()
         self._root.withdraw()  # hide before Windows has a chance to render the default blank window
-        self._root.title("FTC Whisper")
+        self._root.title(brand.PRODUCT_NAME)
         # Window / taskbar icon — the FTC swirl (logo.ico). Setting it at runtime is
         # what actually changes the visible title-bar + taskbar icon; the exe's
         # embedded icon alone doesn't update a running window.
@@ -2226,7 +2227,7 @@ class AppWindow:
             err_frame = tk.Frame(self._root, bg=C["bg"])
             err_frame.pack(fill="both", expand=True, padx=16, pady=16)
             tk.Label(
-                err_frame, text="FTC Whisper — Startup Error",
+                err_frame, text=f"{brand.PRODUCT_NAME} — Startup Error",
                 fg=C["error"], bg=C["bg"],
                 font=("Segoe UI", 12, "bold"), anchor="w",
             ).pack(fill="x", pady=(0, 8))
@@ -2446,7 +2447,7 @@ class AppWindow:
             tk.Label(header, image=self._logo_photo, bg=C["bg"]).pack()
         else:
             tk.Label(
-                header, text="FTC Whisper",
+                header, text=brand.PRODUCT_NAME,
                 fg=C["accent"], bg=C["bg"],
                 font=("Segoe UI", 22, "bold"),
             ).pack()
@@ -2833,7 +2834,7 @@ class AppWindow:
         if self._splash_logo:
             tk.Label(inner, image=self._splash_logo, bg=C["bg"]).pack(pady=(0, 24))
         else:
-            tk.Label(inner, text="FTC Whisper", fg=C["accent"], bg=C["bg"],
+            tk.Label(inner, text=brand.PRODUCT_NAME, fg=C["accent"], bg=C["bg"],
                      font=("Segoe UI", 20, "bold")).pack(pady=(0, 24))
         self._signing_in_lbl = tk.Label(
             inner, text="Signing you in…", fg=C["subtext"], bg=C["bg"],
@@ -6337,7 +6338,7 @@ class AppWindow:
         try:
             path = filedialog.asksaveasfilename(
                 parent=self._root, defaultextension=".txt",
-                initialfile=f"FTC Whisper {stamp}.txt",
+                initialfile=f"{brand.PRODUCT_NAME} {stamp}.txt",
                 filetypes=[("Text file", "*.txt"), ("All files", "*.*")])
         except tk.TclError:
             return
@@ -6499,7 +6500,7 @@ class AppWindow:
 
         ver_row = tk.Frame(ver_card, bg=C["surface"])
         ver_row.pack(fill="x", pady=(3, 0))
-        ver_lbl_text = f"Version {self._version}" if self._version else "FTC Whisper"
+        ver_lbl_text = f"Version {self._version}" if self._version else brand.PRODUCT_NAME
         tk.Label(ver_row, text=ver_lbl_text,
                  fg=C["text"], bg=C["surface"],
                  font=("Segoe UI", 10), anchor="w").pack(side="left")
