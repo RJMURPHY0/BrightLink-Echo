@@ -73,10 +73,62 @@ class NumberedTests(unittest.TestCase):
         out = fmt("First, wake up. Second, get dressed. Third, leave the house.")
         self.assertEqual(out, "1. Wake up\n2. Get dressed\n3. Leave the house")
 
+    def test_the_2026_09_21_number_one_example(self):
+        # Reported against a competitor's output: the joining "so," goes, the
+        # lead-in takes the colon, and "number one" is carried by the "1.".
+        self.assertEqual(
+            fmt("So, I want to start a list for a few things that I want to "
+                "do, so, number one, I want to have good CPU energy. Number "
+                "two, I want to have good GPU energy."),
+            "So, I want to start a list for a few things that I want to do:"
+            "\n\n1. I want to have good CPU energy"
+            "\n2. I want to have good GPU energy")
+
+    def test_number_markers_written_as_digits(self):
+        out = fmt("Here are the jobs, number 1, fix the login page. Number 2, "
+                  "update the search bar.")
+        self.assertIn("\n\n1. Fix the login page\n2. Update the search bar", out)
+
+    def test_two_explicit_number_markers_need_no_announcement(self):
+        self.assertEqual(
+            fmt("Number one, fix the login page. Number two, update the "
+                "search bar."),
+            "1. Fix the login page\n2. Update the search bar")
+
+    def test_number_one_inside_a_sentence_is_prose(self):
+        for s in ("My number one priority is the release. Then number two on "
+                  "the list is docs.",
+                  "We scored number one in the league this year and it was "
+                  "great."):
+            self.assertEqual(fmt(s), s)
+
     def test_two_markers_without_an_announcement_are_left_alone(self):
         s = ("First of all, thanks very much for coming along today. Second, "
              "let us make a start on the agenda.")
         self.assertEqual(fmt(s), s)
+
+
+class SpokenBulletTests(unittest.TestCase):
+    def test_bullet_point_one_two_three(self):
+        self.assertEqual(
+            fmt("Things to pack for the trip. Bullet point one, a warm coat. "
+                "Bullet point two, some walking boots. Bullet point three, the "
+                "travel adapters."),
+            "Things to pack for the trip.\n\n• A warm coat\n"
+            "• Some walking boots\n• The travel adapters")
+
+    def test_bare_and_next_bullet_point(self):
+        self.assertEqual(
+            fmt("Here is what I need, bullet point, the new laptop charger. "
+                "Next bullet point, a spare mouse for the office."),
+            "Here is what I need:\n\n• The new laptop charger\n"
+            "• A spare mouse for the office")
+
+    def test_bullets_and_numbers_never_mix(self):
+        out = fmt("Here are two things. Bullet point one, a warm coat. Number "
+                  "two, some walking boots.")
+        self.assertNotIn("1.", out)
+        self.assertNotIn("•", out)
 
 
 class BulletTests(unittest.TestCase):
@@ -197,6 +249,10 @@ class CorpusRegressionTests(unittest.TestCase):
             if (list_format._ANNOUNCE.search(text)
                     and list_format._MARKER_RE.search(text)):
                 continue
+            # Or where it said "number one … number two" / "bullet point one".
+            if any(mk["kind"] in ("num", "bullet")
+                   for mk in list_format._markers(text)):
+                continue
             offenders.append((text[:120], out[:120]))
         self.assertEqual(offenders, [],
                          f"{len(offenders)} corpus transcript(s) restructured "
@@ -209,6 +265,8 @@ class CorpusRegressionTests(unittest.TestCase):
         allowed = set(list_format._ORDINALS) | {"and", "or"}
         allowed |= {w for c in list_format._CLOSERS for w in c.split()}
         allowed |= {"number"} | set(list_format._NUMBER_WORDS)
+        allowed |= {"bullet", "point", "next", "another", "new"}
+        allowed |= {"then", "also", "but", "so", "now", "okay", "ok", "right"}
         for text in self._load():
             out = fmt(text)
             if out == text:

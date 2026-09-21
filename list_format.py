@@ -16,20 +16,26 @@ Two shapes, and only two, because this changes the SHAPE of what the user said:
   * a **numbered list**, driven by ordinal markers at clause boundaries
     ("first … second … third", "firstly … secondly", "number one … number
     two", with "lastly"/"finally" allowed to close a run already under way);
-  * a **bulleted list**, driven by an explicit announcement ("here are the
-    three things", "we need the following") immediately followed by a short
-    comma series ending in "and"/"or".
+  * a **bulleted list**, driven either by spoken bullet markers ("bullet
+    point one … bullet point two", "next bullet point") or by an explicit
+    announcement ("here are the three things", "we need the following")
+    immediately followed by a short comma series ending in "and"/"or".
 
-The guards exist because the markers are ordinary English. A run of two needs
-an ANNOUNCEMENT in the lead-in ("a list of three things"); without one it takes
-three markers before anything happens, so a speaker who merely says "first of
-all … second …" in passing is left alone. Every item must be at least two
-words, and a bullet series must be at least three short items.
+The guards exist because the markers are ordinary English. A run of two
+ordinals needs an ANNOUNCEMENT in the lead-in ("a list of three things");
+without one it takes three markers before anything happens, so a speaker who
+merely says "first of all … second …" in passing is left alone. EXPLICIT
+markers ("number one", "bullet point one") are the exception: nobody says
+"number one … number two" at clause boundaries except to dictate a list, so
+two of those are enough. Every item must be at least two words, and a comma
+series must be at least three short items.
 
-Content is never invented and only ever ONE thing is deleted: a bare discourse
-marker that the number now carries ("First, do X" -> "1. Do X"). Where the
-marker is part of the sentence ("first is the first thing") it stays, because
-"1. Is the first thing" is worse than a little redundancy.
+Content is never invented and the only thing deleted is the marker the number
+(or bullet) now carries ("First, do X" -> "1. Do X", "number one, do X" ->
+"1. Do X"), plus a joining word in front of it ("so, number one"). Where an
+ORDINAL is part of the sentence ("first is the first thing") it stays, because
+"1. Is the first thing" is worse than a little redundancy. "Number one" and
+"bullet point one" are never part of the sentence, so they always go.
 
 Applied once, on the whole utterance, at app.py's single post-processing point
 — NEVER inside an engine's _post_process, which also runs on streamed chunks
@@ -61,17 +67,29 @@ _NUMBER_WORDS = {
 # many ordinary sentences.
 _CLOSERS = ("lastly", "finally", "last of all", "last but not least")
 
+_NUM_ALT = "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True)) + r"|\d{1,2}"
+# Spoken bullets: "bullet point one", "bullet 2", "bullet point number three",
+# "next bullet point", or a bare "bullet point" that takes the next slot. The
+# engines write numbers as words or digits, so both are accepted.
+_BULLET_ALT = (
+    r"(?:another|next|new)\s+bullet(?:\s+point)?"
+    rf"|bullet(?:\s+point)?(?:\s+number)?\s+(?:{_NUM_ALT})"
+    r"|bullet\s+point"
+)
 _MARKER_ALT = "|".join(
-    [r"first of all", r"first off"]
+    [_BULLET_ALT, r"first of all", r"first off"]
     + sorted(_ORDINALS, key=len, reverse=True)
-    + [rf"number\s+{w}" for w in sorted(_NUMBER_WORDS, key=len, reverse=True)]
+    + [rf"number\s+(?:{_NUM_ALT})"]
     + [re.escape(c) for c in _CLOSERS]
 )
 # group(1) separator · group(2) connective · group(3) marker · group(4) the
 # punctuation that makes the marker a bare discourse word ("First, do X").
+# A connective may carry its own comma ("so, number one"), which is how people
+# lead into a list out loud.
 _MARKER_RE = re.compile(
-    rf"(^|[.!?;:,]\s+|\n+)((?:(?:and|then|also|but|so|now|next)\s+)*)"
-    rf"({_MARKER_ALT})\b(\s*,)?",
+    r"(^|[.!?;:,]\s+|\n+)"
+    r"((?:(?:and|then|also|but|so|now|next|okay|ok|right)\s*,?\s+)*)"
+    rf"({_MARKER_ALT})\b(\s*[,:])?",
     re.IGNORECASE,
 )
 
@@ -80,7 +98,10 @@ _MARKER_RE = re.compile(
 _ANNOUNCE = re.compile(
     r"\b(?:here(?:'s|s| is| are)|there (?:is|are|were)|these are|those are"
     r"|the following|as follows|a list of|list of"
-    r"|(?:a )?(?:couple|few|number) of (?:things|reasons|steps|points|items)"
+    r"|(?:start|make|do|write|begin|got|have)\s+a\s+(?:quick\s+|short\s+)?list"
+    r"|list (?:for|of)"
+    r"|(?:a )?(?:couple(?: of)?|few|number of|handful of|bunch of) "
+    r"(?:things|reasons|steps|points|items|bits|tasks|ideas)"
     r"|(?:two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
     r"(?:things|reasons|steps|points|items|options|problems|issues|changes)"
     r"|(?:things|reasons|steps|points|items) (?:are|to do|i need|we need|i want)"
@@ -92,16 +113,25 @@ _SENTENCE_END = re.compile(r"[.!?](?:[\"'”’)\]]+)?(?=\s|$)")
 _MIN_ITEM_WORDS = 2
 
 
-def _marker_index(word: str):
-    """1-10 for an explicit marker, None for a run-closer ("finally")."""
+def _num(word: str):
+    return int(word) if word.isdigit() else _NUMBER_WORDS.get(word)
+
+
+def _marker_kind(word: str):
+    """(index, kind) for a marker. kind is "ord" (first, second), "num"
+    ("number one"), "bullet" or "close" ("finally"). index is a position,
+    None for a run-closer, or "next" for a bullet that takes the next slot."""
     w = " ".join(word.lower().split())
+    if "bullet" in w:
+        n = _num(w.split()[-1])
+        return (n if n else "next"), "bullet"
     if w.startswith("number "):
-        return _NUMBER_WORDS.get(w[7:])
+        return _num(w[7:]), "num"
     if w in ("first of all", "first off"):
-        return 1
+        return 1, "ord"
     if w in _CLOSERS:
-        return None
-    return _ORDINALS.get(w)
+        return None, "close"
+    return _ORDINALS.get(w), "ord"
 
 
 def _last_sentence(text: str) -> str:
@@ -114,27 +144,47 @@ def _cap(s: str) -> str:
     return s[0].upper() + s[1:] if s and s[0].islower() else s
 
 
-def _numbered(text: str):
-    """The ordinal-marker list, or None when the text does not clearly hold one."""
+def _markers(text: str):
     marks = []
     for m in _MARKER_RE.finditer(text):
+        idx, kind = _marker_kind(m.group(3))
+        # An ordinal that reads as part of the sentence stays in it; "number
+        # one" and "bullet point one" never do.
+        drop = bool(m.group(4)) or kind in ("num", "bullet")
         marks.append({
             "sep": m.start(1),
             "item": m.start(2),        # first character after the separator
-            "body": m.end(4) if m.group(4) else m.start(3),
-            "word": m.group(3),
-            "bare": bool(m.group(4)),  # "First," — a pure discourse marker
-            "idx": _marker_index(m.group(3)),
+            "body": (m.end(4) if m.group(4) else m.end(3)) if drop else m.start(3),
+            "idx": idx,
+            "kind": kind,
         })
+    return marks
+
+
+def _numbered(text: str):
+    """A marker-driven numbered or bulleted list, or None when the text does
+    not clearly hold one. Bullet markers and numbering markers never mix."""
+    marks = _markers(text)
     if not marks:
         return None
+    for bullets in (True, False):
+        out = _build_run(text, marks, bullets)
+        if out:
+            return out
+    return None
 
+
+def _build_run(text: str, marks, bullets: bool):
     run, expect = [], 1
     for mk in marks:
+        if mk["kind"] != "close" and (mk["kind"] == "bullet") != bullets:
+            continue
         idx = mk["idx"]
         if idx is None:                # "finally" only ever closes a run
             if not run:
                 continue
+            idx = expect
+        if idx == "next":              # "next bullet point" takes the next slot
             idx = expect
         if idx != expect:
             continue
@@ -145,9 +195,11 @@ def _numbered(text: str):
 
     lead = text[:run[0]["item"]].rstrip()
     announced = bool(_ANNOUNCE.search(_last_sentence(lead))) if lead else False
-    # Two markers is only a list when the speaker said one was coming; without
-    # that it takes three before this touches anything.
-    if len(run) < 3 and not announced:
+    explicit = all(mk["kind"] in ("num", "bullet", "close") for mk in run)
+    # Two ordinals is only a list when the speaker said one was coming; without
+    # that it takes three before this touches anything. "Number one … number
+    # two" and "bullet point one … two" say so themselves.
+    if len(run) < 3 and not announced and not explicit:
         return None
 
     bodies = []
@@ -167,8 +219,12 @@ def _numbered(text: str):
             tail = bodies[-1][cut.end():].strip()
             bodies[-1] = bodies[-1][:cut.end()]
 
-    items = [f"{i + 1}. {_cap(_trim_stop(b))}" for i, b in enumerate(bodies)]
-    return _assemble(lead, items, tail, announced)
+    items = [("• " if bullets else f"{i + 1}. ") + _cap(_trim_stop(b))
+             for i, b in enumerate(bodies)]
+    # An explicit run introduces itself, so its lead-in takes the colon too,
+    # unless that lead-in is a finished sentence of its own.
+    colon = announced or (explicit and lead[-1:] not in ".!?")
+    return _assemble(lead, items, tail, colon)
 
 
 # ── Bulleted list: an announcement plus a short comma series ─────────────────
