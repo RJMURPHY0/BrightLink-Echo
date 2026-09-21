@@ -367,36 +367,6 @@ class HotkeyTabLayoutTests(unittest.TestCase):
         self.assertIn("circle: bool = True", sig[:sig.index('"""')])
 
 
-class TabIconTests(unittest.TestCase):
-    def setUp(self):
-        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(here, "app_window.py"), encoding="utf-8") as f:
-            self.src = f.read()
-
-    def test_each_tab_declares_a_glyph(self):
-        loop = self.src.split("for name, label, glyph in")[1].split("]")[0]
-        for glyph in ('"home"', '"keyboard"', '"history"'):
-            self.assertIn(glyph, loop)
-
-    def test_ink_and_glyph_are_set_together(self):
-        # The old handler read the label's fg back to decide the state, which
-        # broke the moment a third colour (hover) existed. One painter now
-        # owns both halves.
-        body = self.src[self.src.index("def _paint_tab"):]
-        body = body[:body.index("def _tab_hover")]
-        self.assertIn("btn.configure(fg=colour)", body)
-        self.assertIn("btn.configure(image=ph)", body)
-        switch = self.src[self.src.index("def _switch_dash_tab"):]
-        switch = switch[:switch.index("\n    def ", 10)]
-        self.assertIn('self._paint_tab(n, "on" if active else "off")', switch)
-
-    def test_hovering_the_active_tab_does_not_dim_it(self):
-        body = self.src[self.src.index("def _tab_hover"):]
-        body = body[:body.index("def _switch_dash_tab")]
-        self.assertIn("_current_tab", body)
-        self.assertIn("return", body)
-
-
 class KeyCapParsingTests(unittest.TestCase):
     """A shortcut is drawn as caps; anything that is not a shortcut is not.
 

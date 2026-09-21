@@ -30,6 +30,14 @@ uninstaller and app.py's pre-import startup guard all read this module.
 
 PRODUCT_NAME = "BrightLink Echo"
 
+# The product's own name, as the BrightLink | Echo lockup and the post-dictation
+# badge show it (the text fallback when the artwork in assets/brand cannot load).
+PRODUCT_SHORT_NAME = "Echo"
+
+# The window's title bar (and the taskbar's hover text): the company, then the
+# product. Shortcuts, Installed apps and the exe keep PRODUCT_NAME.
+WINDOW_TITLE = "BrightLink - " + PRODUCT_SHORT_NAME
+
 # The registered legal name, exactly as Companies House shows it (company
 # 17459281): Publisher in Installed apps and CompanyName in the exe's
 # Properties. Keep it identical to the name on the code-signing certificate.

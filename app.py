@@ -50,6 +50,7 @@ from config import Config
 # so first paint is near-instant; _core_ready gates everything that needs them.
 from spoken_commands import apply_spoken_commands
 from list_format import format_lists
+from email_format import format_email, is_email_app
 import sentence_end
 from hotkey_manager import HotkeyManager, TriggerHotkeyManager, AppState
 from feedback import Feedback
@@ -61,7 +62,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.6.80"
+APP_VERSION = "1.6.81"
 
 
 class _RECT(ctypes.Structure):
@@ -263,6 +264,8 @@ class WhisperFlowApp:
 
         self._recording_hwnd: int = 0
         self._recording_app = None
+        self._recording_email = False  # dictation started in an email client
+        self._sender_name = ""         # signed-in user's name, for email sign-offs
         self._mic_loop_running = threading.Event()
         self._mic_level_smooth = 0.0
 
@@ -1338,6 +1341,8 @@ class WhisperFlowApp:
                 if not (_app_snapshot.get("app_name") or _app_snapshot.get("app_exe")):
                     from app_icons import capture_app_info
                     self._recording_app = capture_app_info(self._recording_hwnd)
+                    self._recording_email = self._is_email_window(
+                        self._recording_hwnd, self._recording_app)
             except Exception:
                 if not getattr(self, "_recording_app", None):
                     self._recording_app = {"app_name": "", "app_exe": ""}
@@ -1650,6 +1655,18 @@ class WhisperFlowApp:
                 print("[App] Spoken list laid out")
                 transcribed_text = _lf
 
+        # Email layout: greeting, sign-off and name on their own lines, but
+        # only when the dictation started in an email client. Same position
+        # and same Live Typing exemption as the list layout, for the same
+        # reasons (a snippet body is verbatim; live-typed words are already in
+        # the document).
+        _email_ctx = self._email_layout_on()
+        if transcribed_text and _email_ctx:
+            _ef = format_email(transcribed_text, self._sender_name)
+            if _ef != transcribed_text:
+                print("[App] Email laid out")
+                transcribed_text = _ef
+
         # The user's own vocabulary corrections, then their snippets — same
         # single post-processing point, for the same reason. Vocabulary first,
         # so a corrected term can complete a snippet trigger ("pipe drive link"
@@ -1782,7 +1799,8 @@ class WhisperFlowApp:
 
             try:
                 _text_to_inject = transcribed_text
-                if getattr(self.config, "trailing_space", False):
+                if (getattr(self.config, "trailing_space", False)
+                        and not _text_to_inject.endswith("\n")):
                     _text_to_inject += " "
                 _streamed_live = (session.injected_text
                                   if (session is not None and self._live_inject_active)
@@ -1983,7 +2001,8 @@ class WhisperFlowApp:
                 _upg_ctx = _ctx
                 _upg_hw = _hw
                 def _upgrade(_audio=final_audio, _rate=capture_rate, _ft=_fast,
-                             _ctx=_upg_ctx, _hw=_upg_hw, _seq=seq):
+                             _ctx=_upg_ctx, _hw=_upg_hw, _seq=seq,
+                             _email=_email_ctx):
                     accurate = self.transcriber.transcribe(
                         _audio, _rate, context_words=_ctx, hotwords_str=_hw).strip()
                     if not accurate:
@@ -1993,6 +2012,10 @@ class WhisperFlowApp:
                     # upgrade must not undo "/settings" back into "slash settings".
                     if getattr(self.config, "spoken_punctuation", True):
                         accurate = apply_spoken_commands(accurate)
+                    # ...and the same email layout, or accepting it would put
+                    # the greeting and sign-off back on one line.
+                    if _email:
+                        accurate = format_email(accurate, self._sender_name)
                     offered = False
                     # Show Whisper result immediately so the upgrade button appears fast
                     if accurate != _ft:
@@ -2364,6 +2387,23 @@ class WhisperFlowApp:
             except Exception:
                 pass
 
+    @staticmethod
+    def _is_email_window(hwnd: int, app: dict) -> bool:
+        """True when hwnd belongs to an email client (see email_format)."""
+        try:
+            from app_icons import _window_title
+            return is_email_app((app or {}).get("app_exe", ""),
+                                _window_title(hwnd))
+        except Exception:
+            return False
+
+    def _email_layout_on(self) -> bool:
+        """Email layout applies to THIS dictation: setting on, started in an
+        email client, and not Live Typing (its words are already typed)."""
+        return bool(getattr(self.config, "email_format", True)
+                    and not getattr(self.config, "live_inject", False)
+                    and self._recording_email)
+
     def _load_sender_name(self) -> None:
         """Fetch the signed-in user's name from their FTC profile and hand it to
         the popup, so Email refinements sign off with the real name instead of a
@@ -2374,6 +2414,7 @@ class WhisperFlowApp:
             print(f"[App] Sender-name fetch failed (non-fatal): {e}")
             return
         if name:
+            self._sender_name = name
             self.popup.set_sender_name(name)
             print(f"[App] Email sign-off name: {name}")
 
@@ -2425,6 +2466,10 @@ class WhisperFlowApp:
                 self._recording_app = capture_app_info(hwnd)
             except Exception:
                 self._recording_app = {"app_name": "", "app_exe": ""}
+            # Read NOW, like the app identity: a browser's title follows the
+            # active tab, and by release it may name a different page.
+            self._recording_email = self._is_email_window(
+                hwnd, self._recording_app)
             try:
                 pt = ctypes.wintypes.POINT()
                 ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))

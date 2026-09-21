@@ -194,6 +194,100 @@ class DigitTests(unittest.TestCase):
         self.assertEqual(text, apply_vocabulary_fuzzy(text, owned("Ticket 4472")))
 
 
+class FunctionWordTests(unittest.TestCase):
+    """A managed name may not absorb function words it does not carry.
+
+    Double Metaphone drops every vowel that does not open the string, so a
+    function word adds almost nothing to a span's code: "and" adds NT, "it"
+    adds T, "a" and "I" add nothing. A content word padded with one or two of
+    them reaches a longer name's code, which leaves the Jaro-Winkler floor as
+    the only gate.
+
+    Found by the corpus regression below on 2026-09-17. The corpus is a rolling
+    window of recent dictation, so the example is pinned here as a literal
+    where it cannot scroll away.
+    """
+
+    def test_the_real_dictation_is_left_alone(self):
+        # "room and it" and "Raymond Wood" both encode to RMNTT, and the
+        # collapsed letters scored jw 0.714 against the 0.70 floor.
+        text = "Display in their room and it should only ever affect my crochet 5."
+        self.assertEqual(text, apply_vocabulary_fuzzy(text, managed("Raymond Wood")))
+
+    def test_the_report_is_not_a_contact(self):
+        # A contact in the same live CRM cache turned "the report" in this
+        # repo's own prose into their name: 0RPRT on both sides, jw 0.700,
+        # exactly the floor. The name here is invented, and hits harder
+        # (jw 0.938).
+        text = "send me the report today"
+        self.assertEqual(text, apply_vocabulary_fuzzy(text, managed("Theo Rupert")))
+
+    def test_one_spoken_word_takes_the_strict_tier(self):
+        # 2026-09-21, real dictation against a live CRM cache: "going dark"
+        # became "going The Ark" (TRK both ways, jw 0.75 over the 0.70
+        # multi-word floor). One spoken word is a single-word match, whatever
+        # the name's length.
+        for text in ("it's going dark on the right",
+                     "the changes only fit in dark mode"):
+            with self.subTest(text=text):
+                self.assertEqual(text, apply_vocabulary_fuzzy(
+                    text, managed("The Ark")))
+
+    def test_a_near_identical_one_word_merge_still_corrects(self):
+        # The strict tier is near-identical-or-nothing, not never.
+        self.assertEqual("ship it with Fosse Way today",
+                         apply_vocabulary_fuzzy("ship it with fosseway today",
+                                                managed("Fosse Way")))
+
+    def test_one_function_word_in_three_is_still_padding(self):
+        # Not "mostly", but "and" is still not part of the name.
+        text = "the room and wood floor"
+        self.assertEqual(text, apply_vocabulary_fuzzy(text, managed("Raymond Wood")))
+
+    def test_ordinary_phrases_do_not_become_company_names(self):
+        for text, name in (("please keep in touch", "Intouch"),
+                           ("no end in sight yet", "Insight"),
+                           ("the piano is in tune", "Intune"),
+                           ("Mary and her son came", "Anderson")):
+            with self.subTest(text=text):
+                self.assertEqual(text, apply_vocabulary_fuzzy(text, managed(name)))
+
+    def test_a_name_never_swallows_the_word_after_it(self):
+        # "Wincanton a" encodes exactly like "Wincanton", so the old gate
+        # replaced both words with the name and deleted the "a".
+        text = "send Wincanton a letter"
+        self.assertEqual(text, apply_vocabulary_fuzzy(text, managed("Wincanton")))
+
+    def test_the_correction_still_lands_and_keeps_the_next_word(self):
+        self.assertEqual(
+            "send Wincanton a letter",
+            apply_vocabulary_fuzzy("send wincantun a letter", managed("Wincanton")))
+
+    def test_a_function_word_the_name_carries_is_not_padding(self):
+        self.assertEqual(
+            "the Bank of England rate",
+            apply_vocabulary_fuzzy("the bank of ingland rate",
+                                   managed("Bank of England")))
+
+    def test_half_function_words_is_refused_even_when_the_name_shares_them(self):
+        # "the hat" is a one-word match wearing an article. "The Hut" carries
+        # the article as well, so only the at-least-half rule refuses it.
+        text = "put on the hat"
+        self.assertEqual(text, apply_vocabulary_fuzzy(text, managed("The Hut")))
+
+    def test_mostly_function_words_can_never_become_a_managed_name(self):
+        # The strongest match there is: a name spelt like the span with the
+        # spaces taken out, so metaphone agrees and jw is 1.0. Each content
+        # word on its own is too far from its name to match, so only the span
+        # could ever have been rewritten.
+        for span in ("in tune", "at kins", "for tress", "it's grand",
+                     "room and it", "and her son"):
+            name = span.replace(" ", "").capitalize()
+            text = f"we said {span} yesterday"
+            with self.subTest(span=span):
+                self.assertEqual(text, apply_vocabulary_fuzzy(text, managed(name)))
+
+
 class PrecedenceTests(unittest.TestCase):
 
     def test_user_entry_wins_when_it_collides_with_a_managed_one(self):

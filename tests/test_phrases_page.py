@@ -81,17 +81,16 @@ class SourceInvariantTests(unittest.TestCase):
                       inspect.getsource(AppWindow._switch_dash_tab))
         self.assertIn("_build_phrases_page(self._phrases_frame)",
                       inspect.getsource(AppWindow._build_dashboard))
-        self.assertIn('_link_card("phrases"',
-                      inspect.getsource(AppWindow._build_settings_tab))
+        self.assertIn('_link_card(body, "phrases"',
+                      inspect.getsource(AppWindow._build_learning_tab))
 
-    def test_back_returns_to_settings(self):
-        self.assertIn('_switch_dash_tab("settings")',
+    def test_back_returns_to_learning(self):
+        self.assertIn('_switch_dash_tab("learning")',
                       inspect.getsource(AppWindow._build_phrases_page))
 
     def test_the_page_is_not_in_the_tab_bar(self):
-        src = inspect.getsource(AppWindow._build_dashboard)
-        tab_bar = src.split("for name, label, glyph in")[1].split("]")[0]
-        self.assertNotIn("phrases", tab_bar)
+        self.assertNotIn("phrases", [t[0] for t in AppWindow._DASH_TABS])
+        self.assertEqual(AppWindow._TAB_OF_PAGE["phrases"], "learning")
 
     def test_the_list_refreshes_on_arrival(self):
         # Phrases are learned in the background, so a list drawn on the last

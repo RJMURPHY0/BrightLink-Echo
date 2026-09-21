@@ -305,6 +305,127 @@ class _Offset:
         return _wrapped
 
 
+def _svg_arc(x1, y1, rx, ry, phi_deg, large, sweep, x2, y2):
+    """Points along an SVG elliptical arc, endpoint form (SVG 1.1 F.6.5),
+    excluding the start point."""
+    import math
+    if rx == 0 or ry == 0:
+        return [(x2, y2)]
+    phi = math.radians(phi_deg)
+    cp, sp = math.cos(phi), math.sin(phi)
+    dx, dy = (x1 - x2) / 2, (y1 - y2) / 2
+    x1p, y1p = cp * dx + sp * dy, -sp * dx + cp * dy
+    rx, ry = abs(rx), abs(ry)
+    lam = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry)
+    if lam > 1:
+        rx, ry = rx * math.sqrt(lam), ry * math.sqrt(lam)
+    num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p
+    den = rx * rx * y1p * y1p + ry * ry * x1p * x1p
+    coef = math.sqrt(max(0.0, num / den)) if den else 0.0
+    if large == sweep:
+        coef = -coef
+    cxp, cyp = coef * rx * y1p / ry, -coef * ry * x1p / rx
+    cx = cp * cxp - sp * cyp + (x1 + x2) / 2
+    cy = sp * cxp + cp * cyp + (y1 + y2) / 2
+
+    def ang(ux, uy, vx, vy):
+        return math.atan2(ux * vy - uy * vx, ux * vx + uy * vy)
+
+    ux, uy = (x1p - cxp) / rx, (y1p - cyp) / ry
+    vx, vy = (-x1p - cxp) / rx, (-y1p - cyp) / ry
+    th1 = ang(1, 0, ux, uy)
+    dth = ang(ux, uy, vx, vy)
+    if not sweep and dth > 0:
+        dth -= 2 * math.pi
+    elif sweep and dth < 0:
+        dth += 2 * math.pi
+    n = max(4, int(abs(dth) / (math.pi / 24)))
+    pts = []
+    for i in range(1, n + 1):
+        t = th1 + dth * i / n
+        pts.append((cx + rx * math.cos(t) * cp - ry * math.sin(t) * sp,
+                    cy + rx * math.cos(t) * sp + ry * math.sin(t) * cp))
+    return pts
+
+
+def _svg_subpaths(path: str):
+    """Parse an SVG path (M L H V A Z, absolute and relative) into polylines:
+    a list of (points, closed). Enough for the lucide icons traced here; it
+    reads arc flags as ordinary numbers, so they must be space-separated."""
+    import re
+    toks = re.findall(r"[MmLlHhVvAaZz]|-?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?",
+                      path)
+    out, cur, i = [], None, 0
+    x = y = sx = sy = 0.0
+    cmd = None
+    while i < len(toks):
+        if toks[i].isalpha():
+            cmd = toks[i]
+            i += 1
+            if cmd in "Zz":
+                if cur:
+                    out.append((cur, True))
+                cur, x, y = None, sx, sy
+                continue
+        rel = cmd.islower()
+        c = cmd.upper()
+        nums = {"M": 2, "L": 2, "H": 1, "V": 1, "A": 7}[c]
+        args = [float(v) for v in toks[i:i + nums]]
+        i += nums
+        if c == "M":
+            if cur:
+                out.append((cur, False))
+            x, y = (x + args[0], y + args[1]) if rel else (args[0], args[1])
+            sx, sy, cur = x, y, [(x, y)]
+            cmd = "l" if rel else "L"       # extra pairs after M are lines
+        elif c == "L":
+            x, y = (x + args[0], y + args[1]) if rel else (args[0], args[1])
+            cur.append((x, y))
+        elif c == "H":
+            x = x + args[0] if rel else args[0]
+            cur.append((x, y))
+        elif c == "V":
+            y = y + args[0] if rel else args[0]
+            cur.append((x, y))
+        else:
+            ex, ey = (x + args[5], y + args[6]) if rel else (args[5], args[6])
+            cur.extend(_svg_arc(x, y, args[0], args[1], args[2],
+                                bool(args[3]), bool(args[4]), ex, ey))
+            x, y = ex, ey
+    if cur:
+        out.append((cur, False))
+    return out
+
+
+def _svg_stroke(d, u: float, lw: int, color: str, path: str) -> None:
+    """Stroke an SVG path from the 24-grid with round joins and caps, as the
+    lucide icon set draws them."""
+    for pts, closed in _svg_subpaths(path):
+        xy = [(px * u, py * u) for px, py in pts]
+        if closed:
+            xy.append(xy[0])
+            xy.append(xy[1])            # overlap one segment: no notch at the seam
+        d.line(xy, fill=color, width=lw, joint="curve")
+        if not closed:
+            r = lw / 2
+            for ex, ey in (xy[0], xy[-1]):
+                d.ellipse([ex - r, ey - r, ex + r, ey + r], fill=color)
+
+
+# lucide "brain" (v0.462, the CRM's icon set), verbatim.
+_BRAIN = (
+    "M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z",
+    "M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z",
+    "M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4",
+    "M17.599 6.5a3 3 0 0 0 .399-1.375",
+    "M6.003 5.125A3 3 0 0 0 6.401 6.5",
+    "M3.477 10.896a4 4 0 0 1 .585-.396",
+    "M19.938 10.5a4 4 0 0 1 .585.396",
+    "M6 18a4 4 0 0 1-1.967-.516",
+    "M19.967 17.484A4 4 0 0 1 18 18",
+)
+
+
 def _glyph_paint(d, s, name: str, size: int, color: str) -> None:
     """Paint one 24x24-grid glyph. Raises ValueError for an unknown name."""
     u = size * s / 24.0          # design-grid unit
@@ -452,6 +573,15 @@ def _glyph_paint(d, s, name: str, size: int, color: str) -> None:
         r = 3.0 * u
         d.ellipse([12 * u - r, 13.2 * u - r, 12 * u + r, 13.2 * u + r],
                   outline=color, width=lw)
+    elif name == "mail":
+        # envelope: body + flap — email formatting
+        d.rounded_rectangle([3.5 * u, 6 * u, 20.5 * u, 18 * u],
+                            radius=2 * u, outline=color, width=lw)
+        L((4.5, 7.5), (12, 13), (19.5, 7.5))
+    elif name == "brain":
+        # The Learning tab: the CRM's own brain icon, traced from its SVG.
+        for path in _BRAIN:
+            _svg_stroke(d, u, lw, color, path)
     else:
         raise ValueError(f"unknown glyph {name!r}")
 

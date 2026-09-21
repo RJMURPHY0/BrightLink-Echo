@@ -161,8 +161,8 @@ class LoginWindow:
             x = (sw - WINDOW_W) // 2
             y = (sh - WINDOW_H) // 2
 
-        self._root.title(brand.PRODUCT_NAME)
-        # Window / taskbar icon — FTC swirl (logo.ico)
+        self._root.title(brand.WINDOW_TITLE)
+        # Window / taskbar icon — the BrightLink chain mark (logo.ico)
         try:
             from logo_cache import get_icon_path
             _ico = get_icon_path()
@@ -219,9 +219,9 @@ class LoginWindow:
         header = tk.Frame(c, bg=C["bg"], pady=28)
         header.pack(fill="x")
 
-        from logo_cache import get_logo_photo
+        from logo_cache import get_lockup_photo
 
-        self._logo_photo = get_logo_photo(self._root, C["bg"], max_w=160, max_h=60)
+        self._logo_photo = get_lockup_photo(self._root, C["bg"], height=42)
 
         if self._logo_photo:
             tk.Label(header, image=self._logo_photo, bg=C["bg"]).pack()

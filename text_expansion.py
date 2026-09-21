@@ -209,6 +209,8 @@ def apply_vocabulary(text: str, entries) -> str:
 #     firewall for the rare case a term's phonetic code collides with a stock phrase.
 #   * Term is at least FUZZY_MIN_TERM_LEN chars (shorter terms are collision-prone
 #     and stay with the exact path only).
+#   * Managed (CRM) terms only: the span carries no more function words than the
+#     term does, and is less than half function words (see _FUNCTION_WORDS).
 
 FUZZY_MIN_TERM_LEN = 4      # shorter terms rely on the exact sounds_like path
 FUZZY_JW = 0.70             # Jaro-Winkler floor (secondary to the metaphone gate)
@@ -223,12 +225,16 @@ FUZZY_MAX_WINDOW = 3        # a mishearing spans at most this many words
 # CRM has been reviewed by nobody, and there can be hundreds of them, so it has
 # to clear a higher bar before it may change what someone said.
 #
-# The bar applies to SINGLE-WORD managed terms only, because that is where the
-# whole risk lives: real CRM data holds names like "Michaels", "Wincanton" and
-# "Storm" that sit one phonetic slip away from ordinary speech. A multi-word
-# managed term ("Bright Link Solutions") is already heavily constrained — the
-# span has to match across two or three consecutive words — so restricting the
-# window for those would only break the names that are safest to correct.
+# The thresholds below apply to SINGLE-WORD managed terms only: real CRM data
+# holds names like "Michaels", "Wincanton" and "Storm" that sit one phonetic
+# slip away from ordinary speech. A multi-word managed term ("Bright Link
+# Solutions") is constrained by having to match across two or three consecutive
+# words, so restricting the window for those would only break the names that
+# are safest to correct.
+#
+# That constraint only holds while the words in the span are the name's own.
+# Function words are not, so every managed term, single or multi-word, also
+# takes the function-word rule (see _FUNCTION_WORDS).
 MANAGED_MIN_TERM_LEN = 5    # single-word managed terms; shorter ones are dropped
 MANAGED_JW = 0.86           # vs FUZZY_JW 0.70 — near-identical or nothing
 MANAGED_LEN_LO = 0.7        # tighter than FUZZY_LEN_* so a short word cannot
@@ -251,6 +257,49 @@ through time to too two up us use very was way we well went were what when where
 while who why will with would year you your
 cell cells bell bells sell sells sale sales share shares mail mails male sell seller
 tell well fell dwell shell smell spell swell dell hell fella
+""".split())
+
+# Function words and pronouns. A managed term may not replace a span that
+# carries more of these than the name itself does, or one that is at least half
+# made of them.
+#
+# Double Metaphone drops every vowel that does not open the string, so a
+# function word adds almost nothing to a span's code: "and" adds NT, "it" adds
+# T, "a" and "I" add nothing. A content word padded with one or two of them
+# reaches a longer name's code, which leaves the Jaro-Winkler floor as the only
+# gate. Two contact names in a live CRM cache were measured doing exactly that:
+# one shared RMNTT with "room and it" (jw 0.714, floor 0.70), the other 0RPRT
+# with "the report" (jw 0.700). Padding deletes words as well: "Wincanton a"
+# encodes exactly like "Wincanton", so "send Wincanton a letter" lost its "a".
+#
+# At least half, not more than half: a two-word span holding one function word
+# is a single-word match in disguise ("the hat" -> "The Hut"), and a single-word
+# managed match otherwise has to clear the strict tier.
+#
+# Deliberately NOT _COMMON_WORDS, which also lists nouns and verbs ("way",
+# "time", "call"). A mis-split name can contain those ("fosse way" is
+# "Fosseway"). It cannot be padded out with "and it".
+_FUNCTION_WORDS = frozenset("""
+a an the this that these those
+i me my mine myself you your yours yourself yourselves he him his himself she
+her hers herself it its itself we us our ours ourselves they them their theirs
+themselves
+who whom whose which what when where why how here there
+all any both each either every neither no none some such another other
+more most much many few less least
+and or but nor so yet if as than then because although though while whilst
+unless until till whether since
+about above across after against along among amongst around at before behind
+below beneath beside between beyond by down during except for from in inside
+into near of off on onto out outside over per through throughout to toward
+towards under underneath up upon via with within without
+am is are was were be been being do does did have has had having
+will would shall should can could may might must ought not
+i'm i've i'll i'd you're you've you'll you'd he's he'll he'd she's she'll she'd
+it's it'll it'd we're we've we'll we'd they're they've they'll they'd
+that's there's here's what's who's let's
+isn't aren't wasn't weren't don't doesn't didn't haven't hasn't hadn't won't
+wouldn't can't couldn't shouldn't mustn't shan't
 """.split())
 
 
@@ -411,7 +460,8 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
         # `managed` marks a term synced from a CRM rather than typed by the
         # user. Only a SINGLE-WORD managed term takes the strict tier — see the
         # constants above for why multi-word ones do not need it.
-        strict = bool(e.get("managed")) and " " not in term
+        managed = bool(e.get("managed"))
+        strict = managed and " " not in term
         min_len = MANAGED_MIN_TERM_LEN if strict else FUZZY_MIN_TERM_LEN
         if len(term) < min_len or low in seen:
             continue
@@ -432,7 +482,12 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
         except Exception:
             continue
         if codes and codes[0]:
-            terms.append((term, low, codes, strict))
+            # How many function words the name itself carries, which a span
+            # may match but not exceed. None for a hand-typed term: the
+            # function-word rule is a managed-tier gate.
+            term_fw = (sum(w in _FUNCTION_WORDS for w in _WORD_RE.findall(low))
+                       if managed else None)
+            terms.append((term, low, codes, strict, term_fw))
     if not terms:
         return text
 
@@ -443,7 +498,7 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
     # The costly part is Double Metaphone, so pay it once per word and prefilter
     # cheaply. Every term's primary phoneme starts with one of these characters;
     # a window whose first word does not can never match, so it skips the encode.
-    term_first = {c[0] for _t, _l, codes, _s in terms for c in codes if c}
+    term_first = {c[0] for _t, _l, codes, _s, _f in terms for c in codes if c}
     word_dm = []
     for t in tokens:
         try:
@@ -451,6 +506,7 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
         except Exception:
             word_dm.append(("", ""))
     word_low = [t.group(0).lower() for t in tokens]
+    word_fw = [w in _FUNCTION_WORDS for w in word_low]
 
     # Collect non-overlapping replacements, longest window first so a 3-word
     # mishearing wins over a 1-word sub-match, and left-to-right within a size.
@@ -493,12 +549,19 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
             # word breaks, so "ver cell" should score against "vercel" exactly as
             # "vercell" does — not be penalised for the space it was mis-split on.
             cand_key = cand_low.replace(" ", "")
+            span_fw = sum(word_fw[i:i + size])
             best = None
             best_jw = 0.0
-            for term, low, codes, strict in terms:
+            for term, low, codes, strict, term_fw in terms:
                 if cand_low == low:          # already correct — leave casing to others
                     best = None
                     break
+                # A managed name may not absorb function words it does not
+                # carry, and a span at least half made of them is never a name.
+                # The metaphone gate cannot see them (see _FUNCTION_WORDS).
+                if term_fw is not None and (span_fw > term_fw
+                                            or 2 * span_fw >= size):
+                    continue
                 if not _phonetic_match(codes, cand_codes):
                     continue
                 term_key = low.replace(" ", "")
@@ -514,13 +577,19 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
                 # the worst thing this pass can do.
                 if _digits(cand_key) != _digits(term_key):
                     continue
+                # One spoken word becoming a multi-word managed name is a
+                # single-word match too, and takes the same strict tier: the
+                # loose multi-word floor rewrote "dark" as a CRM's "The Ark"
+                # (jw 0.72), because matching across consecutive words is the
+                # only thing that makes that floor safe, and here there is one.
+                tight = strict or (term_fw is not None and size == 1)
                 lr = len(cand_key) / float(len(term_key) or 1)
-                len_lo, len_hi = ((MANAGED_LEN_LO, MANAGED_LEN_HI) if strict
+                len_lo, len_hi = ((MANAGED_LEN_LO, MANAGED_LEN_HI) if tight
                                   else (FUZZY_LEN_LO, FUZZY_LEN_HI))
                 if not (len_lo <= lr <= len_hi):
                     continue
                 jw = _jaro_winkler(cand_key, term_key)
-                floor = MANAGED_JW if strict else FUZZY_JW
+                floor = MANAGED_JW if tight else FUZZY_JW
                 if jw >= floor and jw > best_jw:
                     best, best_jw = term, jw
             if best is not None:

@@ -1365,9 +1365,10 @@ class FloatingPopup:
     def _build_icon_frame(self) -> None:
         self._icon_frame = tk.Frame(self.root, bg=CP["bg"], padx=8, pady=6)
 
-        from logo_cache import get_logo_photo
+        from logo_cache import get_badge_photo
 
-        self._icon_photo = get_logo_photo(self.root, CP["bg"], max_w=68, max_h=26)
+        # The chain and Echo: the product's own mark on the thing that pops up.
+        self._icon_photo = get_badge_photo(self.root, CP["bg"], height=28)
 
         if self._icon_photo:
             lbl = tk.Label(
@@ -1376,7 +1377,7 @@ class FloatingPopup:
         else:
             lbl = tk.Label(
                 self._icon_frame,
-                text="FTC",
+                text=brand.PRODUCT_SHORT_NAME,
                 fg=CP["accent"],
                 bg=CP["bg"],
                 font=("Segoe UI", 9, "bold"),

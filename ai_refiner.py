@@ -28,6 +28,11 @@ def _looks_like_a_list(text: str) -> bool:
                           re.MULTILINE))
 
 
+def _line_count(text: str) -> int:
+    """Lines in the text, blank ones included; CRLF and LF count the same."""
+    return (text or "").replace("\r\n", "\n").strip().count("\n") + 1
+
+
 REFINE_PROMPTS = {
     # "Fix All" in the refine popup. A full grammar-checker pass in the Grammarly
     # mould: every mechanical error is in scope, but the writer's words and voice
@@ -268,6 +273,15 @@ class AIRefiner:
                 "prose, and do not add any list that is not already there."
             )
 
+        # Line breaks the app laid out (email greeting and sign-off, auto
+        # paragraphs) are shape, not errors. context_fix also rejects any
+        # result that moves one; saying so up front saves the wasted pass.
+        if mode == "context_fix" and "\n" in text:
+            prompt += (
+                " Keep every line break exactly where it is: same lines, same "
+                "blank lines, nothing joined and nothing split."
+            )
+
         # Email sign-off: hand the model the sender's real name so a bare
         # sign-off ("Thanks,") gets a name and no placeholder is invented.
         name = (sender_name or "").strip()
@@ -427,6 +441,11 @@ class AIRefiner:
         # neither the count nor the substitution guard below would catch it.
         if _looks_like_a_list(text) and not _looks_like_a_list(result):
             print("[AIRefiner] context_fix rejected: it flattened a list")
+            return text
+        # Same reason for every other line break the app laid out (an email's
+        # greeting and sign-off, auto paragraphs): same words, new shape.
+        if "\n" in text and _line_count(result) != _line_count(text):
+            print("[AIRefiner] context_fix rejected: it moved a line break")
             return text
         # Guard against the LLM adding/removing content, but tolerate small
         # count shifts from legitimate corrections (contractions like

@@ -11,6 +11,7 @@ import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+import bookmark_tabs
 import ui_render
 from datetime import date as _date, datetime, timedelta
 from typing import Callable, Optional
@@ -2141,8 +2142,8 @@ class AppWindow:
 
         self._root = tk.Tk()
         self._root.withdraw()  # hide before Windows has a chance to render the default blank window
-        self._root.title(brand.PRODUCT_NAME)
-        # Window / taskbar icon — the FTC swirl (logo.ico). Setting it at runtime is
+        self._root.title(brand.WINDOW_TITLE)
+        # Window / taskbar icon — the BrightLink chain mark (logo.ico). Setting it at runtime is
         # what actually changes the visible title-bar + taskbar icon; the exe's
         # embedded icon alone doesn't update a running window.
         try:
@@ -2425,23 +2426,14 @@ class AppWindow:
         # Wrap header + divider in a container so it can be hidden during login
         self._header_outer = tk.Frame(self._root, bg=C["bg"])
 
-        header = tk.Frame(self._header_outer, bg=C["bg"], pady=20)
+        header = tk.Frame(self._header_outer, bg=C["bg"], pady=22)
         header.pack(fill="x")
 
-        # Gear icon — top right of header
-        self._gear_btn = tk.Label(
-            header, text="⚙",
-            fg=C["subtext"], bg=C["bg"],
-            font=("Segoe UI", 17), cursor="hand2", padx=12,
-        )
-        self._gear_btn.pack(side="right", anchor="ne")
-        self._gear_btn.bind("<Button-1>", lambda _e: self._switch_dash_tab("settings"))
-        self._gear_btn.bind("<Enter>",    lambda _e: self._gear_btn.configure(fg=C["text"]))
-        self._gear_btn.bind("<Leave>",    lambda _e: self._gear_btn.configure(
-            fg=C["accent"] if getattr(self, "_current_tab", "") == "settings" else C["subtext"]))
-
-        from logo_cache import get_logo_photo
-        self._logo_photo = get_logo_photo(self._root, C["bg"], max_w=180, max_h=60)
+        # The BrightLink | Echo lockup, centred on the WINDOW. It used to be
+        # packed beside the gear, which centred it in the space left of the
+        # gear and put it visibly off-centre.
+        from logo_cache import get_lockup_photo
+        self._logo_photo = get_lockup_photo(self._root, C["bg"], height=42)
 
         if self._logo_photo:
             tk.Label(header, image=self._logo_photo, bg=C["bg"]).pack()
@@ -2452,58 +2444,48 @@ class AppWindow:
                 font=("Segoe UI", 22, "bold"),
             ).pack()
 
+        # Gear: pinned to the right edge with place(), so it takes no room
+        # from the lockup's centring.
+        self._gear_btn = tk.Label(
+            header, text="⚙",
+            fg=C["subtext"], bg=C["bg"],
+            font=("Segoe UI", 17), cursor="hand2", padx=12,
+        )
+        self._gear_btn.place(relx=1.0, rely=0.5, x=-4, anchor="e")
+        self._gear_btn.bind("<Button-1>", lambda _e: self._switch_dash_tab("settings"))
+        self._gear_btn.bind("<Enter>",    lambda _e: self._gear_btn.configure(fg=C["text"]))
+        self._gear_btn.bind("<Leave>",    lambda _e: self._gear_btn.configure(
+            fg=C["accent"] if getattr(self, "_current_tab", "") == "settings" else C["subtext"]))
+
         # Hairline divider — inside container so it hides with the header
         tk.Frame(self._header_outer, bg=C["divider"], height=1).pack(fill="x")
 
     # ── Dashboard shell ───────────────────────────────────────────────────────
 
+    # The dashboard's tabs: (page, label, glyph). Drawn as BrightLink's own
+    # tab strip (bookmark_tabs), so the CRM and this app share one design.
+    _DASH_TABS = (
+        ("home", "Home", "home"),
+        ("learning", "Learning", "brain"),
+        ("hotkey", "Hotkey", "keyboard"),
+        ("history", "History", "history"),
+    )
+    # Full pages reached from a tab rather than from the strip itself. Their
+    # tab stays lit while they are open, so the user can see where they are.
+    _TAB_OF_PAGE = {
+        "vocabulary": "learning",
+        "snippets": "learning",
+        "phrases": "learning",
+    }
+
     def _build_dashboard(self, parent: tk.Frame) -> None:
-        # Tab bar with underline indicator
-        tab_bar = tk.Frame(parent, bg=C["bg"])
-        tab_bar.pack(fill="x", padx=20, pady=(14, 0))
-
-        self._dash_tabs = {}
-        self._tab_indicators = {}
-        # Two glyph renders per tab (muted / accent) so switching a tab is an
-        # image swap, not a re-render: ui_render bakes the colour into the
-        # glyph, and one PhotoImage per state costs nothing to keep.
-        self._tab_icons = {}
-
-        for name, label, glyph in [("home", "Home", "home"),
-                                   ("hotkey", "Hotkey", "keyboard"),
-                                   ("history", "History", "history")]:
-            col = tk.Frame(tab_bar, bg=C["bg"])
-            col.pack(side="left", expand=True, fill="x")
-
-            icons = {}
-            for key, colour in (("off", C["subtext"]), ("hover", C["text"]),
-                                ("on", C["accent"])):
-                try:
-                    icons[key] = ui_render.icon_glyph(col, glyph, 16, colour,
-                                                      bg=C["bg"])
-                except Exception:
-                    icons[key] = None
-            self._tab_icons[name] = icons
-
-            btn = tk.Label(
-                col, text=label,
-                fg=C["subtext"], bg=C["bg"],
-                font=("Segoe UI", 10), pady=8, cursor="hand2",
-            )
-            if icons.get("off") is not None:
-                btn.configure(image=icons["off"], compound="left", padx=6)
-            btn.pack(fill="x")
-            btn.bind("<Button-1>", lambda _e, n=name: self._switch_dash_tab(n))
-            btn.bind("<Enter>",    lambda _e, n=name: self._tab_hover(n, True))
-            btn.bind("<Leave>",    lambda _e, n=name: self._tab_hover(n, False))
-
-            ind = tk.Frame(col, bg=C["bg"], height=2)
-            ind.pack(fill="x")
-
-            self._dash_tabs[name] = btn
-            self._tab_indicators[name] = ind
-
-        tk.Frame(parent, bg=C["divider"], height=1).pack(fill="x", padx=0)
+        # Full width: the strip keeps its own side padding, because the end
+        # tabs' feet reach past their boxes, and it draws the line the tabs
+        # stand on across the whole window, as the old divider did.
+        self._tab_strip = bookmark_tabs.BookmarkTabs(
+            parent, self._DASH_TABS, on_select=self._switch_dash_tab,
+            bg=C["bg"], line=C["border"])
+        self._tab_strip.pack(fill="x", pady=(14, 0))
 
         # Content area — all tab frames stacked in same grid cell, tkraise() to switch
         self._dash_content = tk.Frame(parent, bg=C["bg"])
@@ -2514,14 +2496,16 @@ class AppWindow:
         self._home_frame     = tk.Frame(self._dash_content, bg=C["bg"])
         self._hotkey_frame   = tk.Frame(self._dash_content, bg=C["bg"])
         self._history_frame  = tk.Frame(self._dash_content, bg=C["bg"])
+        self._learning_frame = tk.Frame(self._dash_content, bg=C["bg"])
         self._settings_frame = tk.Frame(self._dash_content, bg=C["bg"])
-        # Sub-pages of Settings, not tabs — no entry in the tab bar.
+        # Pages of the Learning tab, not tabs of their own (_TAB_OF_PAGE).
         self._vocabulary_frame = tk.Frame(self._dash_content, bg=C["bg"])
         self._snippets_frame   = tk.Frame(self._dash_content, bg=C["bg"])
         self._phrases_frame    = tk.Frame(self._dash_content, bg=C["bg"])
 
         for f in (self._home_frame, self._hotkey_frame,
-                  self._history_frame, self._settings_frame,
+                  self._history_frame, self._learning_frame,
+                  self._settings_frame,
                   self._vocabulary_frame, self._snippets_frame,
                   self._phrases_frame):
             f.grid(row=0, column=0, sticky="nsew")
@@ -2529,6 +2513,7 @@ class AppWindow:
         self._build_home_tab(self._home_frame)
         self._build_hotkey_tab(self._hotkey_frame)
         self._build_history_tab(self._history_frame)
+        self._build_learning_tab(self._learning_frame)
         self._build_settings_tab(self._settings_frame)
         self._build_library_page(self._vocabulary_frame, "vocabulary")
         self._build_library_page(self._snippets_frame, "snippets")
@@ -2566,27 +2551,6 @@ class AppWindow:
 
         self._switch_dash_tab("home")
 
-    def _paint_tab(self, name: str, key: str) -> None:
-        """Set one tab's ink and glyph together. They are one state, and the
-        old code tracked it by READING the label's fg back — which broke the
-        moment a third colour (hover) existed."""
-        btn = self._dash_tabs.get(name)
-        if btn is None:
-            return
-        colour = {"on": C["accent"], "hover": C["text"]}.get(key, C["subtext"])
-        try:
-            btn.configure(fg=colour)
-            ph = self._tab_icons.get(name, {}).get(key)
-            if ph is not None:
-                btn.configure(image=ph)
-        except tk.TclError:
-            pass
-
-    def _tab_hover(self, name: str, entering: bool) -> None:
-        if getattr(self, "_current_tab", None) == name:
-            return          # the active tab already reads as active
-        self._paint_tab(name, "hover" if entering else "off")
-
     def _switch_dash_tab(self, name: str) -> None:
         previous = getattr(self, "_current_tab", None)
         self._current_tab = name
@@ -2605,6 +2569,7 @@ class AppWindow:
             "home": self._home_frame,
             "hotkey": self._hotkey_frame,
             "history": self._history_frame,
+            "learning": self._learning_frame,
             "settings": self._settings_frame,
             "vocabulary": self._vocabulary_frame,
             "snippets": self._snippets_frame,
@@ -2654,11 +2619,9 @@ class AppWindow:
             except tk.TclError:
                 pass
 
-        for n in tab_frames:
-            if n in self._dash_tabs:
-                active = (n == name)
-                self._paint_tab(n, "on" if active else "off")
-                self._tab_indicators[n].configure(bg=C["accent"] if active else C["bg"])
+        # Settings has no tab of its own (the gear lights instead), so the
+        # strip shows none lit there rather than a stale one.
+        self._tab_strip.set_active(self._TAB_OF_PAGE.get(name, name))
 
         # Gear icon highlight
         is_settings = (name == "settings")
@@ -2683,6 +2646,7 @@ class AppWindow:
                     self._update_check_btn.configure(
                         text="Check for Updates", fg=C["accent"], cursor="hand2")
                     self._update_check_btn.bind("<Button-1>", self._do_update_check)
+        elif name == "learning":
             self._refresh_library_counts()
         elif name in self._LIB_SPECS:
             self._render_library(name)
@@ -2827,8 +2791,8 @@ class AppWindow:
         inner = tk.Frame(self._signing_in_frame, bg=C["bg"])
         inner.place(relx=0.5, rely=0.5, anchor="center")
         try:
-            from logo_cache import get_logo_photo
-            self._splash_logo = get_logo_photo(self._root, C["bg"], max_w=160, max_h=60)
+            from logo_cache import get_lockup_photo
+            self._splash_logo = get_lockup_photo(self._root, C["bg"], height=42)
         except Exception:
             self._splash_logo = None
         if self._splash_logo:
@@ -5108,6 +5072,8 @@ class AppWindow:
             cv = getattr(self, "_settings_cv", None)
         elif self._current_tab == "hotkey":
             cv = getattr(self, "_hk_cv", None)
+        elif self._current_tab == "learning":
+            cv = getattr(self, "_learning_cv", None)
         if cv is not None:
             return self._wheel_scroll(cv, event)
         return None
@@ -6388,6 +6354,142 @@ class AppWindow:
 
     # ── Settings tab ─────────────────────────────────────────────────────────
 
+    # ── Card helpers shared by Settings and Learning ─────────────────────────
+
+    def _page_section(self, parent, icon: str, title: str,
+                      top: int = 16) -> tk.Frame:
+        """A spaced-caps section header with its glyph. Returns the row."""
+        row = tk.Frame(parent, bg=C["bg"])
+        row.pack(fill="x", padx=22, pady=(top, 6))
+        try:
+            ph = ui_render.icon_glyph(row, icon, 19, C["accent"], bg=C["bg"])
+        except Exception:
+            ph = None
+        if ph is not None:
+            tk.Label(row, image=ph, bg=C["bg"]).pack(side="left", padx=(0, 7))
+        tk.Label(row, text=" ".join(title.upper()),
+                 fg=C["subtext"], bg=C["bg"],
+                 font=("Segoe UI", 7, "bold"), anchor="w").pack(side="left")
+        return row
+
+    def _card_glyph(self, row, icon: str, bg=None) -> None:
+        """Pack a glyph on the left of a card row. Silently absent if PIL or
+        the glyph is unavailable. 26px reads at a glance without changing the
+        row height: the two stacked text lines beside it are taller either way."""
+        try:
+            ph = ui_render.icon_glyph(row, icon, 26, C["accent"],
+                                      bg=bg or C["surface"])
+        except Exception:
+            ph = None
+        if ph is not None:
+            tk.Label(row, image=ph, bg=bg or C["surface"]).pack(
+                side="left", padx=(0, 10), anchor="n", pady=(1, 0))
+
+    def _toggle_card(self, parent, key: str, title: str, subtext: str,
+                     default: bool, icon: str = ""):
+        """A card with a title, a description and a toggle bound to config."""
+        cfg = self._config
+        card = self._card(parent, margin=(0, 4))
+        row = tk.Frame(card, bg=C["surface"]); row.pack(fill="x")
+        cur = bool(getattr(cfg, key, default) if cfg else default)
+        var = tk.BooleanVar(value=cur)
+
+        def _toggle(v: bool, _k=key, _v=var):
+            _v.set(v)
+            if self._on_settings_change:
+                self._on_settings_change(_k, v)
+            if _k in ("live_inject", "live_captions"):
+                self._enforce_live_exclusive(_k, v)
+        pill = TogglePill(row, value=cur, bg=C["surface"], command=_toggle)
+        pill.pack(side="right")
+        self._setting_pills[key] = pill
+        self._setting_vars[key] = var
+        if icon:
+            self._card_glyph(row, icon)
+        col = tk.Frame(row, bg=C["surface"]); col.pack(side="left", fill="x", expand=True)
+        tk.Label(col, text=title, fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(anchor="w")
+        desc = tk.Label(col, text=subtext, fg=C["subtext"], bg=C["surface"],
+                        font=("Segoe UI", 8), anchor="w", justify="left",
+                        wraplength=260)
+        desc.pack(fill="x")
+        self._autowrap(desc)
+        return var
+
+    def _link_card(self, parent, kind: str, title: str, subtext: str,
+                   icon: str) -> None:
+        """A card that opens a full page. The whole row is the hit target, and
+        it carries a live count so the page's contents are visible without
+        opening it."""
+        card = self._card(parent, margin=(0, 4))
+        row = tk.Frame(card, bg=C["surface"])
+        row.pack(fill="x")
+        self._card_glyph(row, icon)
+
+        chev = tk.Label(row, text="›", fg=C["subtext"], bg=C["surface"],
+                        font=("Segoe UI", 13))
+        chev.pack(side="right", padx=(8, 0))
+        count = tk.Label(row, text="", fg=C["subtext"], bg=C["surface"],
+                         font=("Segoe UI", 8))
+        count.pack(side="right")
+        self._lib_count_labels[kind] = count
+
+        col = tk.Frame(row, bg=C["surface"])
+        col.pack(side="left", fill="x", expand=True)
+        tk.Label(col, text=title, fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(anchor="w")
+        desc = tk.Label(col, text=subtext, fg=C["subtext"], bg=C["surface"],
+                        font=("Segoe UI", 8), anchor="w", justify="left",
+                        wraplength=260)
+        desc.pack(fill="x")
+        self._autowrap(desc)
+
+        def _open(_e=None):
+            self._switch_dash_tab(kind)
+
+        for w in (card, row, col, chev, count) + tuple(col.winfo_children()):
+            w.configure(cursor="hand2")
+            w.bind("<Button-1>", _open)
+
+    # ── Learning tab ─────────────────────────────────────────────────────────
+
+    def _build_learning_tab(self, parent: tk.Frame) -> None:
+        """Everything the app knows about how YOU talk: the words you taught
+        it, the snippets you expand, and the phrases it picked up by itself.
+        These were three rows halfway down Settings, which is not where anyone
+        looks for them. Each card still opens the same full page, and that
+        page's Back returns here."""
+        self._setting_pills = getattr(self, "_setting_pills", {})
+        self._setting_vars = getattr(self, "_setting_vars", {})
+        self._learning_cv = ScrollPane(parent, bg=C["bg"])
+        cv = self._learning_cv
+        sb = ModernScrollbar(
+            parent, command=lambda *a: self._scrollbar_command(cv, *a))
+        cv.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        cv.pack(side="left", fill="both", expand=True)
+        body = cv.content
+
+        self._page_section(body, "book", "Your words", top=6)
+        self._link_card(body, "vocabulary", "Custom Vocabulary",
+                        "Names, acronyms and jargon the app should always get "
+                        "right, plus what it tends to mishear them as", "book")
+        self._link_card(body, "snippets", "Snippets",
+                        "Say a short phrase and it expands into a full block of "
+                        "text: an address, a sign-off, a standard paragraph",
+                        "wand")
+
+        self._page_section(body, "brain", "Learned from you")
+        self._link_card(body, "phrases", "Phrases You Say Often",
+                        "Learned automatically from your own dictation, and "
+                        "used to fix the ones it mishears next time", "brain")
+        self._toggle_card(body, "learned_phrases", "Learn My Phrases",
+                          "Remember the phrases you repeat and use them to "
+                          "correct the words the app is unsure about. Learns "
+                          "only from what it heard clearly, and only corrects "
+                          "what it heard badly. Stays on this computer.",
+                          True, icon="mic")
+
     def _build_settings_tab(self, parent: tk.Frame) -> None:
         # Scrollable container — ScrollPane, not a Canvas: cards are child
         # HWNDs and canvas blit-scroll is what minted the ghost duplicates.
@@ -6412,70 +6514,23 @@ class AppWindow:
         # Shadow parent so all existing code below writes into the scrollable frame
         parent = self._settings_cv.content
         cfg = self._config
-        self._setting_pills = {}
-        self._setting_vars = {}
+        # Learning builds first and registers its own toggle here too.
+        self._setting_pills = getattr(self, "_setting_pills", {})
+        self._setting_vars = getattr(self, "_setting_vars", {})
 
         # ── Section + iconed toggle-card helpers ─────────────────────────────
         def _section(icon: str, title: str) -> None:
-            row = tk.Frame(parent, bg=C["bg"])
-            row.pack(fill="x", padx=22, pady=(16, 6))
+            row = self._page_section(parent, icon, title)
             # Registered so the search filter knows which slaves are headers
             # (everything else between two headers belongs to the first).
             self._settings_sections.add(str(row))
-            ph = None
-            try:
-                import ui_render
-                ph = ui_render.icon_glyph(row, icon, 19, C["accent"], bg=C["bg"])
-            except Exception:
-                ph = None
-            if ph is not None:
-                tk.Label(row, image=ph, bg=C["bg"]).pack(side="left", padx=(0, 7))
-            tk.Label(row, text=" ".join(title.upper()),
-                     fg=C["subtext"], bg=C["bg"],
-                     font=("Segoe UI", 7, "bold"), anchor="w").pack(side="left")
 
         def _card_icon(row, icon: str, bg=None):
-            """Pack a glyph on the left of a card row. Silently absent if PIL
-            or the glyph is unavailable. 26px reads at a glance without
-            changing the row height — the two stacked text lines beside it are
-            taller than the icon either way."""
-            try:
-                import ui_render
-                ph = ui_render.icon_glyph(row, icon, 26, C["accent"],
-                                          bg=bg or C["surface"])
-            except Exception:
-                ph = None
-            if ph is not None:
-                tk.Label(row, image=ph, bg=bg or C["surface"]).pack(
-                    side="left", padx=(0, 10), anchor="n", pady=(1, 0))
+            self._card_glyph(row, icon, bg)
 
         def _toggle_card(key: str, title: str, subtext: str, default: bool,
                          icon: str = ""):
-            card = self._card(parent, margin=(0, 4))
-            row = tk.Frame(card, bg=C["surface"]); row.pack(fill="x")
-            cur = bool(getattr(cfg, key, default) if cfg else default)
-            var = tk.BooleanVar(value=cur)
-            def _toggle(v: bool, _k=key, _v=var):
-                _v.set(v)
-                if self._on_settings_change:
-                    self._on_settings_change(_k, v)
-                if _k in ("live_inject", "live_captions"):
-                    self._enforce_live_exclusive(_k, v)
-            pill = TogglePill(row, value=cur, bg=C["surface"], command=_toggle)
-            pill.pack(side="right")
-            self._setting_pills[key] = pill
-            self._setting_vars[key] = var
-            if icon:
-                _card_icon(row, icon)
-            col = tk.Frame(row, bg=C["surface"]); col.pack(side="left", fill="x", expand=True)
-            tk.Label(col, text=title, fg=C["text"], bg=C["surface"],
-                     font=("Segoe UI", 9), anchor="w").pack(anchor="w")
-            desc = tk.Label(col, text=subtext, fg=C["subtext"], bg=C["surface"],
-                     font=("Segoe UI", 8), anchor="w", justify="left",
-                     wraplength=260)
-            desc.pack(fill="x")
-            self._autowrap(desc)
-            return var
+            return self._toggle_card(parent, key, title, subtext, default, icon)
 
         # ── Updates — deliberately first in Settings ─────────────────────────
         # ONE compact card carries everything update-related: the check link,
@@ -6932,57 +6987,9 @@ class AppWindow:
             True, icon="speaker")
 
         # ── Dictation ─────────────────────────────────────────────────────────
+        # Custom Vocabulary, Snippets and the learned phrases live on the
+        # Learning tab (_build_learning_tab), not here.
         _section("book", "Dictation")
-
-        def _link_card(kind: str, title: str, subtext: str, icon: str):
-            """A settings row that opens a full page. The whole row is the hit
-            target, and it carries a live count so the page's contents are
-            visible without opening it."""
-            card = self._card(parent, margin=(0, 4))
-            row = tk.Frame(card, bg=C["surface"])
-            row.pack(fill="x")
-            _card_icon(row, icon)
-
-            chev = tk.Label(row, text="›", fg=C["subtext"], bg=C["surface"],
-                            font=("Segoe UI", 13))
-            chev.pack(side="right", padx=(8, 0))
-            count = tk.Label(row, text="", fg=C["subtext"], bg=C["surface"],
-                             font=("Segoe UI", 8))
-            count.pack(side="right")
-            self._lib_count_labels[kind] = count
-
-            col = tk.Frame(row, bg=C["surface"])
-            col.pack(side="left", fill="x", expand=True)
-            tk.Label(col, text=title, fg=C["text"], bg=C["surface"],
-                     font=("Segoe UI", 9), anchor="w").pack(anchor="w")
-            desc = tk.Label(col, text=subtext, fg=C["subtext"], bg=C["surface"],
-                            font=("Segoe UI", 8), anchor="w", justify="left",
-                            wraplength=260)
-            desc.pack(fill="x")
-            self._autowrap(desc)
-
-            def _open(_e=None):
-                self._switch_dash_tab(kind)
-
-            for w in (card, row, col, chev, count) + tuple(col.winfo_children()):
-                w.configure(cursor="hand2")
-                w.bind("<Button-1>", _open)
-
-        _link_card("vocabulary", "Custom Vocabulary",
-                   "Names, acronyms and jargon the app should always get "
-                   "right, plus what it tends to mishear them as", "book")
-        _link_card("snippets", "Snippets",
-                   "Say a short phrase and it expands into a full block of "
-                   "text: an address, a sign-off, a standard paragraph", "wand")
-        _link_card("phrases", "Phrases You Say Often",
-                   "Learned automatically from your own dictation, and used to "
-                   "fix the ones it mishears next time", "mic")
-
-        _toggle_card("learned_phrases", "Learn My Phrases",
-                     "Remember the phrases you repeat and use them to correct "
-                     "the words the app is unsure about. Learns only from what "
-                     "it heard clearly, and only corrects what it heard badly. "
-                     "Stays on this computer.", True, icon="mic")
 
         # Sentence endings — a three-way choice, not the old boolean. The
         # toggle governed the terminal full stop AND the pause-artefact repair,
@@ -7031,6 +7038,10 @@ class AppWindow:
                      "\"here are the three things\"), lay them out as a numbered "
                      "or bulleted list. Never while Live Typing is on",
                      True, icon="punct")
+        _toggle_card("email_format", "Format Emails",
+                     "In Outlook or Gmail, put the greeting, the sign-off and "
+                     "your name on their own lines. Nowhere else is touched",
+                     True, icon="mail")
         _toggle_card("auto_paragraphs", "Auto Paragraphs",
                      "Start a new paragraph when you pause clearly after a "
                      "finished sentence (never breaks mid-sentence thinking pauses)",
@@ -7489,7 +7500,7 @@ class AppWindow:
         back = tk.Label(head, text="‹  Back", fg=C["subtext"], bg=C["bg"],
                         font=("Segoe UI", 10), cursor="hand2")
         back.pack(side="left")
-        back.bind("<Button-1>", lambda _e: self._switch_dash_tab("settings"))
+        back.bind("<Button-1>", lambda _e: self._switch_dash_tab("learning"))
         back.bind("<Enter>", lambda _e: back.configure(fg=C["accent"]))
         back.bind("<Leave>", lambda _e: back.configure(fg=C["subtext"]))
 
@@ -7951,7 +7962,7 @@ class AppWindow:
                          name=f"{kind}-sync").start()
 
     def _refresh_library_counts(self) -> None:
-        """Update the Settings rows' "12 words" summaries after an edit."""
+        """Update the Learning cards' "12 words" summaries after an edit."""
         for kind, lbl in getattr(self, "_lib_count_labels", {}).items():
             if kind == "phrases":
                 n = len(self._phrase_rows())
@@ -8007,7 +8018,7 @@ class AppWindow:
         back = tk.Label(head, text="‹  Back", fg=C["subtext"], bg=C["bg"],
                         font=("Segoe UI", 10), cursor="hand2")
         back.pack(side="left")
-        back.bind("<Button-1>", lambda _e: self._switch_dash_tab("settings"))
+        back.bind("<Button-1>", lambda _e: self._switch_dash_tab("learning"))
         back.bind("<Enter>", lambda _e: back.configure(fg=C["accent"]))
         back.bind("<Leave>", lambda _e: back.configure(fg=C["subtext"]))
         tk.Label(head, text="Phrases You Say Often", fg=C["text"], bg=C["bg"],

@@ -57,17 +57,19 @@ class SourceInvariantTests(unittest.TestCase):
         self.assertIn('_build_library_page(self._snippets_frame, "snippets")',
                       src)
 
-    def test_back_returns_to_settings(self):
-        # The pages are sub-pages of Settings, not tabs: Back must land where
-        # the user came from, not on Home.
-        self.assertIn('_switch_dash_tab("settings")',
+    def test_back_returns_to_learning(self):
+        # The pages belong to the Learning tab, not the strip: Back must land
+        # where the user came from, not on Home or Settings.
+        self.assertIn('_switch_dash_tab("learning")',
                       inspect.getsource(AppWindow._build_library_page))
 
     def test_the_pages_are_not_in_the_tab_bar(self):
-        src = inspect.getsource(AppWindow._build_dashboard)
-        tab_bar = src.split("for name, label, glyph in")[1].split("]")[0]
-        self.assertNotIn("vocabulary", tab_bar)
-        self.assertNotIn("snippets", tab_bar)
+        tab_ids = [t[0] for t in AppWindow._DASH_TABS]
+        self.assertNotIn("vocabulary", tab_ids)
+        self.assertNotIn("snippets", tab_ids)
+        # ...but they light the Learning tab while open.
+        self.assertEqual(AppWindow._TAB_OF_PAGE["vocabulary"], "learning")
+        self.assertEqual(AppWindow._TAB_OF_PAGE["snippets"], "learning")
 
     def test_arriving_at_a_page_closes_any_stranded_editor(self):
         src = inspect.getsource(AppWindow._switch_dash_tab)
@@ -77,13 +79,16 @@ class SourceInvariantTests(unittest.TestCase):
         self.assertIn("threading.Thread",
                       inspect.getsource(AppWindow._sync_library))
 
-    def test_settings_links_to_both_pages_instead_of_an_inline_field(self):
-        src = inspect.getsource(AppWindow._build_settings_tab)
-        self.assertIn('_link_card("vocabulary"', src)
-        self.assertIn('_link_card("snippets"', src)
-        # The old comma-separated Entry is gone; its config key survives only
-        # for the migration and a downgrade.
-        self.assertNotIn("vocab_entry", src)
+    def test_learning_links_to_both_pages_instead_of_an_inline_field(self):
+        src = inspect.getsource(AppWindow._build_learning_tab)
+        self.assertIn('_link_card(body, "vocabulary"', src)
+        self.assertIn('_link_card(body, "snippets"', src)
+        # One canonical place: Settings no longer carries them, and the old
+        # comma-separated Entry is gone; its config key survives only for the
+        # migration and a downgrade.
+        settings = inspect.getsource(AppWindow._build_settings_tab)
+        self.assertNotIn("_link_card", settings)
+        self.assertNotIn("vocab_entry", settings)
 
 
 _SHARED_ROOT = None

@@ -128,6 +128,16 @@ for _p in _brand_pngs:
     datas.append((_p, os.path.join('assets', 'brand_icons')))
 print(f"[spec] Bundling {len(_brand_pngs)} brand icons from assets/brand_icons")
 
+# BrightLink | Echo artwork (logo_cache): the lockup, the popup badge and the
+# chain mark that logo.ico / exe_icon.ico are built from.
+_logo_pngs = _glob.glob(os.path.join(APP_DIR, 'assets', 'brand', '*.png'))
+if len(_logo_pngs) < 4:
+    raise SystemExit("[spec] assets/brand is missing artwork: the header, "
+                     "sign-in and popup would fall back to plain text")
+for _p in _logo_pngs:
+    datas.append((_p, os.path.join('assets', 'brand')))
+print(f"[spec] Bundling {len(_logo_pngs)} logo images from assets/brand")
+
 # ── Extra hidden imports that PyInstaller often misses ───────────────────────
 hiddenimports += [
     # Imported lazily inside functions (registration thread / --uninstall), so
@@ -197,10 +207,9 @@ exe = EXE(
     runtime_tmpdir='%LOCALAPPDATA%\\' + _brand.DATA_DIR_NAME + '\\runtime',
     console=False,          # no black console window
     disable_windowed_traceback=False,
-    # Embedded exe icon = the black "FTC whisper" wordmark tile — this is what
-    # Explorer and the taskbar pin show. The RUNNING window keeps the swirl
-    # (set at runtime via iconbitmap(logo.ico)); logo.png (in-app header) also
-    # stays the swirl. So: swirl in-app + title bar, wordmark on the exe/pin.
+    # Embedded exe icon = the BrightLink chain mark, the same artwork as the
+    # running window's logo.ico, so Explorer, the Start menu, the taskbar pin
+    # and the title bar all match. Both files come from logo_cache.write_icon.
     icon=os.path.join(APP_DIR, 'exe_icon.ico'),
     version=_version_file,
 )

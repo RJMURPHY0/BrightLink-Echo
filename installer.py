@@ -2,7 +2,7 @@
 FTC Whisper post-install script.
 Called by install.bat after the venv and pip dependencies are ready.
   - Creates config.json from template if it does not exist
-  - Generates logo.ico from logo.png
+  - Generates logo.ico from the BrightLink chain mark (assets/brand)
   - Creates / updates the desktop shortcut
 """
 
@@ -43,49 +43,19 @@ def setup_config() -> None:
 
 
 def create_icon() -> str:
-    """Build logo.ico (the FTC swirl) as a square app icon: the logo on a dark
-    rounded tile so it's visible on any taskbar. Source: app_icon.png (the square
-    FTC logo), falling back to logo.png."""
-    src_png = os.path.join(APP_DIR, "app_icon.png")
-    if not os.path.exists(src_png):
-        src_png = os.path.join(APP_DIR, "logo.png")
-    if not os.path.exists(src_png):
-        print("  [WARN] app_icon.png / logo.png not found — shortcut will use default icon.")
-        return ""
+    """Build logo.ico from the BrightLink chain mark, through the same code
+    that produced the shipped logo.ico / exe_icon.ico, so a source install
+    and a release show the same icon."""
     try:
-        from PIL import Image, ImageDraw
-        src = Image.open(src_png).convert("RGBA")
-        # Trim transparent margins so the logo fills the tile
-        bbox = src.split()[3].getbbox()
-        if bbox:
-            src = src.crop(bbox)
-
-        BG = (26, 26, 26, 255)  # app dark background (#1a1a1a)
-        frames = []
-        for size in (256, 64, 48, 32, 16):
-            tile = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-            radius = int(size * 0.20) if size >= 48 else 0  # rounded on big sizes, crisp square when tiny
-            mask = Image.new("L", (size, size), 0)
-            ImageDraw.Draw(mask).rounded_rectangle([0, 0, size - 1, size - 1], radius=radius, fill=255)
-            tile.paste(Image.new("RGBA", (size, size), BG), (0, 0), mask)
-            pad = int(size * 0.12)
-            inner = max(1, size - pad * 2)
-            swirl = src.copy()
-            swirl.thumbnail((inner, inner), Image.LANCZOS)
-            off = ((size - swirl.width) // 2, (size - swirl.height) // 2)
-            tile.paste(swirl, off, swirl)
-            frames.append(tile)
-
-        frames[0].save(
-            LOGO_ICO, format="ICO",
-            append_images=frames[1:],
-            sizes=[(f.width, f.height) for f in frames],
-        )
-        print("  [OK] logo.ico created.")
-        return LOGO_ICO
+        import logo_cache
+        if logo_cache.write_icon(LOGO_ICO):
+            print("  [OK] logo.ico created.")
+            return LOGO_ICO
+        print("  [WARN] assets/brand/brightlink-mark.png not found; "
+              "shortcut will use the default icon.")
     except Exception as e:
         print(f"  [WARN] Icon creation failed: {e}")
-        return ""
+    return ""
 
 
 def create_shortcut(icon_path: str) -> None:
