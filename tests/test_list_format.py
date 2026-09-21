@@ -28,8 +28,8 @@ class NumberedTests(unittest.TestCase):
             fmt("Right, so here's a list of three things. first is like the "
                 "first thing, second is the second thing."),
             "Right, so here's a list of three things:\n\n"
-            "1. First is like the first thing\n"
-            "2. Second is the second thing")
+            "1. First is like the first thing.\n"
+            "2. Second is the second thing.")
 
     def test_bare_discourse_markers_are_absorbed_by_the_number(self):
         self.assertEqual(
@@ -81,8 +81,53 @@ class NumberedTests(unittest.TestCase):
                 "do, so, number one, I want to have good CPU energy. Number "
                 "two, I want to have good GPU energy."),
             "So, I want to start a list for a few things that I want to do:"
-            "\n\n1. I want to have good CPU energy"
-            "\n2. I want to have good GPU energy")
+            "\n\n1. I want to have good CPU energy."
+            "\n2. I want to have good GPU energy.")
+
+    def test_the_2026_09_21_and_number_two_example(self):
+        # Second report, same evening: "and number two" came with no comma in
+        # front of it, so only "number one" was found and nothing happened.
+        # Sentence items take a full stop, as the competitor's output did.
+        self.assertEqual(
+            fmt("So I just want to list a few things, so number one, I want to "
+                "just think about one thing and number two i want to think "
+                "about another thing"),
+            "So I just want to list a few things:\n\n"
+            "1. I want to just think about one thing.\n"
+            "2. I want to think about another thing.")
+
+    def test_a_slot_said_twice_counts_once(self):
+        # Real dictation: "first" and then "number one" for the same item.
+        out = fmt("So, I want to have a list, so, first, so like number one, I "
+                  "want to have a few different things. Number two, I want to "
+                  "have a few other things.")
+        self.assertEqual(
+            out, "So, I want to have a list:\n\n"
+                 "1. I want to have a few different things.\n"
+                 "2. I want to have a few other things.")
+
+    def test_for_number_two_leaves_no_dangling_for(self):
+        out = fmt("So, I just want to list a few things, so, firstly, I want "
+                  "to have this one thing, you know, for number two I want to "
+                  "have the second thing")
+        self.assertIn("1. I want to have this one thing, you know.\n", out)
+        self.assertIn("2. I want to have the second thing.", out)
+
+    def test_the_first_thing_is_the_second_thing_is(self):
+        self.assertEqual(
+            fmt("There are two things to check, the first thing is the login "
+                "page and the second thing is the search bar."),
+            "There are two things to check:\n\n"
+            "1. The login page\n2. The search bar")
+
+    def test_bare_space_markers_need_an_announcement(self):
+        for s in ("We scored number one in the league and number two in the "
+                  "cup this year.",
+                  "The first thing I noticed was the colour, and the second "
+                  "thing I noticed was the size of it.",
+                  "I came first and second in the two races this year, which "
+                  "was great."):
+            self.assertEqual(fmt(s), s)
 
     def test_number_markers_written_as_digits(self):
         out = fmt("Here are the jobs, number 1, fix the login page. Number 2, "
@@ -114,21 +159,30 @@ class SpokenBulletTests(unittest.TestCase):
             fmt("Things to pack for the trip. Bullet point one, a warm coat. "
                 "Bullet point two, some walking boots. Bullet point three, the "
                 "travel adapters."),
-            "Things to pack for the trip.\n\n• A warm coat\n"
-            "• Some walking boots\n• The travel adapters")
+            "Things to pack for the trip.\n\n- A warm coat\n"
+            "- Some walking boots\n- The travel adapters")
 
     def test_bare_and_next_bullet_point(self):
         self.assertEqual(
             fmt("Here is what I need, bullet point, the new laptop charger. "
                 "Next bullet point, a spare mouse for the office."),
-            "Here is what I need:\n\n• The new laptop charger\n"
-            "• A spare mouse for the office")
+            "Here is what I need:\n\n- The new laptop charger\n"
+            "- A spare mouse for the office")
+
+    def test_the_2026_09_21_first_bullet_point_is_example(self):
+        # Reported against a competitor's output: "the first bullet point is"
+        # was not a phrasing the formatter knew, and "and the second" had no
+        # comma in front of it. Labels take no full stop.
+        self.assertEqual(
+            fmt("I just want to list a couple things, so the first bullet point "
+                "is CPU energy and the second bullet point is GPU energy"),
+            "I just want to list a couple things:\n\n- CPU energy\n- GPU energy")
 
     def test_bullets_and_numbers_never_mix(self):
         out = fmt("Here are two things. Bullet point one, a warm coat. Number "
                   "two, some walking boots.")
         self.assertNotIn("1.", out)
-        self.assertNotIn("•", out)
+        self.assertNotIn("\n- ", out)
 
 
 class BulletTests(unittest.TestCase):
@@ -136,15 +190,15 @@ class BulletTests(unittest.TestCase):
         self.assertEqual(fmt("Here are the three things I need: milk, bread "
                              "and eggs."),
                          "Here are the three things I need:\n\n"
-                         "• Milk\n• Bread\n• Eggs")
+                         "- Milk\n- Bread\n- Eggs")
 
     def test_oxford_comma(self):
         out = fmt("We need the following. Milk, bread, and eggs.")
-        self.assertEqual(out.count("•"), 3)
+        self.assertEqual(out.count("\n- "), 3)
 
     def test_or_series(self):
         out = fmt("There are three options here: keep it, change it or drop it.")
-        self.assertEqual(out.count("•"), 3)
+        self.assertEqual(out.count("\n- "), 3)
 
     def test_long_items_are_prose_not_bullets(self):
         s = ("Here are the three things I need: a really long and detailed "
@@ -179,7 +233,7 @@ class FalsePositiveTests(unittest.TestCase):
     def test_already_formatted_text_is_left_alone(self):
         s = "Here are three things:\n\n1. One thing\n2. Another thing"
         self.assertEqual(fmt(s), s)
-        s2 = "Here are three things:\n\n• One thing\n• Another thing"
+        s2 = "Here are three things:\n\n- One thing\n- Another thing"
         self.assertEqual(fmt(s2), s2)
 
     def test_items_shorter_than_two_words_block_the_list(self):
@@ -265,7 +319,9 @@ class CorpusRegressionTests(unittest.TestCase):
         allowed = set(list_format._ORDINALS) | {"and", "or"}
         allowed |= {w for c in list_format._CLOSERS for w in c.split()}
         allowed |= {"number"} | set(list_format._NUMBER_WORDS)
-        allowed |= {"bullet", "point", "next", "another", "new"}
+        allowed |= {"bullet", "point", "next", "another", "new", "the", "is",
+                    "would", "will", "be", "thing", "item", "one", "step",
+                    "reason", "last", "final", "for", "like"}
         allowed |= {"then", "also", "but", "so", "now", "okay", "ok", "right"}
         for text in self._load():
             out = fmt(text)
@@ -290,7 +346,7 @@ class RefinerInteractionTests(unittest.TestCase):
         self.assertTrue(ai_refiner._looks_like_a_list(
             "Here are three:\n\n1. One thing\n2. Two thing"))
         self.assertTrue(ai_refiner._looks_like_a_list(
-            "Here are three:\n\n• Milk\n• Bread"))
+            "Here are three:\n\n- Milk\n- Bread"))
         self.assertFalse(ai_refiner._looks_like_a_list(
             "Ordinary prose. 1.5 million people, no list here."))
 

@@ -71,13 +71,25 @@ _NUM_ALT = "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True)) + r"|\d{1,2}"
 # Spoken bullets: "bullet point one", "bullet 2", "bullet point number three",
 # "next bullet point", or a bare "bullet point" that takes the next slot. The
 # engines write numbers as words or digits, so both are accepted.
+_POS_WORDS = (r"first|second|third|fourth|fifth|sixth|seventh|eighth|ninth"
+              r"|tenth|next|last|final")
 _BULLET_ALT = (
     r"(?:another|next|new)\s+bullet(?:\s+point)?"
     rf"|bullet(?:\s+point)?(?:\s+number)?\s+(?:{_NUM_ALT})"
+    # "the first bullet point is CPU energy", "second bullet: GPU energy"
+    rf"|(?:the\s+)?(?:{_POS_WORDS})\s+bullet(?:\s+point)?"
+    r"(?:\s+(?:is|would\s+be|will\s+be))?"
     r"|bullet\s+point"
 )
+# "the first thing is …", "the second point is …", "the next one is …". The
+# verb is REQUIRED: without it "the first thing I noticed was the colour" is
+# ordinary speech, not a list item.
+_ORD_NOUN_ALT = (
+    rf"(?:the\s+)?(?:{_POS_WORDS})\s+(?:thing|point|item|one|step|reason)"
+    r"\s+(?:is|would\s+be|will\s+be)"
+)
 _MARKER_ALT = "|".join(
-    [_BULLET_ALT, r"first of all", r"first off"]
+    [_BULLET_ALT, _ORD_NOUN_ALT, r"first of all", r"first off"]
     + sorted(_ORDINALS, key=len, reverse=True)
     + [rf"number\s+(?:{_NUM_ALT})"]
     + [re.escape(c) for c in _CLOSERS]
@@ -85,10 +97,13 @@ _MARKER_ALT = "|".join(
 # group(1) separator · group(2) connective · group(3) marker · group(4) the
 # punctuation that makes the marker a bare discourse word ("First, do X").
 # A connective may carry its own comma ("so, number one"), which is how people
-# lead into a list out loud.
+# lead into a list out loud. The separator may be bare whitespace ("one thing
+# and number two …" — people rarely pause audibly enough for a comma there),
+# but only an EXPLICIT marker may use it, and only under an announcement
+# (see _markers / _build_run).
 _MARKER_RE = re.compile(
-    r"(^|[.!?;:,]\s+|\n+)"
-    r"((?:(?:and|then|also|but|so|now|next|okay|ok|right)\s*,?\s+)*)"
+    r"(^|[.!?;:,]\s+|\n+|\s+)"
+    r"((?:(?:and|then|also|but|so|now|next|okay|ok|right|for|like)\s*,?\s+)*)"
     rf"({_MARKER_ALT})\b(\s*[,:])?",
     re.IGNORECASE,
 )
@@ -100,6 +115,7 @@ _ANNOUNCE = re.compile(
     r"|the following|as follows|a list of|list of"
     r"|(?:start|make|do|write|begin|got|have)\s+a\s+(?:quick\s+|short\s+)?list"
     r"|list (?:for|of)"
+    r"|(?:to|me|i'll|i will|let's|let us|gonna|going to) list"
     r"|(?:a )?(?:couple(?: of)?|few|number of|handful of|bunch of) "
     r"(?:things|reasons|steps|points|items|bits|tasks|ideas)"
     r"|(?:two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
@@ -122,11 +138,26 @@ def _marker_kind(word: str):
     ("number one"), "bullet" or "close" ("finally"). index is a position,
     None for a run-closer, or "next" for a bullet that takes the next slot."""
     w = " ".join(word.lower().split())
-    if "bullet" in w:
-        n = _num(w.split()[-1])
-        return (n if n else "next"), "bullet"
-    if w.startswith("number "):
-        return _num(w[7:]), "num"
+    words = w.split()
+    if words[0] == "the":
+        words = words[1:]
+    head = words[0]
+
+    def position():
+        if head in _ORDINALS:
+            return _ORDINALS[head]
+        if head in ("last", "final"):
+            return None
+        return "next"
+
+    if head == "number":
+        return _num(words[1]), "num"
+    if "bullet" in words:
+        n = _num(words[-1])
+        return (n if n else position()), "bullet"
+    if len(words) > 2 and words[1] in (
+            "thing", "point", "item", "one", "step", "reason"):
+        return position(), "num"
     if w in ("first of all", "first off"):
         return 1, "ord"
     if w in _CLOSERS:
@@ -148,6 +179,12 @@ def _markers(text: str):
     marks = []
     for m in _MARKER_RE.finditer(text):
         idx, kind = _marker_kind(m.group(3))
+        sep = m.group(1)
+        bare = bool(sep) and not sep.strip()
+        # A bare-space separator is only believable in front of an explicit
+        # marker; "first" or "finally" mid-sentence is ordinary English.
+        if bare and kind in ("ord", "close"):
+            continue
         # An ordinal that reads as part of the sentence stays in it; "number
         # one" and "bullet point one" never do.
         drop = bool(m.group(4)) or kind in ("num", "bullet")
@@ -157,8 +194,31 @@ def _markers(text: str):
             "body": (m.end(4) if m.group(4) else m.end(3)) if drop else m.start(3),
             "idx": idx,
             "kind": kind,
+            "bare": bare,
         })
     return marks
+
+
+# Words that make a list item a sentence (so it takes a full stop) rather than
+# a label ("CPU energy", "some milk and bread", "the login page").
+_SUBJECT = re.compile(
+    r"^(?:i|i'm|i've|i'll|i'd|we|we're|you|you're|they|they're|he|she|it|"
+    r"it's|there|this|that|these|those|my|our)\b", re.IGNORECASE)
+_VERB = re.compile(
+    r"\b(?:is|are|was|were|am|be|been|want|wants|need|needs|have|has|had|"
+    r"will|would|can|could|should|must|do|does|did|think|make|makes|get|"
+    r"gets|go|goes|going)\b", re.IGNORECASE)
+
+
+def _is_sentence(item: str) -> bool:
+    return len(item.split()) >= 3 and bool(
+        _SUBJECT.search(item) or _VERB.search(item))
+
+
+def _fix_lone_i(item: str) -> str:
+    """A lower-case "i" the engine left inside an item ("and number two i
+    want…") — never the "i" in "i.e."."""
+    return re.sub(r"(?<![\w.'])i(?=\s|'[a-z])", "I", item)
 
 
 def _numbered(text: str):
@@ -186,6 +246,14 @@ def _build_run(text: str, marks, bullets: bool):
             idx = expect
         if idx == "next":              # "next bullet point" takes the next slot
             idx = expect
+        # "first, so like number one, I want …": the same slot said twice in a
+        # row. The later, more explicit marker wins, and the words between the
+        # two are the speaker restarting, not part of the item.
+        if run and idx == expect - 1 and mk["kind"] != "close":
+            prev = run[-1]
+            if len(text[prev["body"]:mk["sep"]].split()) <= 3:
+                run[-1] = dict(prev, body=mk["body"])
+                continue
         if idx != expect:
             continue
         run.append(mk)
@@ -200,6 +268,11 @@ def _build_run(text: str, marks, bullets: bool):
     # that it takes three before this touches anything. "Number one … number
     # two" and "bullet point one … two" say so themselves.
     if len(run) < 3 and not announced and not explicit:
+        return None
+    # "we scored number one in the league and number two in the cup" joins
+    # its markers with bare spaces; only a spoken announcement makes that a
+    # list.
+    if any(mk["bare"] for mk in run) and not announced:
         return None
 
     bodies = []
@@ -219,8 +292,7 @@ def _build_run(text: str, marks, bullets: bool):
             tail = bodies[-1][cut.end():].strip()
             bodies[-1] = bodies[-1][:cut.end()]
 
-    items = [("• " if bullets else f"{i + 1}. ") + _cap(_trim_stop(b))
-             for i, b in enumerate(bodies)]
+    items = _finish_items(bodies, bullets)
     # An explicit run introduces itself, so its lead-in takes the colon too,
     # unless that lead-in is a finished sentence of its own.
     colon = announced or (explicit and lead[-1:] not in ".!?")
@@ -283,9 +355,23 @@ def _bulleted(text: str):
             continue
         if any(len(p.split()) > _MAX_BULLET_WORDS for p in parts):
             continue
-        items = [f"• {_cap(_trim_stop(p))}" for p in parts]
-        return _assemble(lead, items, after, True)
+        return _assemble(lead, _finish_items(parts, True), after, True)
     return None
+
+
+def _finish_items(bodies, bullets: bool):
+    """Marker, capital and ending for each item. Bullets are "- ": plain text
+    everywhere, and a real bullet in every app that reads Markdown (ChatGPT,
+    Claude, Teams, Slack). Items that are sentences end in a full stop, labels
+    do not, and a list is consistent: the majority decides for every item."""
+    texts = [_cap(_fix_lone_i(_trim_stop(b))) for b in bodies]
+    stops = sum(_is_sentence(t) for t in texts) * 2 > len(texts)
+    out = []
+    for i, t in enumerate(texts):
+        if stops and t[-1:] not in "?!.":
+            t += "."
+        out.append(("- " if bullets else f"{i + 1}. ") + t)
+    return out
 
 
 def _assemble(lead: str, items, tail: str, announced: bool) -> str:
@@ -309,7 +395,7 @@ def format_lists(text: str) -> str:
     """Return `text` with a clearly-spoken list laid out, or unchanged."""
     if not text or len(text.split()) < 6:
         return text
-    if "•" in text or re.search(r"^\s*\d+\.\s", text, re.MULTILINE):
+    if "•" in text or re.search(r"^\s*(?:\d+\.|-)\s", text, re.MULTILINE):
         return text                      # already laid out — never re-format
     for build in (_numbered, _bulleted):
         try:
