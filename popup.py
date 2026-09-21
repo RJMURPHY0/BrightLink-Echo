@@ -1598,6 +1598,10 @@ class FloatingPopup:
             highlightthickness=0, bd=0, width=10,
         )
         self._result_text.configure(yscrollcommand=self._result_scrollbar.set)
+        # The popup is its own topmost window, so the dashboard's global wheel
+        # bind never reaches it — a long refine result could only be scrolled by
+        # dragging the scrollbar. Give the result its own wheel binding.
+        self._result_text.bind("<MouseWheel>", self._on_result_wheel)
         self._result_text.pack(side="left", fill="x", expand=True)
 
         btn_row = tk.Frame(self._result_frame, bg=CP["bg"])
@@ -1758,6 +1762,15 @@ class FloatingPopup:
                 self._reposition(self._status_cx, self._status_cy)
         except Exception:
             pass
+
+    def _on_result_wheel(self, event) -> str:
+        """Wheel over the refine result — scroll a long result in place."""
+        try:
+            step = -(int(event.delta) // 120) * 2 or (-2 if event.delta > 0 else 2)
+            self._result_text.yview_scroll(step, "units")
+        except Exception:
+            pass
+        return "break"
 
     def _on_caption_wheel(self, event) -> str:
         """Wheel over the caption bar — scroll back through the transcript."""

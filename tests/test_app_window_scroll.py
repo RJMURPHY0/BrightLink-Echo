@@ -148,6 +148,49 @@ class SmoothScrollTests(unittest.TestCase):
         self.assertEqual(("moveto", 0.4), canvas.yview_calls[-1])
 
 
+class WheelRoutingTests(unittest.TestCase):
+    """The global <MouseWheel> bind routes every event through
+    _route_mousewheel; a tab with no branch here scrolls with a dead wheel.
+    """
+
+    def _window(self):
+        window = object.__new__(AppWindow)
+        window._lib = {}
+        window._routed = []
+        window._wheel_scroll = lambda cv, _e: window._routed.append(cv) or "break"
+        return window
+
+    def test_named_tabs_route_to_their_own_canvas(self):
+        window = self._window()
+        for tab, attr in (("history", "_hist_cv"), ("settings", "_settings_cv"),
+                          ("hotkey", "_hk_cv"), ("learning", "_learning_cv")):
+            sentinel = object()
+            setattr(window, attr, sentinel)
+            window._current_tab = tab
+            window._route_mousewheel(SimpleNamespace(delta=-120))
+            self.assertIs(sentinel, window._routed[-1],
+                          f"{tab} did not route to {attr}")
+
+    def test_library_and_phrases_subpages_route_to_their_lib_pane(self):
+        # These sub-pages keep their ScrollPane in lib-state, not a self._*_cv
+        # attribute — the branch that was missing when the wheel went dead.
+        window = self._window()
+        for tab in ("vocabulary", "snippets", "phrases"):
+            pane = object()
+            window._lib[tab] = {"pane": pane}
+            window._current_tab = tab
+            result = window._route_mousewheel(SimpleNamespace(delta=-120))
+            self.assertEqual("break", result)
+            self.assertIs(pane, window._routed[-1],
+                          f"{tab} wheel was not routed to its pane")
+
+    def test_home_has_no_scroll_surface_and_is_a_no_op(self):
+        window = self._window()
+        window._current_tab = "home"
+        self.assertIsNone(window._route_mousewheel(SimpleNamespace(delta=-120)))
+        self.assertEqual([], window._routed)
+
+
 class HistoryCanvasLayoutTests(unittest.TestCase):
     def test_preview_is_measured_and_forced_to_one_line(self):
         window = object.__new__(AppWindow)

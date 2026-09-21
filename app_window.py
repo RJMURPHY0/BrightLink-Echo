@@ -5066,14 +5066,22 @@ class AppWindow:
     def _route_mousewheel(self, event):
         """Route each Windows wheel event once to the active scroll surface."""
         cv = None
-        if self._current_tab == "history":
+        tab = self._current_tab
+        if tab == "history":
             cv = getattr(self, "_hist_cv", None)
-        elif self._current_tab == "settings":
+        elif tab == "settings":
             cv = getattr(self, "_settings_cv", None)
-        elif self._current_tab == "hotkey":
+        elif tab == "hotkey":
             cv = getattr(self, "_hk_cv", None)
-        elif self._current_tab == "learning":
+        elif tab == "learning":
             cv = getattr(self, "_learning_cv", None)
+        elif tab in ("vocabulary", "snippets", "phrases"):
+            # Each library / phrases sub-page owns its OWN ScrollPane, stored in
+            # its lib-state under "pane" (not a self._<tab>_cv attribute like the
+            # tabs above). Without this branch the wheel had no surface to drive
+            # on those pages, so they could not be scrolled at all — the reported
+            # dead scroll wheel on Phrases / Custom Vocabulary / Snippets.
+            cv = self._lib_state(tab).get("pane")
         if cv is not None:
             return self._wheel_scroll(cv, event)
         return None
