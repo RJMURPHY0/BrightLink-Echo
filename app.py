@@ -62,7 +62,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.6.81"
+APP_VERSION = "1.6.82"
 
 
 class _RECT(ctypes.Structure):
@@ -3309,8 +3309,7 @@ def _start_local_server(app_window, version: str) -> None:
                     json.dumps({"ok": True, "version": version}).encode()
                 )
             elif self.path.startswith("/update"):
-                from updater import cached_release, is_newer, download_update, apply_update, current_exe_path, verify_exe
-                import tempfile
+                from updater import cached_release, is_newer, current_exe_path, run_auto_update
                 info = cached_release()
                 if info and is_newer(info["version"], version):
                     # Respond immediately so FTC Contacts never times out
@@ -3321,15 +3320,18 @@ def _start_local_server(app_window, version: str) -> None:
                     self.wfile.write(b'{"ok":true,"action":"updating"}')
                     exe_path = current_exe_path()
                     if exe_path:
-                        def _download_and_apply(url=info["download_url"], dst=exe_path):
-                            tmp = os.path.join(tempfile.gettempdir(), "FTC-Whisper-update.exe")
+                        # The one update run (joined if one is already going),
+                        # asked to install as soon as its download verifies.
+                        # A private download to %TEMP% here was a second writer
+                        # racing the automatic updater.
+                        def _update_now(v=info["version"], url=info["download_url"], dst=exe_path):
                             try:
-                                download_update(url, tmp, lambda *_: None)
-                                verify_exe(tmp)
-                                apply_update(tmp, dst)
+                                run_auto_update(v, url, dst, is_idle=lambda: True,
+                                                poll_interval=0.0, idle_samples=1,
+                                                apply_now=True)
                             except Exception:
                                 pass
-                        threading.Thread(target=_download_and_apply, daemon=True, name="in-app-update").start()
+                        threading.Thread(target=_update_now, daemon=True, name="in-app-update").start()
                     else:
                         import webbrowser
                         webbrowser.open(info["download_url"])
@@ -3479,7 +3481,12 @@ def _ensure_installed_copy() -> str:
         try:
             if os.path.normcase(os.path.abspath(current)) == os.path.normcase(target):
                 return target  # already running from the stable copy
+            from updater import pyi_archive_intact
+            # A cut-off canonical exe (header intact, app archive missing)
+            # cannot start at all; any whole copy that runs repairs it,
+            # whatever the timestamps say.
             needs_copy = (not os.path.exists(target)) or (
+                not pyi_archive_intact(target)) or (
                 os.path.getmtime(current) > os.path.getmtime(target)
             )
             if needs_copy:
@@ -3551,6 +3558,13 @@ def _handoff_to_canonical_if_newer() -> None:
     # normal path runs (and _ensure_installed_copy refreshes the canonical
     # copy from us). Strict comparison also makes handoff ping-pong impossible.
     if tgt_v <= cur_v or tgt_v == (0, 0, 0, 0):
+        return
+    # The version resource sits in the first few KB, so a canonical exe cut
+    # off mid-update still reports the new version. Never hand off to one:
+    # carry on here, and _ensure_installed_copy repairs it from this copy.
+    from updater import pyi_archive_intact
+    if not pyi_archive_intact(target):
+        print(f"[App] Installed exe at {target} is incomplete — not handing off.")
         return
     try:
         import subprocess

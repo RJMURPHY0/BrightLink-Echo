@@ -8298,14 +8298,22 @@ class AppWindow:
                 # instead of a separate hand-rolled download. is_idle=True +
                 # idle_samples=1 makes it apply immediately, since the user asked
                 # to update NOW rather than waiting for the next idle window.
-                run_auto_update(
+                joined = run_auto_update(
                     version, download_url, exe_path,
                     is_idle=lambda: True,
                     on_status=_status,
                     poll_interval=0.0,
                     idle_samples=1,
                     on_event=_log_event,
+                    apply_now=True,
                 )
+                if joined:
+                    # The automatic updater is already downloading (or holds a
+                    # verified download): it installs now instead of at idle.
+                    # Starting a second download here is what once installed a
+                    # half-written exe.
+                    _status("Installing…")
+                    return
                 # run_auto_update only returns when the download failed after all
                 # retries (on success apply_update replaces the exe and exits the
                 # process). Fall back to opening the release page in the browser —

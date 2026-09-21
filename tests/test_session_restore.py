@@ -14,9 +14,19 @@ Two shipped bugs are pinned here.
    present, and RDW_UPDATENOW only validates Tk's update region (Tk draws on a
    later mainloop spin). Without a heal after the geometry change, the old
    page's pixels get blitted into the new position and stay there.
+
+The restore tests below used to write into the user's REAL
+%LOCALAPPDATA%\\FTC Whisper\\auth-restore.log. Every local test run appended a
+block of fake incidents (a "DEFINITIVE auth failure — SESSION CLEARED", two
+"IGNORED stale auth error" lines, "list index out of range", two "OK (late)")
+that read exactly like a real sign-out, and cost a day of forensics on
+2026-09-21. The whole module now runs against a throwaway folder: see
+setUpModule and DiagnosticsIsolationTests.
 """
 import os
+import shutil
 import sys
+import tempfile
 import types
 import unittest
 
@@ -24,6 +34,34 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import auth
 from auth import AuthManager, _is_definitive_auth_error
+
+_REAL_RESTORE_LOG_PATH = auth._restore_log_path
+_REAL_SESSION_PATH = auth._session_path
+_SANDBOX = None
+
+
+def setUpModule():
+    # auth-restore.log is the ONE place a real reboot sign-out can be
+    # diagnosed from, so no test may write to it, and no test may read,
+    # rewrite or delete the user's real .session either.
+    global _SANDBOX
+    _SANDBOX = tempfile.mkdtemp(prefix="ftc_whisper_restore_tests_")
+    auth._restore_log_path = lambda: os.path.join(_SANDBOX, "auth-restore.log")
+    auth._session_path = lambda: os.path.join(_SANDBOX, ".session")
+
+
+def tearDownModule():
+    auth._restore_log_path = _REAL_RESTORE_LOG_PATH
+    auth._session_path = _REAL_SESSION_PATH
+    shutil.rmtree(_SANDBOX, ignore_errors=True)
+
+
+def _sandbox_log_lines():
+    try:
+        with open(auth._restore_log_path(), encoding="utf-8") as f:
+            return f.read().splitlines()
+    except FileNotFoundError:
+        return []
 
 
 class ErrorClassifierTests(unittest.TestCase):
@@ -56,10 +94,27 @@ class _StubAuth(AuthManager):
         self._error = error
         self._tokens = tokens
         self.cleared = False
+        self.client_requests = 0
 
     def _clear_session(self):
         self.cleared = True
         self._user = None
+
+    def _get_client(self):
+        # Never build the real Supabase client: it costs a ~9s cold import and
+        # points a live HTTP client at the network. A test that needs a client
+        # supplies a fake one on the instance.
+        self.client_requests += 1
+        raise RuntimeError("stub: no real Supabase client in tests")
+
+
+class _FakeClient:
+    """A Supabase client whose set_session raises the given exception."""
+
+    def __init__(self, exc):
+        def _set_session(_at, _rt):
+            raise exc
+        self.auth = types.SimpleNamespace(set_session=_set_session)
 
 
 class RestoreDoesNotDeleteGoodSessionsTests(unittest.TestCase):
@@ -72,20 +127,27 @@ class RestoreDoesNotDeleteGoodSessionsTests(unittest.TestCase):
             f.write(b'{"access_token": "at", "refresh_token": "rt"}')
         self.addCleanup(lambda: os.path.exists(self.path) and os.remove(self.path))
 
-    def _restore_raising(self, mgr, exc):
-        def _boom(_raw):
-            raise exc
-        # Force the failure at the decrypt step, which is inside the try block.
-        original = auth._dpapi_decrypt
-        auth._dpapi_decrypt = _boom
-        self.addCleanup(setattr, auth, "_dpapi_decrypt", original)
-        return mgr._restore_once(self.path)
-
     def test_network_failure_keeps_the_session_file(self):
+        # The failure is raised at the SERVER step. This test used to raise it
+        # from _dpapi_decrypt, where the plain-JSON fallback swallowed it; the
+        # restore then built a real Supabase client and died on
+        # set_session("at", ...) splitting a non-JWT ("list index out of
+        # range"), so the network branch was never exercised at all.
         mgr = _StubAuth()
-        # A decrypt/parse failure has its own guard and must never clear.
-        self.assertFalse(self._restore_raising(mgr, RuntimeError("getaddrinfo failed")))
+        client = _FakeClient(RuntimeError("[Errno 11001] getaddrinfo failed"))
+        mgr._get_client = lambda: client
+        self.assertFalse(mgr._restore_once(self.path))
         self.assertFalse(mgr.cleared)
+        self.assertIn("RETRY: network/other error", _sandbox_log_lines()[-1])
+
+    def test_unreadable_session_file_is_kept_without_contacting_the_server(self):
+        with open(self.path, "wb") as f:
+            f.write(b"\x00neither DPAPI nor JSON")
+        mgr = _StubAuth()
+        self.assertFalse(mgr._restore_once(self.path))
+        self.assertFalse(mgr.cleared)
+        self.assertEqual(0, mgr.client_requests)
+        self.assertIn("session file unreadable", _sandbox_log_lines()[-1])
 
     def test_auth_error_is_ignored_when_already_signed_in(self):
         """A late-landing attempt already signed us in — a loser's rotation
@@ -115,6 +177,25 @@ class RestoreDoesNotDeleteGoodSessionsTests(unittest.TestCase):
             RuntimeError("Invalid Refresh Token: Refresh Token Not Found"))
         self.assertFalse(mgr._restore_once(self.path))
         self.assertTrue(mgr.cleared)
+
+
+class DiagnosticsIsolationTests(unittest.TestCase):
+    """Regression for 2026-09-21: the tests' fake restore outcomes landed in
+    the user's real auth-restore.log and were read as a real sign-out."""
+
+    def _assert_sandboxed(self, real, current):
+        self.assertNotEqual(os.path.normcase(os.path.abspath(real)),
+                            os.path.normcase(os.path.abspath(current)))
+        self.assertTrue(os.path.normcase(os.path.abspath(current)).startswith(
+            os.path.normcase(os.path.abspath(_SANDBOX))), current)
+
+    def test_restore_outcomes_never_reach_the_users_real_log(self):
+        self._assert_sandboxed(_REAL_RESTORE_LOG_PATH(), auth._restore_log_path())
+
+    def test_restores_never_touch_the_users_real_session_file(self):
+        # A non-stubbed _save_session or _clear_session writes or deletes
+        # whatever _session_path() names.
+        self._assert_sandboxed(_REAL_SESSION_PATH(), auth._session_path())
 
 
 class LateRestorePromotesTests(unittest.TestCase):

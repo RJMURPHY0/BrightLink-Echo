@@ -233,6 +233,15 @@ class FunctionWordTests(unittest.TestCase):
                 self.assertEqual(text, apply_vocabulary_fuzzy(
                     text, managed("The Ark")))
 
+    def test_like_is_padding_not_part_of_a_name(self):
+        # 2026-09-21, a real 2026-09-09 dictation against a live CRM cache:
+        # "press like" became "Proseal UK" (PRSLK both ways, collapsed letters
+        # jw 0.778 over the 0.70 multi-word floor). "like" is a preposition
+        # and the commonest filler in dictation; no CRM name carries it.
+        text = "have to press like the show more"
+        self.assertEqual(text, apply_vocabulary_fuzzy(
+            text, managed("Proseal UK")))
+
     def test_a_near_identical_one_word_merge_still_corrects(self):
         # The strict tier is near-identical-or-nothing, not never.
         self.assertEqual("ship it with Fosse Way today",

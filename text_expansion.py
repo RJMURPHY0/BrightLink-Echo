@@ -291,7 +291,7 @@ and or but nor so yet if as than then because although though while whilst
 unless until till whether since
 about above across after against along among amongst around at before behind
 below beneath beside between beyond by down during except for from in inside
-into near of off on onto out outside over per through throughout to toward
+into like near of off on onto out outside over per through throughout to toward
 towards under underneath up upon via with within without
 am is are was were be been being do does did have has had having
 will would shall should can could may might must ought not
