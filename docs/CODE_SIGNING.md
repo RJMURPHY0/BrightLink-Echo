@@ -105,13 +105,13 @@ Also worth doing first:
 10. **Let GitHub log in without a password.**
     1. In the app registration, open **Certificates & secrets**, then **Federated credentials**, then **Add credential**.
     2. Scenario: **GitHub Actions deploying Azure resources**.
-    3. Organization `RJMURPHY0`, Repository `FTC_Whisper`, Entity type **Environment**, GitHub environment name `release`.
+    3. Organization `RJMURPHY0`, Repository `BrightLink-Echo`, Entity type **Environment**, GitHub environment name `release`. The subject must read `repo:RJMURPHY0/BrightLink-Echo:environment:release`: GitHub signs with the repo's CURRENT name, so a credential made for the old `FTC_Whisper` name no longer matches and the login fails.
     4. Name `github-release`, then **Add**.
 11. **Allow it to sign.**
     1. In the signing account, open **Access control (IAM)**, then **Add role assignment**.
     2. Choose **Artifact Signing Certificate Profile Signer**.
     3. Select members: `brightlink-echo-signing`, then **Review + assign**.
-12. **Add five repo variables** at [Actions variables](https://github.com/RJMURPHY0/FTC_Whisper/settings/variables/actions), each via **New repository variable**. None of them is secret: the login is keyless.
+12. **Add five repo variables** at [Actions variables](https://github.com/RJMURPHY0/BrightLink-Echo/settings/variables/actions), each via **New repository variable**. None of them is secret: the login is keyless.
 
     | Variable | Value |
     |---|---|
@@ -122,7 +122,7 @@ Also worth doing first:
     | `SIGNING_PROFILE` | the profile name from step 8 |
 
 13. **Test without releasing.**
-    1. Open the [release workflow](https://github.com/RJMURPHY0/FTC_Whisper/actions/workflows/build-release.yml) and click **Run workflow**, leaving **publish** unticked.
+    1. Open the [release workflow](https://github.com/RJMURPHY0/BrightLink-Echo/actions/workflows/build-release.yml) and click **Run workflow**, leaving **publish** unticked.
     2. When it finishes, **Verify signature** should be green with signer `BRIGHTLINK (OS) LTD`, and the signed exe is attached to the run as an artifact.
 14. **Lock it on:** add a repo variable `REQUIRE_SIGNING` = `true`. From then on, a build that cannot sign fails instead of publishing unsigned.
 
@@ -141,8 +141,8 @@ The `release` environment is created automatically on the first run. If you ever
 
 | Asset | For | Name |
 |---|---|---|
-| `BrightLink-Echo.exe` | New downloads | Follows the product name in `brand.py` |
-| `FTC-Whisper.exe` | Every installed copy's auto-updater, and the CRM's download button | **Frozen: never rename** |
+| `BrightLink-Echo.exe` | New downloads: the README link and the CRM's download button | Follows the product name in `brand.py` |
+| `FTC-Whisper.exe` | Every installed copy's auto-updater | **Frozen: never rename** |
 
 Both come from the one signed build and have identical hashes.
 

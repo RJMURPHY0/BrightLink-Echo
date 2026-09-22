@@ -16,8 +16,7 @@ purpose:
     and recordings, and every version looks for them by name;
   * taskbar pins point at the canonical exe path;
   * every installed updater downloads UPDATE_ASSET from GITHUB_REPO, and the
-    BrightLink CRM links to that asset, opens URL_SCHEME and calls the local
-    server;
+    BrightLink CRM opens URL_SCHEME and calls the local server;
   * the mutex, the logon task and the registry keys are how a new version
     finds what an older one left behind.
 Changing any of them strands existing installs. tests/test_brand.py pins them.
@@ -67,7 +66,10 @@ RUN_VALUE_NAME = "FTC Whisper"            # HKCU Run fallback launcher
 URL_SCHEME = "ftcwhisper"                 # the CRM opens ftcwhisper://launch
 UNINSTALL_KEY_NAME = "FTCWhisper"         # HKCU ...\Uninstall\<this>
 UPDATE_ASSET = "FTC-Whisper.exe"          # what every installed updater downloads
-GITHUB_REPO = "RJMURPHY0/FTC_Whisper"
+# Renamed from RJMURPHY0/FTC_Whisper on 2026-09-22. Builds up to v1.6.86 still
+# ask for the old name and reach this repo through GitHub's redirect, which
+# lasts only while nothing else is ever called FTC_Whisper on this account.
+GITHUB_REPO = "RJMURPHY0/BrightLink-Echo"
 HTTP_USER_AGENT = "FTC-Whisper"
 UPDATER_USER_AGENT = "FTC-Whisper-Updater/1.0"
 # The name every build shipped under before builds recorded their own name

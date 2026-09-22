@@ -2,9 +2,9 @@
 
 *Formerly FTC Whisper.*
 
-> **[⬇ Install BrightLink Echo](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest)**
+> **[⬇ Install BrightLink Echo](https://github.com/RJMURPHY0/BrightLink-Echo/releases/latest)**
 >
-> [Direct download (always latest)](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest/download/BrightLink-Echo.exe)
+> [Direct download (always latest)](https://github.com/RJMURPHY0/BrightLink-Echo/releases/latest/download/BrightLink-Echo.exe)
 
 ---
 
@@ -32,7 +32,7 @@ Built for Windows. Transcription runs **fully locally** using [faster-whisper](h
 
 ### Option 1 — Single exe (recommended, no Python needed)
 
-1. [**Download BrightLink-Echo.exe**](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest/download/BrightLink-Echo.exe)
+1. [**Download BrightLink-Echo.exe**](https://github.com/RJMURPHY0/BrightLink-Echo/releases/latest/download/BrightLink-Echo.exe)
 2. Double-click it — if Windows shows a SmartScreen warning, click **More info → Run anyway**
 3. The app starts immediately in your system tray
 4. **Installs itself**: on first run it becomes a proper Windows application: a **Start-menu entry** (so it turns up in Start and in search), a **desktop shortcut**, and an entry in **Settings → Apps → Installed apps** with a working uninstaller. No admin rights needed; everything is per-user.

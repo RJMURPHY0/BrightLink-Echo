@@ -39,7 +39,9 @@ class FrozenIdentityTests(unittest.TestCase):
         self.assertEqual("ftcwhisper", brand.URL_SCHEME)
         self.assertEqual("FTCWhisper", brand.UNINSTALL_KEY_NAME)
         self.assertEqual("FTC-Whisper.exe", brand.UPDATE_ASSET)
-        self.assertEqual("RJMURPHY0/FTC_Whisper", brand.GITHUB_REPO)
+        # Renamed 2026-09-22; older builds reach it through GitHub's redirect
+        # from RJMURPHY0/FTC_Whisper, so that name must never be reused.
+        self.assertEqual("RJMURPHY0/BrightLink-Echo", brand.GITHUB_REPO)
         self.assertEqual("FTC Whisper", brand.UNRECORDED_PRODUCT_NAME)
 
     def test_the_first_name_stays_on_the_legacy_list(self):
@@ -142,7 +144,7 @@ class ModulesUseFrozenValuesTests(unittest.TestCase):
 
         self.assertEqual("FTC-Whisper.exe", updater._DOWNLOAD_FILENAME)
         self.assertEqual(
-            "https://api.github.com/repos/RJMURPHY0/FTC_Whisper/releases/latest",
+            "https://api.github.com/repos/RJMURPHY0/BrightLink-Echo/releases/latest",
             updater._GITHUB_API,
         )
         self.assertTrue(app_install.UNINSTALL_KEY.endswith("\\Uninstall\\FTCWhisper"))
