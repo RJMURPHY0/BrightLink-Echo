@@ -20,7 +20,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import email_format
-from email_format import format_email as fmt, is_email_app
+from email_format import format_email as fmt, format_signoff, is_email_app
 
 ME = "Ryan Murphy"
 
@@ -100,6 +100,24 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(fmt("Hi John, kind regards, Ryan"),
                          "Hi John,\n\nKind regards,\nRyan")
 
+    def test_sign_off_run_straight_on_from_the_body(self):
+        # Reported 2026-09-22 (BrightLink inbox): no pause before "kind
+        # regards", so the engine wrote no punctuation for the lead to find.
+        self.assertEqual(
+            fmt("Hi John, thanks for getting back to me so soon and I just "
+                "wanted to say thank you kind regards Ryan", ME),
+            "Hi John,\n\nThanks for getting back to me so soon and I just "
+            "wanted to say thank you.\n\nKind regards,\nRyan")
+        self.assertEqual(fmt("we'll sort it next week kind regards Ryan", ME),
+                         "We'll sort it next week.\n\nKind regards,\nRyan")
+        self.assertEqual(fmt("thanks for this yours sincerely Ryan Murphy", ME),
+                         "Thanks for this.\n\nYours sincerely,\nRyan Murphy")
+
+    def test_any_close_run_on_before_the_senders_own_name(self):
+        # Nobody thanks themselves, so "cheers Ryan" from Ryan is a signature.
+        self.assertEqual(fmt("see you then cheers Ryan", ME),
+                         "See you then.\n\nCheers,\nRyan")
+
 
 class LeftAloneTests(unittest.TestCase):
     """Byte-identical: the worse regression is rewriting text that was fine."""
@@ -139,6 +157,21 @@ class LeftAloneTests(unittest.TestCase):
             "Hi John,\n\nCan you send it over? Thanks John.")
         self.assertEqual(fmt("Thanks John."), "Thanks John.")
 
+    def test_run_on_sign_off_that_is_part_of_the_sentence(self):
+        for src in ("please give him my kind regards",
+                    "I wish you all the best",
+                    "I mean it sincerely",
+                    "I just wanted to say thanks Ryan",
+                    "sent with kind regards Ryan",
+                    "sign it off kind regards Ryan",
+                    "end the email with kind regards Ryan",
+                    "Can you send it over thanks John"):
+            with self.subTest(src=src):
+                self.assertEqual(fmt(src, ME), src)
+        # Unknown sender: a run-on "cheers John" could be either, so it stays.
+        self.assertEqual(fmt("see you then cheers John"),
+                         "see you then cheers John")
+
     def test_best_needs_a_name(self):
         self.assertEqual(fmt("That's the best."), "That's the best.")
 
@@ -151,6 +184,40 @@ class LeftAloneTests(unittest.TestCase):
         self.assertEqual(fmt(once, ME), once)
 
 
+class AnyAppSignOffTests(unittest.TestCase):
+    """Asked for 2026-09-22: "kind regards ... Ryan" goes on its own lines
+    wherever it is dictated, because nobody says it except to close a
+    message. Only that close moves; the greeting and body stay as spoken."""
+
+    def test_regards_close_with_a_name_moves(self):
+        self.assertEqual(
+            format_signoff("Hi John, thanks for getting back to me and I just "
+                           "wanted to say thank you kind regards Ryan", ME),
+            "Hi John, thanks for getting back to me and I just wanted to say "
+            "thank you.\n\nKind regards,\nRyan")
+        self.assertEqual(format_signoff("Thanks. Best regards, Ryan.", ME),
+                         "Thanks.\n\nBest regards,\nRyan")
+        self.assertEqual(format_signoff("Kind regards Ryan", ME),
+                         "Kind regards,\nRyan")
+
+    def test_everything_else_is_byte_identical(self):
+        for src in ("Hi John, thanks for your email.",
+                    "Can you send it over? Thanks, John.",
+                    "see you then cheers Ryan",
+                    "Speak soon, Ryan",
+                    "That's great. Kind regards.",
+                    "please give him my kind regards",
+                    "sign it off kind regards Ryan",
+                    "I wish you all the best, John",
+                    "Please pass on my best wishes, John."):
+            with self.subTest(src=src):
+                self.assertEqual(format_signoff(src, ME), src)
+
+    def test_stable(self):
+        once = format_signoff("thanks for this kind regards Ryan", ME)
+        self.assertEqual(format_signoff(once, ME), once)
+
+
 class WordsKeptTests(unittest.TestCase):
     """Only line breaks, the punctuation beside them and one capital move."""
 
@@ -161,6 +228,7 @@ class WordsKeptTests(unittest.TestCase):
         "Hi John, hope you're well, kind regards, Ryan.",
         "Let me know, thanks, Ryan.",
         "Hi John.",
+        "Hi John, I just wanted to say thank you kind regards Ryan",
     )
 
     def test_same_words_in_the_same_order(self):
@@ -169,6 +237,9 @@ class WordsKeptTests(unittest.TestCase):
                 out = fmt(src, ME)
                 self.assertEqual(re.findall(r"[a-z']+", src.lower()),
                                  re.findall(r"[a-z']+", out.lower()))
+                self.assertEqual(
+                    re.findall(r"[a-z']+", src.lower()),
+                    re.findall(r"[a-z']+", format_signoff(src, ME).lower()))
 
 
 class EmailAppTests(unittest.TestCase):
@@ -190,6 +261,28 @@ class EmailAppTests(unittest.TestCase):
                 ("firefox.exe", "Re: Quote - ryan@x.com - Gmail \u2014 Mozilla Firefox")):
             with self.subTest(title=title):
                 self.assertTrue(is_email_app("C:\\x\\" + exe, title))
+
+    def test_brightlink_inbox_and_send_email_modal(self):
+        # The CRM names its tab "<page> | <brand>"; the brand half is the
+        # customer's profile name, so only the page half is matched.
+        edge = "Microsoft" + chr(0x200b) + " Edge"
+        for exe, title in (
+                ("chrome.exe", "Inbox | BrightLink - Google Chrome"),
+                ("chrome.exe", "New email | BrightLink - Google Chrome"),
+                ("chrome.exe", "Inbox | FTC Safety Solutions - Google Chrome"),
+                ("chrome.exe", "Inbox | BrightLink"),          # app window
+                ("msedge.exe", "Inbox | BrightLink - Personal - " + edge)):
+            with self.subTest(title=title):
+                self.assertTrue(is_email_app("C:\\x\\" + exe, title))
+        for exe, title in (
+                ("chrome.exe", "Home | BrightLink - Google Chrome"),
+                ("chrome.exe", "CRM | BrightLink - Google Chrome"),
+                ("chrome.exe", "Inbox | BrightLink - Google Search - Google Chrome"),
+                ("chrome.exe", "Inbox | x | y - Google Chrome"),
+                ("chrome.exe", "Inbox - Google Chrome"),
+                ("slack.exe", "Inbox | BrightLink")):
+            with self.subTest(title=title):
+                self.assertFalse(is_email_app("C:\\x\\" + exe, title))
 
     def test_search_and_help_pages_about_email_are_not_email(self):
         # Asked for explicitly: Google Search must never get the layout, even
@@ -272,6 +365,18 @@ class WiringTests(unittest.TestCase):
     def test_whisper_upgrade_gets_the_same_layout(self):
         app = self._src("app.py")
         self.assertIn("accurate = format_email(accurate", app)
+        self.assertIn("accurate = format_signoff(accurate", app)
+
+    def test_any_app_sign_off_only_where_the_email_layout_is_not(self):
+        app = self._src("app.py")
+        self.assertIn(
+            "_signoff_ctx = not _email_ctx and self._signoff_layout_on()", app)
+        gate = app[app.index("def _signoff_layout_on"):]
+        gate = gate[:gate.index("def _load_sender_name")]
+        for need in ('"email_format", True', '"live_inject", False'):
+            self.assertIn(need, gate)
+        self.assertLess(app.index("format_signoff(transcribed_text"),
+                        app.index("self._apply_user_libraries(transcribed_text,"))
 
     def test_default_on_and_in_settings(self):
         self.assertIn("email_format: bool = True", self._src("config.py"))
@@ -321,12 +426,20 @@ class CorpusRegressionTests(unittest.TestCase):
 
     def test_no_word_is_lost_added_or_moved(self):
         for text in self._load():
-            out = fmt(text, ME)
-            if out == text:
-                continue
-            self.assertEqual(re.findall(r"[a-z']+", text.lower()),
-                             re.findall(r"[a-z']+", out.lower()),
-                             f"words changed: {text[:80]!r}")
+            for out in (fmt(text, ME), format_signoff(text, ME)):
+                if out == text:
+                    continue
+                self.assertEqual(re.findall(r"[a-z']+", text.lower()),
+                                 re.findall(r"[a-z']+", out.lower()),
+                                 f"words changed: {text[:80]!r}")
+
+    def test_any_app_rule_only_moves_a_named_close(self):
+        # The any-app rule runs on every dictation in every app, so over the
+        # real corpus it may only ever produce "...<blank line><close>,<Name>".
+        for text in self._load():
+            out = format_signoff(text, ME)
+            if out != text:
+                self.assertRegex(out, r"\n\n[A-Z][a-z ]+,\n[A-Z][\w' -]*$")
 
     def test_only_greeting_or_sign_off_shapes_change(self):
         offenders = []

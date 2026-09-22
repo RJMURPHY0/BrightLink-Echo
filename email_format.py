@@ -13,17 +13,22 @@ becomes
     Kind regards,
     Ryan
 
-Runs ONLY when the dictation started in an email client (`is_email_app`):
-classic or new Outlook, Windows Mail, Thunderbird, or a browser tab or web-app
-window whose title names Gmail or Outlook. Everywhere else the text is left
-alone, so "Hi John, thanks" typed into Slack or Teams stays one line.
+Runs when the dictation started in an email client (`is_email_app`):
+classic or new Outlook, Windows Mail, Thunderbird, a browser tab or web-app
+window whose title names Gmail or Outlook, or BrightLink's own inbox and
+send-email modal. Everywhere else only `format_signoff` runs, which moves an
+unmistakable close with a name after it ("Kind regards, Ryan") onto its own
+lines and touches nothing else, so "Hi John, thanks" typed into Slack or
+Teams stays one line.
 
 Three pieces, each optional, each recognised by shape:
 
   * a GREETING at the very start ("Hi John", "Dear Mr Smith", "Morning all",
     "Hello,"), which gets its own line ending in a comma;
   * a SIGN-OFF at the very end ("Kind regards", "Many thanks", "Cheers"),
-    which becomes its own paragraph;
+    which becomes its own paragraph, even run straight on from the body with
+    no punctuation ("…say thank you kind regards Ryan") when the phrase is
+    one nobody ends a sentence with;
   * the NAME after the sign-off, which goes on the line below it.
 
 Words are never added or removed. The only edits are line breaks, the
@@ -98,12 +103,35 @@ def _is_webmail_title(title: str) -> bool:
     return False
 
 
+# BrightLink's own mail. The CRM titles its tab "<page> | <brand>", and the
+# brand half is the customer's profile name ("Inbox | BrightLink", "Inbox |
+# FTC Safety"), so only the page half can be matched. The CRM writes these two
+# page names while its mail panel or its send-email modal (Email tab) is open:
+# Brightlink src/lib/pageTitle.ts, INBOX_TITLE and NEW_EMAIL_TITLE, pinned on
+# that side by tests/page-title.test.tsx. Renaming either breaks this match.
+_CRM_MAIL_TITLE = re.compile(r"(?:Inbox|New email) \| (?P<rest>.+)")
+
+
+def _is_crm_mail_title(title: str) -> bool:
+    m = _CRM_MAIL_TITLE.fullmatch(_ZERO_WIDTH.sub("", title or "").strip())
+    if not m:
+        return False
+    segs = [s.strip() for s in _SEP_RE.split(m.group("rest")) if s.strip()]
+    while segs and segs[-1].casefold() in _BROWSER_NAMES:
+        segs.pop()
+    # The brand, and at most an Edge profile name after it. Anything longer,
+    # or a search engine, is a page ABOUT the inbox rather than the inbox.
+    return (1 <= len(segs) <= 2 and "|" not in m.group("rest")
+            and not any(_SEARCH_WORDS.search(s) for s in segs))
+
+
 def is_email_app(exe: str, title: str) -> bool:
     """True when the window the dictation started in is an email client."""
     stem = _stem_of(exe or "")
     if stem in _MAIL_APPS:
         return True
-    return stem in _BROWSERS and _is_webmail_title(title)
+    return stem in _BROWSERS and (_is_webmail_title(title)
+                                  or _is_crm_mail_title(title))
 
 
 # ── Shapes ───────────────────────────────────────────────────────────────────
@@ -155,6 +183,7 @@ _JOINERS = {"and", "&"}
 # first alternative that fits.
 _STRONG = (
     "many thanks and kind regards", "many thanks and best regards",
+    "thank you and kind regards", "thank you and best regards",
     "thanks and kind regards", "thanks and best regards", "thanks and regards",
     "with kind regards", "with best wishes", "with many thanks",
     "kindest regards", "warmest regards", "kind regards", "best regards",
@@ -173,13 +202,54 @@ _WEAK = (
 _STRONG_SET = set(_STRONG)
 _NEEDS_NAME = {"best"}           # "Best." alone is not a sign-off
 
+# Sign-offs that close the message even when spoken straight on from the body
+# with no pause for the engine to punctuate: "…I just wanted to say thank you
+# kind regards Ryan". Only phrases nobody uses inside a sentence. "Best
+# wishes", "all the best", "sincerely" and bare "regards" are left out on
+# purpose: "I wish you all the best", "I mean it sincerely" and "as regards
+# John" are sentences that happen to end on them, and so is "end the email
+# with kind regards Ryan", which is why "with kind regards" needs a pause.
+_RUN_ON = {
+    "many thanks and kind regards", "many thanks and best regards",
+    "thank you and kind regards", "thank you and best regards",
+    "thanks and kind regards", "thanks and best regards", "thanks and regards",
+    "kindest regards", "warmest regards", "kind regards", "best regards",
+    "warm regards", "yours sincerely", "yours faithfully",
+}
+# A word that makes a run-on sign-off the OBJECT of the sentence rather than
+# its close: "give him my kind regards", "wanted to say thanks Ryan", and the
+# instructions dictated to an assistant ("sign it off kind regards Ryan").
+# The adjectives stop "sent with kind regards" splitting inside the phrase.
+_GOVERNS = {
+    "my", "your", "our", "his", "her", "their", "its", "it", "the", "a", "an",
+    "and", "or", "of", "to", "for", "with", "by", "as", "in", "like", "is",
+    "was", "be", "just", "off", "send", "sends", "sent", "sending", "give",
+    "gives", "gave", "giving", "pass", "passes", "passed", "passing", "extend",
+    "extends", "convey", "conveys", "offer", "offers", "say", "says", "said",
+    "saying", "sign", "signs", "signed", "signing", "end", "ends", "ended",
+    "ending", "close", "closes", "closed", "closing", "write", "writes",
+    "wrote", "writing", "put", "use", "uses", "used", "using", "no", "some",
+    "any", "these", "those", "very", "many", "all", "kind", "kindest", "best",
+    "warm", "warmest",
+}
+# Outside an email only these, and only with a name after them, take their
+# own lines: a "regards" close or a formal one with a signature is a letter
+# ending wherever it is typed, while "thanks, John" in a chat is a sentence.
+_ANYWHERE = {p for p in _STRONG if "regards" in p} | {
+    "yours sincerely", "yours faithfully", "sincerely", "best wishes",
+    "warm wishes", "with best wishes",
+}
+
 
 def _alt(phrases) -> str:
     return "|".join(p.replace(" ", r"\s+") for p in phrases)
 
 
+# The lead is what separates the sign-off from the body: the start of the text,
+# a sentence end, a comma, a line break, or (checked in _accept_signoff) plain
+# whitespace after a word.
 _SIGNOFF_RE = re.compile(
-    r"(?P<lead>^\s*|(?<=[.!?])\s+|,\s+|[ \t]*\n\s*)"
+    r"(?P<lead>^\s*|(?<=[.!?])\s+|,\s+|[ \t]*\n\s*|(?<=\w)\s+)"
     rf"(?P<phrase>(?i:{_alt(_STRONG)}|{_alt(_WEAK)}))\b"
     r"(?P<p1>\s*[,.!]?)"
     rf"(?:\s+(?P<name>{_NAME}(?:\s+{_NAME}){{0,3}}))?"
@@ -249,16 +319,49 @@ def _first_name(full: str) -> str:
     return _bare(parts[0]) if parts else ""
 
 
-def _accept_signoff(m, addressee: str, sender_first: str) -> bool:
-    phrase = " ".join(m.group("phrase").lower().split())
+def _lead_kind(m, text: str) -> str:
     lead = m.group("lead")
-    at_start = m.start() == 0      # the sign-off is the whole body
-    after_comma = lead.startswith(",")
+    if "\n" in lead:
+        return "newline"
+    if lead.startswith(","):
+        return "comma"
+    if m.start() == 0:
+        return "start"
+    if text[m.start() - 1] in ".!?":
+        return "sentence"
+    return "bare"
+
+
+def _prev_word(text: str, end: int) -> str:
+    words = text[:end].split()
+    return _bare(words[-1]) if words else ""
+
+
+def _accept_signoff(m, text: str, addressee: str, sender_first: str,
+                    anywhere: bool = False) -> bool:
+    phrase = " ".join(m.group("phrase").lower().split())
+    kind = _lead_kind(m, text)
+    at_start = kind == "start"      # the sign-off is the whole body
+    after_comma = kind == "comma"
     name = m.group("name") or ""
+    first = _bare(name.split()[0]) if name else ""
     strong = phrase in _STRONG_SET
 
+    if anywhere and not (name and phrase in _ANYWHERE):
+        return False
+    if kind == "bare":
+        # Run straight on from the body: only an unmistakable close, or a
+        # casual one followed by the sender's own name ("…see you then cheers
+        # Ryan": nobody thanks themselves). The other formal closes ("all the
+        # best", "with kind regards") need a pause even then: "I wish you all
+        # the best Ryan" is a sentence.
+        if _prev_word(text, m.start()) in _GOVERNS:
+            return False
+        if phrase not in _RUN_ON and not (
+                not strong and first and first == sender_first):
+            return False
+
     if name:
-        first = _bare(name.split()[0])
         if first in _NOT_NAMES or first in _GROUP_WORDS:
             return False
         if strong:
@@ -278,6 +381,36 @@ def _accept_signoff(m, addressee: str, sender_first: str) -> bool:
     return True
 
 
+def _find_signoff(text: str, addressee: str, sender_first: str,
+                  anywhere: bool = False):
+    """The accepted sign-off match, trying each place one could start."""
+    pos = 0
+    while True:
+        m = _SIGNOFF_RE.search(text, pos)
+        if m is None:
+            return None
+        if _accept_signoff(m, text, addressee, sender_first, anywhere):
+            return m
+        pos = m.start() + 1
+
+
+def _signoff_block(m) -> str:
+    phrase = _cap_first(" ".join(m.group("phrase").split()))
+    name = " ".join((m.group("name") or "").split())
+    if name:
+        return phrase + ",\n" + name
+    bang = "!" in (m.group("p1") + m.group("p2"))
+    return phrase + ("!" if bang else "")
+
+
+def _close_body(body: str, m, text: str) -> str:
+    # "…tomorrow, kind regards" / "…thank you kind regards": the comma or the
+    # run-on was the break, so the body's last sentence gets its stop.
+    if _lead_kind(m, text) in ("comma", "bare") and body and body[-1].isalnum():
+        return body + "."
+    return body
+
+
 # ── Public ───────────────────────────────────────────────────────────────────
 
 def format_email(text: str, sender_name: str = "") -> str:
@@ -291,26 +424,16 @@ def format_email(text: str, sender_name: str = "") -> str:
     # Searched in the body alone, so a sign-off straight after the greeting
     # ("Hi John, kind regards, Ryan") still finds its start-of-body lead.
     rest = text[body_start:]
-    signoff = None
-    body_end = len(rest)
-    m = _SIGNOFF_RE.search(rest)
-    if m and _accept_signoff(m, addressee, _first_name(sender_name)):
-        phrase = _cap_first(" ".join(m.group("phrase").split()))
-        name = " ".join((m.group("name") or "").split())
-        if name:
-            signoff = phrase + ",\n" + name
-        else:
-            bang = "!" in (m.group("p1") + m.group("p2"))
-            signoff = phrase + ("!" if bang else "")
-        body_end = m.start()
+    m = _find_signoff(rest, addressee, _first_name(sender_name))
+    signoff = _signoff_block(m) if m else None
+    body_end = m.start() if m else len(rest)
 
     if greeting is None and signoff is None:
         return text
 
     body = rest[:body_end].strip()
-    if signoff is not None and m.group("lead").startswith(",") \
-            and body and body[-1].isalnum():
-        body += "."     # "…tomorrow, kind regards": the comma was the break
+    if m is not None:
+        body = _close_body(body, m, rest)
     body = _cap_first(body)
 
     parts = [p for p in (greeting[0] if greeting else "", body,
@@ -319,3 +442,18 @@ def format_email(text: str, sender_name: str = "") -> str:
     if greeting and not body and signoff is None:
         out += "\n\n"   # just the greeting: leave the caret where the body goes
     return out
+
+
+def format_signoff(text: str, sender_name: str = "") -> str:
+    """Outside an email client: put an unmistakable letter close and the name
+    after it on their own lines ("…thanks for this kind regards Ryan"). Only
+    the _ANYWHERE phrases, and only with a name. The rest of the text,
+    greeting included, is left exactly as spoken."""
+    if not text or not text.strip():
+        return text
+    m = _find_signoff(text, "", _first_name(sender_name), anywhere=True)
+    if m is None:
+        return text
+    body = _close_body(text[:m.start()].rstrip(), m, text)
+    block = _signoff_block(m)
+    return body + "\n\n" + block if body.strip() else block

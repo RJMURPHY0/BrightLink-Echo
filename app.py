@@ -50,7 +50,7 @@ from config import Config
 # so first paint is near-instant; _core_ready gates everything that needs them.
 from spoken_commands import apply_spoken_commands
 from list_format import format_lists
-from email_format import format_email, is_email_app
+from email_format import format_email, format_signoff, is_email_app
 import sentence_end
 from hotkey_manager import HotkeyManager, TriggerHotkeyManager, AppState
 from feedback import Feedback
@@ -62,7 +62,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.6.85"
+APP_VERSION = "1.6.86"
 
 
 class _RECT(ctypes.Structure):
@@ -1661,11 +1661,19 @@ class WhisperFlowApp:
         # reasons (a snippet body is verbatim; live-typed words are already in
         # the document).
         _email_ctx = self._email_layout_on()
+        _signoff_ctx = not _email_ctx and self._signoff_layout_on()
         if transcribed_text and _email_ctx:
             _ef = format_email(transcribed_text, self._sender_name)
             if _ef != transcribed_text:
                 print("[App] Email laid out")
                 transcribed_text = _ef
+        elif transcribed_text and _signoff_ctx:
+            # Anywhere else only an unmistakable close with a name after it
+            # ("kind regards Ryan") moves onto its own lines.
+            _sf = format_signoff(transcribed_text, self._sender_name)
+            if _sf != transcribed_text:
+                print("[App] Sign-off laid out")
+                transcribed_text = _sf
 
         # The user's own vocabulary corrections, then their snippets — same
         # single post-processing point, for the same reason. Vocabulary first,
@@ -2002,7 +2010,7 @@ class WhisperFlowApp:
                 _upg_hw = _hw
                 def _upgrade(_audio=final_audio, _rate=capture_rate, _ft=_fast,
                              _ctx=_upg_ctx, _hw=_upg_hw, _seq=seq,
-                             _email=_email_ctx):
+                             _email=_email_ctx, _signoff=_signoff_ctx):
                     accurate = self.transcriber.transcribe(
                         _audio, _rate, context_words=_ctx, hotwords_str=_hw).strip()
                     if not accurate:
@@ -2016,6 +2024,8 @@ class WhisperFlowApp:
                     # the greeting and sign-off back on one line.
                     if _email:
                         accurate = format_email(accurate, self._sender_name)
+                    elif _signoff:
+                        accurate = format_signoff(accurate, self._sender_name)
                     offered = False
                     # Show Whisper result immediately so the upgrade button appears fast
                     if accurate != _ft:
@@ -2403,6 +2413,12 @@ class WhisperFlowApp:
         return bool(getattr(self.config, "email_format", True)
                     and not getattr(self.config, "live_inject", False)
                     and self._recording_email)
+
+    def _signoff_layout_on(self) -> bool:
+        """The any-app sign-off rule: same setting and same Live Typing
+        exemption as the email layout, in every app."""
+        return bool(getattr(self.config, "email_format", True)
+                    and not getattr(self.config, "live_inject", False))
 
     def _load_sender_name(self) -> None:
         """Fetch the signed-in user's name from their FTC profile and hand it to

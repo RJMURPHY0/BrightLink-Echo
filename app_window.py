@@ -7047,8 +7047,9 @@ class AppWindow:
                      "or bulleted list. Never while Live Typing is on",
                      True, icon="punct")
         _toggle_card("email_format", "Format Emails",
-                     "In Outlook or Gmail, put the greeting, the sign-off and "
-                     "your name on their own lines. Nowhere else is touched",
+                     "In Outlook, Gmail or the BrightLink inbox, put the "
+                     "greeting, the sign-off and your name on their own lines. "
+                     "Elsewhere only \"Kind regards\" and your name move",
                      True, icon="mail")
         _toggle_card("auto_paragraphs", "Auto Paragraphs",
                      "Start a new paragraph when you pause clearly after a "
