@@ -34,6 +34,14 @@ C = {
 WINDOW_W = 400
 WINDOW_H = 648
 
+# ── Google sign-in ──────────────────────────────────────────────────────────
+# Turned OFF at Ryan's request (2026-09-23). Everything that makes it work is
+# still in this file and untouched: `_sign_in_google`, the localhost callback
+# server, `_exchange_oauth_code`, and the button + divider themselves. Only the
+# PACKING of those two widgets is guarded, so flipping this back to True is the
+# whole restoration — nothing else to rebuild, and no OAuth config was removed.
+GOOGLE_SIGN_IN = False
+
 
 def _round_rect(canvas, x1, y1, x2, y2, r, **kw):
     """Draw a rounded rectangle (smoothed polygon) on a tk.Canvas."""
@@ -109,10 +117,16 @@ class LoginWindow:
         self._pending_confirm_email: Optional[str] = None
         self._embedded = False
         self._submitting = False
+        self._on_height_change = None
 
-    def embed(self, frame: tk.Frame) -> None:
-        """Build login UI into an existing frame (in-window, no Toplevel)."""
+    def embed(self, frame: tk.Frame, on_height_change=None) -> None:
+        """Build login UI into an existing frame (in-window, no Toplevel).
+
+        `on_height_change(h)` lets the host resize its window when the user
+        switches between Sign In and Create Account, which need different
+        heights."""
         self._embedded = True
+        self._on_height_change = on_height_change
         self._root = frame.winfo_toplevel()
         self._build_ui(container=frame)
 
@@ -127,6 +141,10 @@ class LoginWindow:
             self._password_var.set("")
         if hasattr(self, "_confirm_var"):
             self._confirm_var.set("")
+        if hasattr(self, "_name_var"):
+            self._name_var.set("")
+        if hasattr(self, "_company_var"):
+            self._company_var.set("")
         self._pending_confirm_email = None
         if hasattr(self, "_status_var"):
             self._status_var.set("")
@@ -177,6 +195,17 @@ class LoginWindow:
 
         self._build_ui()
         self._apply_dark_frame()
+        # _build_ui ends in _switch("login"), which sizes the page. The window
+        # was placed above using the nominal WINDOW_H, so re-centre vertically
+        # on the height this mode actually needs — otherwise a short login page
+        # sits low in the space a tall one would have filled.
+        try:
+            self._root.update_idletasks()
+            h = self.required_height()
+            self._root.geometry(
+                f"{WINDOW_W}x{h}+{x}+{y + (WINDOW_H - h) // 2}")
+        except tk.TclError:
+            pass
 
         if parent is not None:
             self._root.wait_window()
@@ -216,7 +245,7 @@ class LoginWindow:
         c = container or self._root
 
         # ── Logo / header ──────────────────────────────────────────────
-        header = tk.Frame(c, bg=C["bg"], pady=28)
+        header = tk.Frame(c, bg=C["bg"], pady=18)
         header.pack(fill="x")
 
         from logo_cache import get_lockup_photo
@@ -265,7 +294,7 @@ class LoginWindow:
         # Segmented Sign In / Create Account toggle
         self._seg = tk.Canvas(holder, height=40, bg=C["surface"],
                               highlightthickness=0, bd=0, cursor="hand2")
-        self._seg.pack(fill="x", pady=(2, 18))
+        self._seg.pack(fill="x", pady=(2, 10))
         self._seg.bind("<Configure>", lambda _e: self._draw_segment())
         self._seg.bind("<Button-1>", self._seg_click)
 
@@ -276,17 +305,28 @@ class LoginWindow:
         self._email_var = tk.StringVar()
         self._password_var = tk.StringVar()
         self._confirm_var = tk.StringVar()
+        self._name_var = tk.StringVar()
+        self._company_var = tk.StringVar()
+
+        # Your name — signup only. Sent as the auth metadata `full_name`,
+        # which the shared handle_new_user trigger writes onto the person's
+        # org_members.display_name. Built here, packed by _switch.
+        self._name_section = tk.Frame(self._card, bg=C["surface"])
+        self._field_label(self._name_section, "Your name")
+        name_wrap, self._name_entry, _ = self._rounded_field(
+            self._name_section, self._name_var)
+        name_wrap.pack(fill="x", pady=(4, 9))
 
         # Email
-        self._field_label(self._card, "Email")
+        self._email_label = self._field_label(self._card, "Email")
         email_wrap, self._email_entry, _ = self._rounded_field(self._card, self._email_var)
-        email_wrap.pack(fill="x", pady=(5, 14))
+        email_wrap.pack(fill="x", pady=(4, 9))
 
         # Password
         self._field_label(self._card, "Password")
         pass_wrap, self._pass_entry, self._pass_eye = self._rounded_field(
             self._card, self._password_var, show="•", with_eye=True)
-        pass_wrap.pack(fill="x", pady=(5, 14))
+        pass_wrap.pack(fill="x", pady=(4, 9))
         self._pass_visible = False
         self._pass_eye.bind("<Button-1>", lambda _e: self._toggle_pass())
 
@@ -300,8 +340,30 @@ class LoginWindow:
         ).pack(fill="x")
         confirm_wrap, self._confirm_entry, self._confirm_eye = self._rounded_field(
             self._confirm_section, self._confirm_var, show="•", with_eye=True)
-        confirm_wrap.pack(fill="x", pady=(5, 12))
+        confirm_wrap.pack(fill="x", pady=(4, 9))
         self._confirm_eye.bind("<Button-1>", lambda _e: self._toggle_confirm())
+
+        # Company — signup only, optional. Sent as the auth metadata
+        # `company_name`; the shared trigger names the organisation after it
+        # and marks the workspace `is_personal` when it is absent, which is
+        # what decides whether Super Admin lists this person under a company
+        # or under Users. One caption, no "it's just me" checkbox: leaving the
+        # box empty already says it, and the payload is identical either way.
+        self._company_section = tk.Frame(self._card, bg=C["surface"])
+        tk.Label(
+            self._company_section, text="Company (optional)",
+            fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 10), anchor="w",
+        ).pack(fill="x")
+        company_wrap, self._company_entry, _ = self._rounded_field(
+            self._company_section, self._company_var)
+        company_wrap.pack(fill="x", pady=(4, 3))
+        tk.Label(
+            self._company_section,
+            text="Leave blank for a personal account.",
+            fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 9), anchor="w",
+        ).pack(fill="x", pady=(0, 8))
 
         # Status message — hidden until needed
         self._status_var = tk.StringVar()
@@ -366,9 +428,13 @@ class LoginWindow:
             font=("Segoe UI", 11), height=44,
         )
 
-        # Divider + Google button always visible — packed once here
-        self._divider_frame.pack(fill="x", pady=(12, 0))
-        self._google_btn.pack(fill="x", pady=(8, 0))
+        # Divider + Google button — packed only while GOOGLE_SIGN_IN is on.
+        # _switch() packs the forgot-password link `before=self._divider_frame`,
+        # which is legal whether or not the divider is mapped, so nothing else
+        # needs to know this is off.
+        if GOOGLE_SIGN_IN:
+            self._divider_frame.pack(fill="x", pady=(12, 0))
+            self._google_btn.pack(fill="x", pady=(8, 0))
 
         # Enter key submits
         self._root.bind("<Return>", lambda _e: self._submit())
@@ -477,28 +543,119 @@ class LoginWindow:
     # Mode switching
     # ------------------------------------------------------------------
 
+    # Everything above and around `self._card`: the logo lockup header, the
+    # body's bottom padding (24), the card canvas inset (2 x 18) and the
+    # segmented Sign In / Create Account toggle with its padding.
+    # MEASURED on the real widgets, not derived — pinned by
+    # tests/test_signup_payload.py, which recomputes it from the live layout
+    # so a spacing change that invalidates it fails there rather than as a
+    # clipped field in a screenshot. (It did exactly that once already: the
+    # first draft of the signup form wanted 725px on a display that allows
+    # 704, which would have cut off the Create Account button.)
+    _CHROME_H = 194
+    _MIN_H = 460
+
+    def required_height(self) -> int:
+        """Window height this mode needs, from what the card actually asks for.
+
+        Signup carries two more fields than login (name, company) and, with
+        Google gone, login carries two fewer widgets. One fixed height cannot
+        serve both without either clipping signup or leaving login mostly
+        empty, so the page is sized per mode."""
+        try:
+            self._card.update_idletasks()
+            need = self._card.winfo_reqheight() + self._CHROME_H
+        except (tk.TclError, AttributeError):
+            return WINDOW_H
+        return max(self._MIN_H, min(need, self._max_height()))
+
+    def _max_height(self) -> int:
+        """Never ask for more than the monitor can show. Falls back to the Tk
+        screen height, and to a safe 900 if even that is unavailable."""
+        try:
+            from app_window import _monitor_work_area
+            top, bottom = _monitor_work_area(self._root)[1::2]
+            avail = bottom - top - 40          # caption bar + a little breathing room
+            if avail > 320:
+                return avail
+        except Exception:
+            pass
+        try:
+            return max(320, self._root.winfo_screenheight() - 96)
+        except Exception:
+            return 900
+
+    def _sync_height(self) -> None:
+        """Resize the page to the current mode.
+
+        Embedded, this goes through AppWindow._resize, which already defers the
+        geometry call out of the WM_SETREDRAW freeze (v1.6.38) and heals the
+        move afterwards (v1.6.47) — a mode switch is a user click well outside
+        _atomic_ui, so it is an ordinary resize on an already-healed path."""
+        cb = getattr(self, "_on_height_change", None)
+        h = self.required_height()
+        if cb is not None:
+            try:
+                cb(h)
+            except Exception as exc:
+                print(f"[Login] height callback failed (non-fatal): {exc}")
+            return
+        root = getattr(self, "_root", None)
+        if root is None or self._embedded:
+            return
+        try:
+            root.update_idletasks()
+            root.geometry(f"{WINDOW_W}x{h}")
+        except tk.TclError:
+            pass
+
+    def _link_anchor(self) -> dict:
+        """Pack options that put a link under Sign In rather than below the
+        Google button. `before=` on an UNPACKED widget raises, and the divider
+        is unpacked whenever GOOGLE_SIGN_IN is off — with nothing below it to
+        sit above, packing last is already the right place."""
+        try:
+            if self._divider_frame.winfo_manager() == "pack":
+                return {"before": self._divider_frame}
+        except tk.TclError:
+            pass
+        return {}
+
     def _switch(self, mode: str, clear_status: bool = True) -> None:
         self._mode = mode
         self._forgot_link.pack_forget()
         self._resend_link.pack_forget()
+        anchor = self._link_anchor()
         if mode == "login":
             self._confirm_section.pack_forget()
+            self._name_section.pack_forget()
+            self._company_section.pack_forget()
             self._submit_btn.set(text="Sign In")
-            # before=divider so the link sits under Sign In, not below Google
-            # (packing it last was pushing it off the bottom of the window).
-            self._forgot_link.pack(anchor="center", pady=(10, 0),
-                                   before=self._divider_frame)
+            self._forgot_link.pack(anchor="center", pady=(10, 0), **anchor)
             if self._pending_confirm_email:
-                self._resend_link.pack(anchor="center", pady=(4, 0),
-                                       before=self._divider_frame)
+                self._resend_link.pack(anchor="center", pady=(4, 0), **anchor)
         else:
+            # Order down the card: Name, Email, Password, Confirm, Company.
+            # Name leads because it is the CRM's order and because it is the
+            # least surprising thing to be asked first; Company trails the
+            # credentials because it is optional and about the workspace, not
+            # about you.
+            self._name_section.pack(fill="x", before=self._email_label)
             self._confirm_section.pack(fill="x", before=self._submit_btn)
+            self._company_section.pack(fill="x", before=self._submit_btn)
             self._submit_btn.set(text="Create Account")
+            # Start in the first field rather than leaving the caret in Email
+            # where the login form put it.
+            try:
+                self._name_entry.focus_set()
+            except tk.TclError:
+                pass
         if hasattr(self, "_seg"):
             self._draw_segment()
         if clear_status:
             self._status_var.set("")
             self._status_frame.pack_forget()
+        self._sync_height()
 
     # ------------------------------------------------------------------
     # Form submission
@@ -514,7 +671,14 @@ class LoginWindow:
             self._set_status("Please enter your email and password.", error=True)
             return
 
+        full_name = ""
+        company = ""
         if self._mode == "signup":
+            full_name = self._name_entry.get().strip()
+            company = self._company_entry.get().strip()
+            if not full_name:
+                self._set_status("Please enter your name.", error=True)
+                return
             if password != self._confirm_entry.get():
                 self._set_status("Passwords do not match.", error=True)
                 return
@@ -530,7 +694,9 @@ class LoginWindow:
             if self._mode == "login":
                 ok, msg = self._auth.sign_in(email, password)
             else:
-                ok, msg = self._auth.sign_up(email, password)
+                ok, msg = self._auth.sign_up(
+                    email, password,
+                    full_name=full_name, company_name=company)
 
             self._root.after(0, self._handle_result, ok, msg)
 

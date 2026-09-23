@@ -1,5 +1,5 @@
 """
-Opt-in voice training: send short dictation snippets to FTC Transcribe so it
+Opt-in voice training: send short dictation snippets to BrightLink Notetaker so it
 learns what the signed-in user sounds like.
 
 WHAT THIS DOES NOT DO BY DEFAULT
@@ -37,8 +37,11 @@ import wave
 
 import audio_store
 
-# Transcribe's public origin. Overridable so a dev build can point at localhost.
-DEFAULT_BASE_URL = "https://ftctranscribe-phi.vercel.app"
+# Notetaker's public origin. Overridable so a dev build can point at localhost.
+# FTC Transcribe became BrightLink Notetaker on 2026-09-23; the old
+# ftctranscribe-phi.vercel.app host stays a live alias, and FTC_TRANSCRIBE_URL
+# keeps its name because it is already set in people's environments.
+DEFAULT_BASE_URL = "https://notetaker.brightlink.io"
 
 # A clip has to be long enough to carry a voice and short enough to stay a
 # sample rather than a recording. Mirrors the server's own bounds, so a clip

@@ -533,10 +533,35 @@ class AuthManager:
 
         self._user = types.SimpleNamespace(id="local", email="")
 
-    def sign_up(self, email: str, password: str) -> tuple[bool, str]:
+    def sign_up(self, email: str, password: str, full_name: str = "",
+                company_name: str = "") -> tuple[bool, str]:
+        """Create an account.
+
+        `full_name` and `company_name` go into the auth user's metadata, which
+        is what the SHARED `handle_new_user` trigger reads (one Supabase
+        project behind Echo, the CRM and Transcribe). It names the person's
+        organisation from `company_name` and sets `is_personal` when there
+        isn't one, which is how Super Admin decides whether to list them under
+        a company or under Users. Echo used to send neither, so every account
+        created here arrived as a company-less workspace named after the email
+        prefix — filed in the wrong place and with no display name.
+
+        A blank key must be ABSENT, not empty: the trigger tests
+        `nullif(trim(...), '') IS NULL`, and "" would still be a value to
+        anything that reads the metadata directly. Mirrors the CRM's own form
+        (Brightlink src/features/warehouse-and-logistics/Auth.tsx).
+        """
         try:
             client = self._get_client()
-            result = client.auth.sign_up({"email": email, "password": password})
+            payload: dict = {"email": email, "password": password}
+            data = {}
+            if (full_name or "").strip():
+                data["full_name"] = full_name.strip()
+            if (company_name or "").strip():
+                data["company_name"] = company_name.strip()
+            if data:
+                payload["options"] = {"data": data}
+            result = client.auth.sign_up(payload)
             print(f"[Auth] Sign-up result: user={result.user}, session={result.session}")
             if result.user:
                 if result.session:

@@ -3378,7 +3378,21 @@ class AppWindow:
                 threading.Thread(target=self._on_sign_in, args=(auth,), daemon=True).start()
 
         self._login_ui = LoginWindow(self._auth, on_success=_on_success, on_cancel=self._do_quit)
-        self._login_ui.embed(self._login_frame)
+        # Sign In and Create Account need different heights (Create Account
+        # carries name, company and confirm-password). The login page owns the
+        # number; we only apply it, and only while the login page is the one on
+        # screen — a late callback must never resize the dashboard.
+        self._login_ui.embed(self._login_frame,
+                             on_height_change=self._resize_login_page)
+
+    def _resize_login_page(self, height: int) -> None:
+        """Apply the height the login page asked for, if it is showing."""
+        if not getattr(self, "_login_visible", False):
+            return
+        try:
+            self._resize(WINDOW_W, int(height))
+        except Exception as exc:
+            print(f"[AppWindow] Login resize failed (non-fatal): {exc}")
 
     def _top_hwnd(self) -> int:
         """Top-level HWND of OUR root. GetAncestor(GA_ROOT) — never resolve by
@@ -3485,7 +3499,16 @@ class AppWindow:
             self._dash_frame.pack_forget()
             self._signing_in_frame.pack_forget()
             self._login_frame.pack(fill="both", expand=True)
-            self._resize(WINDOW_W, 560)
+            # The login page knows what it needs; 560 was a fixed number from
+            # when both modes were the same shape.
+            h = 560
+            ui = getattr(self, "_login_ui", None)
+            if ui is not None:
+                try:
+                    h = ui.required_height()
+                except Exception:
+                    h = 560
+            self._resize(WINDOW_W, h)
         self._atomic_ui(_swap)
         if hasattr(self, "_login_ui"):
             self._login_ui.reset()
@@ -4841,7 +4864,12 @@ class AppWindow:
             return
 
         m = snap["saved_minutes"]
-        if m < 1:
+        if m <= 0:
+            # Nothing dictated yet in this window. The "< 1" bucket below read
+            # as a claim to have already saved time on a brand-new account,
+            # which is the first thing a new user sees and is not true.
+            v, u, s = "0", "min", "Dictate to start saving"
+        elif m < 1:
             v, u, s = "< 1", "min", "A tiny moment"
         elif m < 10:
             v, u, s = str(int(m)), "min", "Every word counts"
@@ -4862,6 +4890,13 @@ class AppWindow:
             ratio_txt = f"{ratio:.1f}".rstrip("0").rstrip(".")
             self._set_impact_card("speed", str(int(round(wpm))), "wpm",
                                   f"{ratio_txt}× faster than typing")
+        elif int(snap.get("total_words", 0)) <= 0:
+            # Never dictated: the nominal 160 below is the modelled speed the
+            # savings maths uses, not this person's, and presenting it as their
+            # "dictation speed" on a fresh account is the same untruth the time
+            # card told. The nominal fallback still stands once there IS data
+            # but the window is too thin to measure (see the v1.6.70 decision).
+            self._set_impact_card("speed", "—", "wpm", "Dictate to measure")
         else:
             self._set_impact_card("speed", "160", "wpm", "4× faster than typing")
 
@@ -7238,23 +7273,83 @@ class AppWindow:
 
         self._page_section(body, "book", "Your words", top=6)
         self._link_card(body, "vocabulary", "Custom Vocabulary",
-                        "Names, acronyms and jargon the app should always get "
-                        "right, plus what it tends to mishear them as", "book")
+                        "Names and jargon it should always get right.", "book")
         self._link_card(body, "snippets", "Snippets",
-                        "Say a short phrase and it expands into a full block of "
-                        "text: an address, a sign-off, a standard paragraph",
+                        "A short phrase expands into a block of text.",
                         "wand")
 
         self._page_section(body, "brain", "Learned from you")
         self._link_card(body, "phrases", "Phrases You Say Often",
-                        "Learned automatically from your own dictation, and "
-                        "used to fix the ones it mishears next time", "brain")
+                        "Picked up automatically from your own dictation.",
+                        "brain")
         self._toggle_card(body, "learned_phrases", "Learn My Phrases",
-                          "Remember the phrases you repeat and use them to "
-                          "correct the words the app is unsure about. Learns "
-                          "only from what it heard clearly, and only corrects "
-                          "what it heard badly. Stays on this computer.",
+                          "Learns phrases you repeat and uses them to fix ones "
+                          "it mishears.",
                           True, icon="mic")
+
+        self._build_voice_training(body)
+
+    def _build_voice_training(self, parent: tk.Frame) -> None:
+        """Voice Training, closing the Learning tab.
+
+        It lived under Account in Settings until this pass. Learning is where
+        it belongs: every other card on this tab is something the app knows
+        about how this person talks, and this is the one that decides whether
+        any of it leaves the machine. The handlers address these widgets by
+        attribute (set_voice_training_state, _on_voice_training_toggle,
+        _on_voice_backfill), so moving the block needed no rewiring."""
+        self._page_section(parent, "mic", "Voice Training")
+        vt_card = self._card(parent, margin=(0, 4))
+
+        vt_row = tk.Frame(vt_card, bg=C["surface"]); vt_row.pack(fill="x")
+        self._card_glyph(vt_row, "mic")
+
+        # Starts OFF and disabled: the real answer lives on the account and
+        # arrives from the server a moment later. Showing "off" before we know
+        # is honest; showing "on" would not be.
+        self._voice_pill = TogglePill(vt_row, value=False, bg=C["surface"],
+                                      command=self._on_voice_training_toggle)
+        self._voice_pill.pack(side="right")
+
+        vt_col = tk.Frame(vt_row, bg=C["surface"])
+        vt_col.pack(side="left", fill="x", expand=True)
+        _vt_title = "Train my voice for BrightLink Notetaker"
+        tk.Label(vt_col, text=_vt_title,
+                 fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(anchor="w")
+        # One line. The privacy fact is not lost — the status line below says
+        # it in both states ("Off. Your dictation audio never leaves this
+        # computer."), which is where someone deciding will actually look.
+        _vt_desc_text = "Lets BrightLink Notetaker recognise your voice in meetings."
+        vt_desc = tk.Label(
+            vt_col, text=_vt_desc_text,
+            fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 8),
+            anchor="w", justify="left", wraplength=260)
+        vt_desc.pack(fill="x")
+        self._autowrap(vt_desc)
+        self._register_search_setting(_vt_title, _vt_desc_text,
+                                      "voice training transcribe")
+
+        # Status and button on SEPARATE rows. Side by side they need the
+        # status sentence and the button label to fit one ~290px card between
+        # them, which they never did — the button ran off the right edge and
+        # its label was cut in half ("Import my past"). Stacked, both are
+        # whole at any window width, and the status can wrap like every other
+        # description on this page.
+        vt_actions = tk.Frame(vt_card, bg=C["surface"])
+        vt_actions.pack(fill="x", pady=(8, 0))
+        self._voice_status = tk.Label(vt_actions, text="Checking…",
+                                      fg=C["subtext"], bg=C["surface"],
+                                      font=("Segoe UI", 8), anchor="w",
+                                      justify="left")
+        self._voice_status.pack(fill="x")
+        self._autowrap(self._voice_status)
+
+        vt_btn_row = tk.Frame(vt_card, bg=C["surface"])
+        vt_btn_row.pack(fill="x", pady=(8, 0))
+        self._voice_import_btn = self._surface_btn(
+            vt_btn_row, "Import my past dictations", self._on_voice_backfill)
+        self._voice_import_btn.pack(side="right")
 
     def _build_settings_tab(self, parent: tk.Frame) -> None:
         # Scrollable container — ScrollPane, not a Canvas: cards are child
@@ -7448,6 +7543,55 @@ class AppWindow:
         mic_var.trace_add("write", _update_mic_caption)
         _update_mic_caption()
 
+        # Applying the choice lives here now, not on a Save button at the foot
+        # of the page. `_populate_mic_menu` sets this var itself while the
+        # device list is still loading, so the first write (and any write that
+        # only relabels "Auto-detect (…)" as the resolved device changes) must
+        # NOT be reported to the user as a change they made — `_mic_applied`
+        # holds the last value actually pushed, and a no-op write is silent.
+        self._mic_status = tk.Label(mic_card, text="", fg=C["success"],
+                                    bg=C["surface"], font=("Segoe UI", 8),
+                                    anchor="w")
+        self._mic_status.pack(fill="x")
+
+        def _mic_value(sel: str) -> str:
+            return ("auto" if sel.startswith(_AUTO_PREFIX) or sel == "Default"
+                    else sel)
+
+        _mic_applied = [_mic_value(mic_var.get())]
+        _mic_status_job = [None]
+        # Set true once _populate_mic_menu has finished seeding the control.
+        # Every write before that is the app filling the dropdown in — applying
+        # or announcing those would save a device the user never chose (and a
+        # pinned mic that has since been unplugged would silently rewrite the
+        # config to auto). A flag, not a "first write" counter: when no devices
+        # enumerate at all, the counter version would swallow the user's first
+        # real change instead.
+        self._mic_menu_ready = False
+
+        def _apply_mic(*_a):
+            try:
+                value = _mic_value(mic_var.get())
+            except tk.TclError:
+                return
+            if value == _mic_applied[0]:
+                return
+            _mic_applied[0] = value
+            if not self._mic_menu_ready:
+                return
+            if self._on_settings_change:
+                self._on_settings_change("input_device", value)
+            try:
+                self._mic_status.configure(text="Saved ✓")
+                if _mic_status_job[0]:
+                    self._root.after_cancel(_mic_status_job[0])
+                _mic_status_job[0] = self._root.after(
+                    3000, lambda: self._mic_status.configure(text=""))
+            except (tk.TclError, AttributeError):
+                pass
+
+        mic_var.trace_add("write", _apply_mic)
+
         def _populate_mic_menu(devs):
             try:
                 seen_names: set = set()
@@ -7485,6 +7629,12 @@ class AppWindow:
                 import traceback
                 print(f"[Settings] _populate_mic_menu FAILED: {e}")
                 traceback.print_exc()
+            finally:
+                # From here every write to mic_var is the user picking a
+                # device, so it applies live. In `finally` because a failed
+                # populate must still leave the control usable rather than
+                # permanently ignoring the user.
+                self._mic_menu_ready = True
 
         # Enumerate on a daemon thread (avoids a 200-500ms block on machines with
         # many audio/Bluetooth devices), but hand the result back via a MAIN-THREAD
@@ -7756,11 +7906,8 @@ class AppWindow:
         # (config.load forces warm_mic=True for installs that disabled it).
 
         # ── Feedback ──────────────────────────────────────────────────────────
-        _section("speaker", "Feedback")
-        sound_var = _toggle_card(
-            "sound_feedback", "Sound Feedback",
-            "Beeps when recording starts, stops, and transcription finishes",
-            True, icon="speaker")
+        # Sounds now closes the page, after Popup — both are "what the app does
+        # around a dictation", and neither is what you open Settings for.
 
         # ── Dictation ─────────────────────────────────────────────────────────
         # Custom Vocabulary, Snippets and the learned phrases live on the
@@ -7809,29 +7956,52 @@ class AppWindow:
                     "end_punctuation",
                     _END_FROM_LABEL.get(_end_var.get(), "smart"))
         _end_var.trace_add("write", _on_end_change)
+        _toggle_card("auto_paragraphs", "Auto Paragraphs",
+                     "Starts a new paragraph when you pause after a sentence.",
+                     True, icon="punct")
         _toggle_card("auto_lists", "Auto Lists",
-                     "When you clearly list things (\"first\u2026 second\u2026\", or "
-                     "\"here are the three things\"), lay them out as a numbered "
-                     "or bulleted list. Never while Live Typing is on",
+                     "Lays spoken lists out as numbered or bulleted lines.",
                      True, icon="punct")
         _toggle_card("email_format", "Format Emails",
-                     "In Outlook, Gmail or the BrightLink inbox, put the "
-                     "greeting, the sign-off and your name on their own lines. "
-                     "Elsewhere only \"Kind regards\" and your name move",
+                     "In email apps, puts the greeting and sign-off on their "
+                     "own lines.",
                      True, icon="mail")
-        _toggle_card("auto_paragraphs", "Auto Paragraphs",
-                     "Start a new paragraph when you pause clearly after a "
-                     "finished sentence (never breaks mid-sentence thinking pauses)",
-                     True, icon="punct")
         _toggle_card("trailing_space", "Add Trailing Space",
-                     "Append a space after each injection (useful for mid-sentence dictation)",
+                     "Adds a space after each dictation.",
                      False, icon="space")
         _toggle_card("auto_enter", "Press Enter After Insert",
-                     "Send Enter after injecting (useful for chat / search boxes)",
+                     "Presses Enter after each dictation.",
                      False, icon="enter")
+        _toggle_card("copy_to_clipboard", "Copy to Clipboard",
+                     "Also leaves each dictation on the clipboard.",
+                     False, icon="clipboard")
+
+        # ── Live typing ─────────────────────────────────────────────
+        _section("keyboard", "Live Typing")
+        _toggle_card("live_inject", "Live Typing (Beta)",
+                     "Types each word as you speak, instead of all at once.",
+                     False, icon="keyboard")
+
+        # Mutually exclusive with Live Typing (see _enforce_live_exclusive):
+        # with Live Typing on the words already land in the target app, so a
+        # caption bar is redundant, and both read the same hypothesis stream.
+        _toggle_card("live_captions", "Live Captions",
+                     "Shows your words on the pill as you speak.",
+                     False, icon="captions")
+
+        # A config saved with both on (or an older build) resolves in favour of
+        # Live Typing rather than leaving an impossible pair on screen.
+        if (getattr(cfg, "live_inject", False) if cfg else False):
+            self._enforce_live_exclusive("live_inject", True)
+
+        # ── Popup ───────────────────────────────────────────────────
+        # Split out of Dictation in this pass. Those twelve cards were two
+        # unrelated concerns under one heading: how the TEXT comes out, and
+        # where the PILL sits on screen. Nobody scrolling for "stop the pill
+        # appearing in my screen recording" was going to look under Dictation.
+        _section("wand", "Popup")
         _toggle_card("show_popup", "Show Popup After Dictation",
-                     "Show the Insert / Replace / Upgrade icon near the cursor "
-                     "after each dictation (it still appears if injection fails)",
+                     "Shows the tick badge by your cursor when text lands.",
                      True, icon="wand")
 
         # Popup vertical position — where the popup sits on screen. Low keeps it
@@ -7874,44 +8044,24 @@ class AppWindow:
         _height_var.trace_add("write", _on_height_change)
 
         _toggle_card("show_pill_arrows", "Position Arrows on the Pill",
-                     "Show the small nudge arrows on the recording pill for "
-                     "moving it. Off gives a clean pill; the saved position "
-                     "still applies",
+                     "Shows arrows on the pill for moving it.",
                      True, icon="wand")
         _toggle_card("badge_dismiss_on_key", "Dismiss the Badge on Any Key",
-                     "The ✓ badge after a dictation gets out of the way as soon "
-                     "as you press a key — no need to click it. Off leaves it "
-                     "up until it times out or you switch app",
+                     "The badge clears as soon as you press a key.",
                      True, icon="keyboard")
         _toggle_card("hide_popup_in_screenshots", "Hide Popup in Screenshots",
-                     "Leave the recording pill and refine panel out of "
-                     "screenshots and screen recordings (you still see them "
-                     "on screen)",
+                     "Keeps the pill out of screenshots and recordings.",
                      False, icon="camera")
 
-        _toggle_card("copy_to_clipboard", "Copy to Clipboard",
-                     "Also leave every dictation on the clipboard, so you can "
-                     "paste it with Ctrl+V if the text landed in the wrong place",
-                     False, icon="clipboard")
-
-        # ── Live typing ───────────────────────────────────────────────────────
-        _section("keyboard", "Live Typing")
-        _toggle_card("live_inject", "Live Typing (Beta)",
-                     "Type each word into the app as you speak instead of all at once. "
-                     "Self-corrects when you finish. Available for English dictation.",
-                     False, icon="keyboard")
-
-        # Mutually exclusive with Live Typing (see _enforce_live_exclusive):
-        # with Live Typing on the words already land in the target app, so a
-        # caption bar is redundant, and both read the same hypothesis stream.
-        _toggle_card("live_captions", "Live Captions",
-                     "Show the words you're saying in real time (replaces the "
-                     "waveform bar while recording)", False, icon="captions")
-
-        # A config saved with both on (or an older build) resolves in favour of
-        # Live Typing rather than leaving an impossible pair on screen.
-        if (getattr(cfg, "live_inject", False) if cfg else False):
-            self._enforce_live_exclusive("live_inject", True)
+        # ── Sounds ────────────────────────────────────────────────
+        # Was "Feedback", which reads as USER feedback; it is one toggle about
+        # audio cues. The old description also claimed a beep when
+        # "transcription finishes" — v1.6.51 deliberately made that third cue
+        # SILENT, so the copy had been wrong since then.
+        _section("speaker", "Sounds")
+        _toggle_card("sound_feedback", "Sounds",
+                     "A beep when recording starts and stops.",
+                     True, icon="speaker")
 
         # ── Account card ──────────────────────────────────────────────────────
         _section("person", "Account")
@@ -7943,84 +8093,17 @@ class AppWindow:
             lambda _e: self._settings_auth_btn.configure(
                 fg=C["error"] if self._auth.user_email else C["accent"]))
 
-        # ── Voice training ────────────────────────────────────────────────────
-        # Deliberately under Account, not Dictation: this is a decision about
-        # where the user's voice goes, not a preference about how typing works.
-        _section("mic", "Voice Training")
-        vt_card = self._card(parent, margin=(0, 4))
+        # Voice Training used to sit here, under Account. It now closes the
+        # Learning tab (_build_voice_training), which is where everything the
+        # app knows about the user's voice already lives.
 
-        vt_row = tk.Frame(vt_card, bg=C["surface"]); vt_row.pack(fill="x")
-        _card_icon(vt_row, "mic")
-
-        # Starts OFF and disabled: the real answer lives on the account and
-        # arrives from the server a moment later. Showing "off" before we know
-        # is honest; showing "on" would not be.
-        self._voice_pill = TogglePill(vt_row, value=False, bg=C["surface"],
-                                      command=self._on_voice_training_toggle)
-        self._voice_pill.pack(side="right")
-
-        vt_col = tk.Frame(vt_row, bg=C["surface"])
-        vt_col.pack(side="left", fill="x", expand=True)
-        tk.Label(vt_col, text="Train my voice for FTC Transcribe",
-                 fg=C["text"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(anchor="w")
-        vt_desc = tk.Label(
-            vt_col,
-            text=("Your dictation audio stays on this computer and is never "
-                  "uploaded. Turn this on and short snippets of your own voice "
-                  "are sent to FTC Transcribe, so it can recognise you in "
-                  "meetings without you recording anything. Same switch in both "
-                  "apps. Turn it off any time."),
-            fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 8),
-            anchor="w", justify="left", wraplength=260)
-        vt_desc.pack(fill="x")
-        self._autowrap(vt_desc)
-
-        # Status and button on SEPARATE rows. Side by side they need the
-        # status sentence and the button label to fit one ~290px card between
-        # them, which they never did — the button ran off the right edge and
-        # its label was cut in half ("Import my past"). Stacked, both are
-        # whole at any window width, and the status can wrap like every other
-        # description on this page.
-        vt_actions = tk.Frame(vt_card, bg=C["surface"])
-        vt_actions.pack(fill="x", pady=(8, 0))
-        self._voice_status = tk.Label(vt_actions, text="Checking…",
-                                      fg=C["subtext"], bg=C["surface"],
-                                      font=("Segoe UI", 8), anchor="w",
-                                      justify="left")
-        self._voice_status.pack(fill="x")
-        self._autowrap(self._voice_status)
-
-        vt_btn_row = tk.Frame(vt_card, bg=C["surface"])
-        vt_btn_row.pack(fill="x", pady=(8, 0))
-        self._voice_import_btn = self._surface_btn(
-            vt_btn_row, "Import my past dictations", self._on_voice_backfill)
-        self._voice_import_btn.pack(side="right")
-
-        # ── Save button ───────────────────────────────────────────────────────
-        save_wrap = tk.Frame(parent, bg=C["bg"])
-        save_wrap.pack(fill="x", padx=20, pady=(12, 8))
-
-        self._settings_status = tk.Label(save_wrap, text="",
-                                         fg=C["success"], bg=C["bg"],
-                                         font=("Segoe UI", 9))
-        self._settings_status.pack(side="left")
-
-        def _save(_e=None):
-            if self._on_settings_change:
-                mic_val = mic_var.get()
-                self._on_settings_change(
-                    "input_device",
-                    "auto" if mic_val.startswith(_AUTO_PREFIX)
-                    or mic_val == "Default" else mic_val)
-                self._on_settings_change("sound_feedback", sound_var.get())
-            self._settings_status.configure(text="Saved ✓", fg=C["success"])
-            if self._root:
-                self._root.after(4000, lambda: self._settings_status.configure(text=""))
-
-        save_btn = self._surface_btn(save_wrap, "Save Settings", _save)
-        save_btn.pack(side="right")
-
+        # The Save Settings button is gone. The mic dropdown was the only
+        # control on this page that waited for it — every toggle has always
+        # applied on touch — so the page asked you to save one setting out of
+        # thirty and said nothing about the rest. app.py already applies
+        # input_device fully live (re-points the recorder, clears the cached
+        # device index, drops the probe's mic memory, restarts the warm stream),
+        # so the button was never doing the work; the trace below is.
         self._index_settings_search()
 
         # Named non-toggle settings the universal search should reach directly.
@@ -8168,13 +8251,13 @@ class AppWindow:
                 return
             if enabled is None:
                 if status is not None:
-                    status.configure(text="Could not reach FTC Transcribe.",
+                    status.configure(text="Could not reach BrightLink Notetaker.",
                                      fg=C["subtext"])
                 return
             pill.set(bool(enabled))
             if status is not None:
                 status.configure(
-                    text=("On. Snippets of your voice train FTC Transcribe."
+                    text=("On. Snippets of your voice train BrightLink Notetaker."
                           if enabled else
                           "Off. Your dictation audio never leaves this computer."),
                     fg=C["success"] if enabled else C["subtext"])
@@ -8203,7 +8286,7 @@ class AppWindow:
         trainer.set_consent(value, callback=_done)
 
     def _on_voice_backfill(self, _e=None) -> None:
-        """Teach FTC Transcribe from dictations already saved on this machine."""
+        """Teach BrightLink Notetaker from dictations already saved on this machine."""
         trainer = self._voice_trainer
         if trainer is None:
             return

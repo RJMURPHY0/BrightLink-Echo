@@ -62,7 +62,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.6.89"
+APP_VERSION = "1.6.90"
 
 
 class _RECT(ctypes.Structure):
@@ -194,7 +194,7 @@ class WhisperFlowApp:
         self.db = SupabaseLogger(url=config.supabase_url, key=config.supabase_key)
         self.stats = StatsStore(db=self.db)
 
-        # Opt-in voice training for FTC Transcribe. Constructed always, sends
+        # Opt-in voice training for BrightLink Notetaker. Constructed always, sends
         # nothing until the user turns it on: consent lives on the server and
         # the trainer refuses to upload while it is unknown.
         self.voice_trainer = VoiceTrainer(
@@ -612,7 +612,7 @@ class WhisperFlowApp:
                 target=self._sync_user_libraries, daemon=True, name="library-sync"
             ).start()
 
-        # Voice-training consent, so a change made in FTC Transcribe shows up
+        # Voice-training consent, so a change made in BrightLink Notetaker shows up
         # here. Fetched rather than assumed: this app never decides on its own
         # that it may upload the user's voice.
         self.voice_trainer.refresh_consent(callback=self._on_voice_consent)
@@ -3799,7 +3799,8 @@ def _reconcile_legacy_launchers(task_ok: bool) -> None:
             os.environ.get("APPDATA", ""),
             r"Microsoft\Windows\Start Menu\Programs\Startup",
         )
-        names = [f"{n}.lnk" for n in brand.product_names()] + ["FTC Transcribe.lnk"]
+        names = ([f"{n}.lnk" for n in brand.product_names()]
+                 + ["BrightLink Notetaker.lnk", "FTC Transcribe.lnk"])
         for name in names:
             lnk = os.path.join(startup_dir, name)
             if os.path.exists(lnk):

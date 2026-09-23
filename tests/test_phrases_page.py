@@ -60,13 +60,23 @@ class FakeConfig:
 class SourceInvariantTests(unittest.TestCase):
 
     def test_the_voice_status_and_button_are_on_separate_rows(self):
-        src = inspect.getsource(AppWindow._build_settings_tab)
-        block = src[src.index("vt_actions = tk.Frame"):
-                    src.index("# ── Save button")]
+        # The card moved from Settings to the end of Learning; the stacked
+        # layout it was given in v1.6.77 must survive the move.
+        block = inspect.getsource(AppWindow._build_voice_training)
+        block = block[block.index("vt_actions = tk.Frame"):]
         self.assertIn('self._voice_status.pack(fill="x")', block)
         self.assertIn("vt_btn_row", block)
         # The status may no longer claim the row the button needs.
         self.assertNotIn('self._voice_status.pack(side="left"', block)
+
+    def test_voice_training_closes_learning_and_has_left_settings(self):
+        self.assertIn("_build_voice_training(body)",
+                      inspect.getsource(AppWindow._build_learning_tab))
+        settings = inspect.getsource(AppWindow._build_settings_tab)
+        for marker in ("self._voice_pill", "self._voice_status",
+                       "self._voice_import_btn"):
+            self.assertNotIn(marker, settings,
+                             f"{marker} is still built by Settings")
 
     def test_the_page_scrolls_on_scrollpane_never_a_canvas(self):
         src = inspect.getsource(AppWindow._build_phrases_page)
@@ -131,7 +141,7 @@ class VoiceCardLayoutTests(unittest.TestCase):
         import tkinter as tk
         from app_window import C
         card = self.w._card(self.host, margin=(0, 4))
-        status_text = "On. Snippets of your voice train FTC Transcribe."
+        status_text = "On. Snippets of your voice train BrightLink Notetaker."
         if stacked:
             row = tk.Frame(card, bg=C["surface"])
             row.pack(fill="x", pady=(8, 0))
