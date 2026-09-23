@@ -193,6 +193,55 @@ _MODIFIER_KEY_NAMES = frozenset({
     "windows", "left windows", "right windows",
     "caps lock", "num lock", "scroll lock", "fn",
 })
+# Taking a screenshot is looking AT the badge, not moving on from it. PrtSc
+# (every variant arrives as one of these names) and any key pressed while a
+# Windows key is held (Win+Shift+S, Win+PrtSc: shell shortcuts that never type
+# into the document) must not dismiss it, or the badge is gone before the
+# capture happens. Whether it then appears in the capture is decided by the
+# "Hide Popup in Screenshots" setting (set_capture_hidden), not by this.
+_SCREENSHOT_KEY_NAMES = frozenset({"print screen", "snapshot", "sysrq",
+                                   "prtsc", "prt sc"})
+
+# Screen-capture tools take the foreground while the user frames a shot (the
+# Win+Shift+S overlay is ScreenClippingHost). Moving focus to one of them is
+# not switching apps, so the badge stays for the capture.
+_CAPTURE_TOOL_EXES = frozenset({
+    "snippingtool.exe", "screenclippinghost.exe", "screensketch.exe",
+    "sharex.exe", "greenshot.exe", "lightshot.exe", "snagit32.exe",
+    "snagiteditor.exe", "gamebar.exe", "picpick.exe",
+})
+
+
+def _windows_key_held() -> bool:
+    """True while either Windows key is physically down (fails closed)."""
+    try:
+        gaks = ctypes.windll.user32.GetAsyncKeyState
+        return bool((gaks(0x5B) | gaks(0x5C)) & 0x8000)
+    except Exception:
+        return False
+
+
+def _key_dismisses_badge(name: str, windows_held: bool) -> bool:
+    """Whether a fresh key DOWN counts as the user moving on from the badge."""
+    name = (name or "").lower()
+    if name in _MODIFIER_KEY_NAMES:
+        return False          # a modifier alone is not "pressing a button"
+    if name in _SCREENSHOT_KEY_NAMES:
+        return False          # screenshotting the badge
+    if windows_held:
+        return False          # Win+Shift+S and other shell shortcuts
+    return True
+
+
+def _foreground_is_capture_tool() -> bool:
+    """True when the foreground window belongs to a screen-capture tool."""
+    try:
+        from injector import _get_fg_exe
+        return _get_fg_exe().lower() in _CAPTURE_TOOL_EXES
+    except Exception:
+        return False
+
+
 # How often the badge re-checks whether the user has switched away from the app
 # the text was injected into. Matches the Dropdown foreground watcher.
 _FG_WATCH_INTERVAL_MS = 250
@@ -1975,8 +2024,9 @@ class FloatingPopup:
                 if code in held:
                     return          # auto-repeat of a key the user already held
                 held.add(code)
-                if (getattr(event, "name", "") or "").lower() in _MODIFIER_KEY_NAMES:
-                    return          # a modifier alone is not "pressing a button"
+                if not _key_dismisses_badge(getattr(event, "name", ""),
+                                            _windows_key_held()):
+                    return          # modifier, screenshot key or Win+ shortcut
                 if time.time() - armed_at < KEY_DISMISS_GRACE_SECS:
                     return
                 self._unregister_key_dismiss()
@@ -2016,7 +2066,11 @@ class FloatingPopup:
             return True
         if not fg:
             return True
-        return fg in (self._target_hwnd, self._popup_hwnd, self._top_hwnd())
+        if fg in (self._target_hwnd, self._popup_hwnd, self._top_hwnd()):
+            return True
+        # A screenshot tool in front is the user capturing the badge, not
+        # leaving the app it belongs to.
+        return _foreground_is_capture_tool()
 
     def _watch_target_foreground(self) -> None:
         """Hide the badge once the user clicks into a different app. The badge

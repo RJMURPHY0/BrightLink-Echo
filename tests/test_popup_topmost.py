@@ -410,10 +410,14 @@ class KeyDismissTests(unittest.TestCase):
     def test_a_modifier_alone_never_dismisses(self):
         # Alt is down by definition at badge time for an Alt+V hotkey, and
         # Shift held to capitalise is not the user dismissing anything.
-        self.assertIn("_MODIFIER_KEY_NAMES",
+        # The hook asks _key_dismisses_badge, which applies this list.
+        self.assertIn("_key_dismisses_badge(",
                       inspect.getsource(FloatingPopup._register_key_dismiss))
+        self.assertIn("_MODIFIER_KEY_NAMES",
+                      inspect.getsource(popup_mod._key_dismisses_badge))
         for name in ("alt", "ctrl", "shift", "left windows"):
             self.assertIn(name, popup_mod._MODIFIER_KEY_NAMES)
+            self.assertFalse(popup_mod._key_dismisses_badge(name, False))
 
     def test_the_dismiss_can_be_turned_off(self):
         # Ryan asked for the behaviour AND a way to opt out of it.
@@ -484,6 +488,52 @@ class KeyDismissTests(unittest.TestCase):
         src = inspect.getsource(FloatingPopup._enter_icon_mode)
         start = src.index("_inserted_ok")
         self.assertIn("_stop_foreground_watch", src[start:])
+
+
+class ScreenshotKeepsBadgeTests(unittest.TestCase):
+    """Screenshotting the badge must not dismiss it. Whether it then shows in
+    the capture is the Hide Popup in Screenshots setting's job alone."""
+
+    def test_ordinary_keys_still_dismiss(self):
+        for name in ("a", "space", "enter", "backspace", "s"):
+            self.assertTrue(popup_mod._key_dismisses_badge(name, False), name)
+
+    def test_print_screen_never_dismisses(self):
+        for name in ("print screen", "Print Screen", "snapshot"):
+            self.assertFalse(popup_mod._key_dismisses_badge(name, False), name)
+
+    def test_win_shift_s_never_dismisses(self):
+        # The S of Win+Shift+S arrives while the Windows key is held.
+        self.assertFalse(popup_mod._key_dismisses_badge("s", True))
+
+    def test_modifiers_still_never_dismiss(self):
+        self.assertFalse(popup_mod._key_dismisses_badge("shift", False))
+
+    def test_the_hook_routes_through_the_rule(self):
+        src = inspect.getsource(FloatingPopup._register_key_dismiss)
+        self.assertIn("_key_dismisses_badge(", src)
+        self.assertIn("_windows_key_held()", src)
+
+    def _popup_with_foreground(self, fg, exe):
+        p = FloatingPopup.__new__(FloatingPopup)
+        p._target_hwnd, p._popup_hwnd = 100, 200
+        p._top_hwnd = lambda: 201
+        orig_fg = popup_mod.ctypes.windll.user32.GetForegroundWindow
+        self.addCleanup(setattr, popup_mod.ctypes.windll.user32,
+                        "GetForegroundWindow", orig_fg)
+        popup_mod.ctypes.windll.user32.GetForegroundWindow = lambda: fg
+        import injector
+        self.addCleanup(setattr, injector, "_get_fg_exe", injector._get_fg_exe)
+        injector._get_fg_exe = lambda: exe
+        return p
+
+    def test_the_snipping_overlay_is_not_leaving_the_app(self):
+        p = self._popup_with_foreground(555, "ScreenClippingHost.exe")
+        self.assertTrue(p._foreground_is_target())
+
+    def test_a_real_app_switch_still_dismisses(self):
+        p = self._popup_with_foreground(555, "chrome.exe")
+        self.assertFalse(p._foreground_is_target())
 
 
 if __name__ == "__main__":
