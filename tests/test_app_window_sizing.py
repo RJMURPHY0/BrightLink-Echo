@@ -284,5 +284,97 @@ class ResizeDeferralTests(unittest.TestCase):
         self.assertIn("440x660", window._pending_geometry)
 
 
+class CompactLayoutMigrationTests(unittest.TestCase):
+    """Sizes saved against the old, ~140px taller dashboard are clamped to
+    DASH_H exactly once; a later drag is the user's choice and survives."""
+
+    def test_tall_saved_heights_are_clamped_once(self):
+        config = _FakeConfig(window_layout_rev=0)
+        config.window_sizes = {"user@example.com": "433x705",
+                               "_default": "470x723",
+                               "small@example.com": "420x530"}
+        window = _window(config=config)
+        window._migrate_window_sizes()
+        self.assertEqual(f"433x{DASH_H}", config.window_sizes["user@example.com"])
+        self.assertEqual(f"470x{DASH_H}", config.window_sizes["_default"])
+        self.assertEqual("420x530", config.window_sizes["small@example.com"])
+        self.assertGreaterEqual(config.window_layout_rev, 1)
+        self.assertEqual(1, config.saves)
+
+        # Dragged taller after the migration: that is kept.
+        config.window_sizes["user@example.com"] = "433x760"
+        window._migrate_window_sizes()
+        self.assertEqual("433x760", config.window_sizes["user@example.com"])
+        self.assertEqual(1, config.saves)
+
+    def test_super_admin_pushes_the_clamped_default(self):
+        from app_window import SUPER_ADMIN_EMAIL
+        config = _FakeConfig(window_layout_rev=0)
+        config.window_sizes = {SUPER_ADMIN_EMAIL: "433x705"}
+        db = _FakeDb()
+        window = _window(email=SUPER_ADMIN_EMAIL, config=config, db=db)
+        window._migrate_window_sizes()
+        self.assertEqual([("default_window_size", f"433x{DASH_H}")], db.pushed)
+
+    def test_other_accounts_push_nothing(self):
+        config = _FakeConfig(window_layout_rev=0)
+        config.window_sizes = {"user@example.com": "433x705"}
+        db = _FakeDb()
+        _window(config=config, db=db)._migrate_window_sizes()
+        self.assertEqual([], db.pushed)
+
+
+class HomeFitsDefaultHeightTests(unittest.TestCase):
+    """Live Tk: at WINDOW_W x DASH_H every Home card is on screen with no
+    scrolling (Home has no ScrollPane), with a little room under the cards."""
+
+    def test_home_fits_the_default_height(self):
+        import tkinter as tk
+        import types
+        import app_window as aw
+        try:
+            root = tk.Tk()
+        except Exception as e:                       # no window station (CI)
+            raise unittest.SkipTest(f"Tk unavailable: {e}")
+        self.addCleanup(root.destroy)
+        # Mapped (off screen), not withdrawn: the rounded cards size their
+        # canvases from the realised width, which a withdrawn root never has.
+        root.geometry("+-3000+-3000")
+        w = AppWindow.__new__(AppWindow)
+        w._root = root
+        w._config = types.SimpleNamespace(impact_range="all", mode="toggle",
+                                          save_async=lambda: None)
+        w._stats = None
+        w._hotkey, w._refine_hotkey, w._ptt_hotkey = "ALT+V", "ALT+R", "ALT+C"
+        w._switch_dash_tab = lambda *_a: None
+        w._build_header()
+        w._header_outer.pack(fill="x")
+        # The dashboard chrome between the header and the tab content,
+        # measured off the real widgets rather than assumed.
+        dash = tk.Frame(root, bg=aw.C["bg"])
+        dash.pack(fill="x")
+        w._search_catalogue, w._page_search = [], {}
+        w._build_universal_search(dash)
+        tk.Frame(dash, height=1).pack(fill="x", pady=(10, 0))
+        import bookmark_tabs
+        bookmark_tabs.BookmarkTabs(dash, AppWindow._DASH_TABS,
+                                   on_select=lambda *_a: None,
+                                   bg=aw.C["bg"], line=aw.C["border"]).pack(
+            fill="x", pady=(8, 0))
+        home = tk.Frame(root, bg=aw.C["bg"])
+        home.pack(fill="x", pady=(8, 0))
+        w._build_home_tab(home)
+        footer = tk.Frame(root, padx=24, pady=6)
+        tk.Label(footer, text="x", font=("Segoe UI", 9)).pack()
+        footer.pack(fill="x")
+        root.geometry(f"{WINDOW_W}x{DASH_H}")
+        root.update()
+        root.update()
+        need = (w._header_outer.winfo_reqheight() + dash.winfo_reqheight()
+                + 8 + home.winfo_reqheight() + footer.winfo_reqheight() + 1)
+        self.assertLessEqual(need + 8, DASH_H,
+                             f"Home needs {need}px; DASH_H={DASH_H} clips it")
+
+
 if __name__ == "__main__":
     unittest.main()

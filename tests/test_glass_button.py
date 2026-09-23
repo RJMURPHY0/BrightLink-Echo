@@ -483,11 +483,11 @@ h._pending_hotkey = h._pending_ptt_hotkey = h._pending_refine_hotkey = None
 h._ptt_warned = False
 h._wheel_targets = []
 tab = tk.Frame(root, bg=aw.C["bg"])
-tab.place(x=0, y=0, width=aw.WINDOW_W, height=aw.DASH_H - 215)
+tab.place(x=0, y=0, width=aw.WINDOW_W, height=aw.DASH_H - 201)
 h._build_hotkey_tab(tab)
 root.update_idletasks()
 out["tab_needs"] = h._hk_cv.content.winfo_reqheight()
-out["tab_has"] = aw.DASH_H - 215
+out["tab_has"] = aw.DASH_H - 201   # header, search, tabs and footer
 out["dash_h"] = aw.DASH_H
 
 print("JSON:" + json.dumps(out))
@@ -559,14 +559,25 @@ class LayoutFitTests(unittest.TestCase):
         heights = set(self.m["cap_heights"].values())
         self.assertEqual(len(heights), 1, "row height varies: %s" % heights)
 
-    def test_the_hotkey_tab_fits_the_default_window(self):
-        # It did not this round, and the only reason it went unnoticed is that
-        # the developer's saved window was taller than the shipped default.
+    # How far the Hotkey tab may run past the default window. DASH_H is sized
+    # to Home (the compact dashboard), so the refine card's button row sits
+    # just below the fold and the tab scrolls on its ScrollPane, as Settings
+    # and Learning do. Anything past this means the tab itself grew.
+    _HOTKEY_OVERFLOW_MAX = 60
+
+    def test_the_hotkey_tab_overflow_stays_bounded(self):
+        # Measured against the SHIPPED default, not the developer's saved
+        # window, which is what hid an overflow here once before.
+        over = self.m["tab_needs"] - self.m["tab_has"]
         self.assertLessEqual(
-            self.m["tab_needs"], self.m["tab_has"],
+            over, self._HOTKEY_OVERFLOW_MAX,
             "the Hotkey tab needs %dpx but the default %dpx window gives it "
-            "%dpx — it will scroll out of the box"
-            % (self.m["tab_needs"], self.m["dash_h"], self.m["tab_has"]))
+            "%dpx" % (self.m["tab_needs"], self.m["dash_h"], self.m["tab_has"]))
+
+    def test_the_hotkey_tab_scrolls_rather_than_clips(self):
+        import inspect
+        from app_window import AppWindow
+        self.assertIn("ScrollPane(", inspect.getsource(AppWindow._build_hotkey_tab))
 
 
 class HelpDotTests(unittest.TestCase):

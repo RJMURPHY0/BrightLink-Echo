@@ -47,10 +47,15 @@ C = {
 }
 
 WINDOW_W = 420
-# 680, not 640: the Hotkey tab's keycaps and its stacked Change/Save pairs no
-# longer fit 640 without scrolling, and shrinking them back is undoing the
-# design rather than fixing the window. Everything else simply gets more room.
-DASH_H   = 680
+# Home's natural height (measured, and pinned by tests/test_app_window_sizing):
+# every Home card on screen with no scrolling. It was 680, which on a 150%
+# laptop left ~50px of the screen and made every drag trip Snap Layouts. The
+# Hotkey tab, which set that figure, scrolls on its ScrollPane like Settings.
+DASH_H   = 568
+# Bump when the dashboard's natural height drops, so sizes saved against the
+# taller layout are clamped once (_migrate_window_sizes) rather than leaving
+# an empty band under the cards.
+_WINDOW_LAYOUT_REV = 1
 
 # Resizable-window bounds. Content reflows down to MIN_W; anything narrower
 # would clip the impact cards and the hotkey pills.
@@ -2427,14 +2432,18 @@ class AppWindow:
         # Wrap header + divider in a container so it can be hidden during login
         self._header_outer = tk.Frame(self._root, bg=C["bg"])
 
-        header = tk.Frame(self._header_outer, bg=C["bg"], pady=22)
+        # 10px above and below: the header used to take 22 + 22, and on a 150%
+        # laptop the dashboard then filled the whole screen height.
+        header = tk.Frame(self._header_outer, bg=C["bg"], pady=10)
         header.pack(fill="x")
 
         # The BrightLink | Echo lockup, centred on the WINDOW. It used to be
         # packed beside the gear, which centred it in the space left of the
         # gear and put it visibly off-centre.
         from logo_cache import get_lockup_photo
-        self._logo_photo = get_lockup_photo(self._root, C["bg"], height=42)
+        # 34, not 42: the lockup still reads at a glance, and the splash and
+        # sign-in pages (which have the room) keep the full 42.
+        self._logo_photo = get_lockup_photo(self._root, C["bg"], height=34)
 
         if self._logo_photo:
             tk.Label(header, image=self._logo_photo, bg=C["bg"]).pack()
@@ -2450,7 +2459,7 @@ class AppWindow:
         self._gear_btn = tk.Label(
             header, text="⚙",
             fg=C["subtext"], bg=C["bg"],
-            font=("Segoe UI", 17), cursor="hand2", padx=12,
+            font=("Segoe UI", 15), cursor="hand2", padx=12,
         )
         self._gear_btn.place(relx=1.0, rely=0.5, x=-4, anchor="e")
         self._gear_btn.bind("<Button-1>", lambda _e: self._switch_dash_tab("settings"))
@@ -2479,7 +2488,7 @@ class AppWindow:
 
     def _build_universal_search(self, parent: tk.Frame) -> None:
         host = tk.Frame(parent, bg=C["bg"])
-        host.pack(fill="x", pady=(12, 0))
+        host.pack(fill="x")
         self._usearch_host = host
         self._usearch_panel = None
         self._usearch_query = ""
@@ -2498,7 +2507,7 @@ class AppWindow:
         self._usearch_force_dropdown = False
         self._usearch_filter_hits = None
 
-        height = 42
+        height = 38
         cv = tk.Canvas(host, height=height, bg=C["bg"], highlightthickness=0,
                        bd=0)
         cv.pack(fill="x", padx=20)
@@ -3162,7 +3171,7 @@ class AppWindow:
         # a separation line, then the tabs. C["border"] (not the near-invisible
         # divider) so the line actually reads.
         tk.Frame(parent, bg=C["border"], height=1).pack(fill="x",
-                                                        pady=(12, 0))
+                                                        pady=(10, 0))
 
         # Full width: the strip keeps its own side padding, because the end
         # tabs' feet reach past their boxes, and it draws the line the tabs
@@ -3170,11 +3179,11 @@ class AppWindow:
         self._tab_strip = bookmark_tabs.BookmarkTabs(
             parent, self._DASH_TABS, on_select=self._switch_dash_tab,
             bg=C["bg"], line=C["border"])
-        self._tab_strip.pack(fill="x", pady=(12, 0))
+        self._tab_strip.pack(fill="x", pady=(8, 0))
 
         # Content area — all tab frames stacked in same grid cell, tkraise() to switch
         self._dash_content = tk.Frame(parent, bg=C["bg"])
-        self._dash_content.pack(fill="both", expand=True, pady=(10, 0))
+        self._dash_content.pack(fill="both", expand=True, pady=(8, 0))
         self._dash_content.grid_rowconfigure(0, weight=1)
         self._dash_content.grid_columnconfigure(0, weight=1)
 
@@ -3242,7 +3251,7 @@ class AppWindow:
                 pass
 
         # Footer
-        footer = tk.Frame(parent, bg=C["bg"], padx=24, pady=10)
+        footer = tk.Frame(parent, bg=C["bg"], padx=24, pady=6)
         footer.pack(fill="x", side="bottom")
 
         email = self._auth.user_email or ""
@@ -3658,6 +3667,7 @@ class AppWindow:
 
     def _show_dashboard(self) -> None:
         self._dash_frame.pack(fill="both", expand=True)
+        self._migrate_window_sizes()
         self._resize(*self._saved_dash_size())
         self._dash_visible = True
         # Fresh installs read the super-admin default size once (never again
@@ -3687,6 +3697,43 @@ class AppWindow:
         if MIN_W <= w <= 5120 and MIN_H <= h <= 3200:
             return (w, h)
         return None
+
+    def _migrate_window_sizes(self) -> None:
+        """Once per layout revision: clamp saved heights taller than DASH_H.
+
+        They were chosen against a layout ~140px taller, so carried over they
+        leave an empty band under the cards. A drag after this is the user's
+        own choice and is kept. The super admin's clamped size is pushed as
+        the install default too, so fresh installs start compact."""
+        cfg = self._config
+        if cfg is None:
+            return
+        try:
+            rev = int(getattr(cfg, "window_layout_rev", 0) or 0)
+        except (TypeError, ValueError):
+            rev = 0
+        if rev >= _WINDOW_LAYOUT_REV:
+            return
+        sizes = getattr(cfg, "window_sizes", None)
+        sizes = dict(sizes) if isinstance(sizes, dict) else {}
+        for key, raw in list(sizes.items()):
+            size = self._parse_size(raw)
+            if size and size[1] > DASH_H:
+                sizes[key] = f"{size[0]}x{DASH_H}"
+        cfg.window_sizes = sizes
+        cfg.window_layout_rev = _WINDOW_LAYOUT_REV
+        try:
+            cfg.save_async()
+        except Exception as e:
+            print(f"[AppWindow] Window size migration save failed: {e}")
+        value = sizes.get(SUPER_ADMIN_EMAIL)
+        if (value and self._account_size_key() == SUPER_ADMIN_EMAIL
+                and self._db is not None
+                and hasattr(self._db, "set_app_setting")):
+            try:
+                self._db.set_app_setting("default_window_size", value)
+            except Exception as e:
+                print(f"[AppWindow] Default size push failed: {e}")
 
     def _saved_dash_size(self) -> tuple:
         """Resolve the dashboard size: this account's saved size, else the
@@ -3837,22 +3884,23 @@ class AppWindow:
     # ── Home tab ──────────────────────────────────────────────────────────────
 
     def _build_home_tab(self, parent: tk.Frame) -> None:
-        # Status card
-        sc = self._card(parent, margin=(0, 8))
+        # Status card. Kept tight (14pt status, 11px inner padding, 3px row
+        # gaps): Home has no ScrollPane, so every pixel here is window height.
+        sc = self._card(parent, inner_pad=(18, 11), margin=(0, 0))
         self._status_lbl = tk.Label(
             sc, text="● Ready",
             fg=C["success"], bg=C["surface"],
-            font=("Segoe UI", 17, "bold"), anchor="w",
+            font=("Segoe UI", 14, "bold"), anchor="w",
         )
         self._status_lbl.pack(fill="x")
 
-        tk.Frame(sc, bg=C["border"], height=1).pack(fill="x", pady=(10, 10))
+        tk.Frame(sc, bg=C["border"], height=1).pack(fill="x", pady=(7, 9))
 
         hint_row = tk.Frame(sc, bg=C["surface"])
         hint_row.pack(fill="x")
 
         # Hotkey pill
-        pill_bg = tk.Frame(hint_row, bg=C["accent_dim"], padx=8, pady=3)
+        pill_bg = tk.Frame(hint_row, bg=C["accent_dim"], padx=8, pady=2)
         pill_bg.pack(side="left")
         hint_text = self._hotkey if self._hotkey else "—"
         self._home_hotkey_lbl = tk.Label(
@@ -3881,9 +3929,9 @@ class AppWindow:
 
         # Refine hotkey pill
         refine_hint_row = tk.Frame(sc, bg=C["surface"])
-        refine_hint_row.pack(fill="x", pady=(4, 0))
+        refine_hint_row.pack(fill="x", pady=(3, 0))
 
-        refine_pill_bg = tk.Frame(refine_hint_row, bg=C["accent_dim"], padx=8, pady=3)
+        refine_pill_bg = tk.Frame(refine_hint_row, bg=C["accent_dim"], padx=8, pady=2)
         refine_pill_bg.pack(side="left")
         refine_hint_text = self._refine_hotkey if self._refine_hotkey else "—"
         self._home_refine_hotkey_lbl = tk.Label(
@@ -3907,7 +3955,7 @@ class AppWindow:
         self._refine_hint_row = refine_hint_row
         self._home_ptt_row = tk.Frame(sc, bg=C["surface"])
         _ptt_pill_bg = tk.Frame(self._home_ptt_row, bg=C["accent_dim"],
-                                padx=8, pady=3)
+                                padx=8, pady=2)
         _ptt_pill_bg.pack(side="left")
         self._home_ptt_lbl = tk.Label(
             _ptt_pill_bg, text=self._ptt_hotkey or "—",
@@ -3948,21 +3996,31 @@ class AppWindow:
 
     # ── Your impact section ───────────────────────────────────────────────────
 
-    def _build_impact_section(self, parent: tk.Frame) -> None:
-        tk.Label(
-            parent, text="Your impact",
-            fg=C["text"], bg=C["bg"],
-            font=("Segoe UI", 12, "bold"), anchor="w",
-        ).pack(fill="x", padx=20, pady=(10, 8))
+    # The heading row sits inside the stack with this padding, and the close
+    # swap re-packs it with the same, so the block keeps one height.
+    _IMPACT_HEAD_PADY = (12, 8)
 
-        # Stack: the three cards + the words bar, and the breakdown panel that
-        # replaces BOTH of them. The panel is sized to the exact height they
-        # occupied, so opening a breakdown never grows the window — a resize
-        # mid-transition is both jarring and the thing that made the swap
-        # flicker. Children carry their own padx (the today bar is a _card,
-        # which adds its own), so the stack itself has none.
+    def _build_impact_section(self, parent: tk.Frame) -> None:
+        # Stack: the heading row (title, range picker, word count) + the three
+        # cards, and the breakdown panel that replaces BOTH of them. The panel
+        # is sized to the exact height they occupied, so opening a breakdown
+        # never grows the window — a resize mid-transition is both jarring and
+        # the thing that made the swap flicker.
+        #
+        # The range picker lives in the heading, above the cards it scopes,
+        # rather than in a bar of its own below them: same control, one row
+        # less of window height.
         self._impact_stack = tk.Frame(parent, bg=C["bg"])
         self._impact_stack.pack(fill="x")
+        head = tk.Frame(self._impact_stack, bg=C["bg"])
+        head.pack(fill="x", padx=20, pady=self._IMPACT_HEAD_PADY)
+        self._impact_head = head
+        self._impact_title_lbl = tk.Label(
+            head, text="Your impact",
+            fg=C["text"], bg=C["bg"],
+            font=("Segoe UI", 12, "bold"), anchor="w",
+        )
+        self._impact_title_lbl.pack(side="left")
         row = tk.Frame(self._impact_stack, bg=C["bg"])
         row.pack(fill="x", padx=20)
         self._impact_row = row
@@ -3971,6 +4029,7 @@ class AppWindow:
         row.grid_rowconfigure(0, minsize=_IMPACT_CARD_H)
 
         self._impact_font_value = tkfont.Font(family="Segoe UI", size=18, weight="bold")
+        self._impact_font_count = tkfont.Font(family="Segoe UI", size=10)
         self._impact_font_unit  = tkfont.Font(family="Segoe UI", size=10)
         # Headline that rides the panel header row (time panel), so the body has
         # room for a fourth row — measured to place the "saved so far" caption.
@@ -4027,32 +4086,12 @@ class AppWindow:
         # user's real measured average (see StatsStore.snapshot).
         self._set_impact_card("speed", "160", "wpm", "4× faster than typing")
 
-        # Today bar
-        bar = self._card(self._impact_stack, inner_pad=(14, 10), margin=(8, 0))
-        self._impact_today_card = bar.master  # the rounded-rect Canvas host
-        brow = tk.Frame(bar, bg=C["surface"])
-        brow.pack(fill="x")
-        icv = tk.Canvas(brow, bg=C["surface"], highlightthickness=0, bd=0,
-                        width=21, height=21)
-        icv.pack(side="left")
-        try:
-            import ui_render
-            _doc = ui_render.icon_doc(icv, 21, C["subtext"], bg=C["surface"])
-        except Exception:
-            _doc = None
-        if _doc is not None:
-            icv.create_image(0, 0, image=_doc, anchor="nw")
-        else:
-            _rr(icv, 3, 1, 15, 17, 3, fill=C["surface"], outline=C["subtext"], width=1.4)
-            icv.create_line(6, 7, 12, 7, fill=C["subtext"], width=1.4)
-            icv.create_line(6, 11, 12, 11, fill=C["subtext"], width=1.4)
-        # Words-dictated range selector — replaces the static "Today" label so
-        # the footer count can switch between today/week/month/year/all time.
+        # Range selector — scopes the three cards and the word count to
+        # today/week/month/year/all time or a custom span.
         # Uses the shared Dropdown control (same as the mic and popup-position
         # selectors), not tk.OptionMenu — that posts a native Win32 menu which
         # ignores the configured colours and rendered as a white box. Left
-        # un-widened (no fill="x") so it stays compact and inline where the
-        # bold "Today" label was.
+        # un-widened (no fill="x") so it stays compact beside the title.
         _RANGE_LABELS = {
             "today": "Today",
             "week":  "This week",
@@ -4095,22 +4134,49 @@ class AppWindow:
 
         # RangePicker, not Dropdown: the same list plus a From / to tab, so the
         # cards can be scoped to any span and not just the five named windows.
-        _range_menu = RangePicker(brow, self._impact_range_var,
-                                  list(_RANGE_LABELS.values()), bg=C["surface"],
+        # Packed right-to-left: the count hugs the edge, the picker sits
+        # before it, and the title keeps the left.
+        self._impact_today_lbl = tk.Label(
+            head, text="·  0 words dictated",
+            fg=C["subtext"], bg=C["bg"], font=("Segoe UI", 10),
+        )
+        self._impact_today_lbl.pack(side="right", padx=(6, 0))
+        _range_menu = RangePicker(head, self._impact_range_var,
+                                  list(_RANGE_LABELS.values()), bg=C["bg"],
                                   font=("Segoe UI", 10, "bold"),
                                   on_period=_on_period, on_custom=_on_custom)
         if _span:
             _range_menu.set_custom(*_span)
-        _range_menu.pack(side="left", padx=(6, 0))
+        _range_menu.pack(side="right", padx=(6, 0))
         self._impact_range_menu = _range_menu
 
-        self._impact_today_lbl = tk.Label(
-            brow, text="·  0 words dictated",
-            fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 10),
-        )
-        self._impact_today_lbl.pack(side="left", padx=(6, 0))
+        # At the narrowest window the full count collides with the title;
+        # drop "dictated" there rather than clip it.
+        head.bind("<Configure>", lambda _e: self._fit_impact_words(), add="+")
 
         self._refresh_impact()
+
+    def _fit_impact_words(self) -> None:
+        """Word count beside the range picker: "N words dictated", or just
+        "N words" when the heading row is too narrow to hold the long form."""
+        lbl = getattr(self, "_impact_today_lbl", None)
+        if lbl is None:
+            return
+        tw = int(getattr(self, "_impact_words", 0))
+        noun = "word" if tw == 1 else "words"
+        text = f"·  {tw:,} {noun} dictated"
+        try:
+            head = self._impact_head
+            room = head.winfo_width()
+            if room > 1:
+                font = self._impact_font_count
+                used = (self._impact_title_lbl.winfo_reqwidth()
+                        + self._impact_range_menu.winfo_reqwidth() + 12)
+                if used + font.measure(text) > room:
+                    text = f"·  {tw:,} {noun}"
+        except (AttributeError, tk.TclError):
+            pass
+        lbl.configure(text=text)
 
     def _set_impact_card(self, key: str, value: str, unit: str, sub: str) -> None:
         card = self._impact_cards.get(key)
@@ -4265,8 +4331,8 @@ class AppWindow:
         self._impact_opened_at = time.monotonic()
 
         def _swap():
+            self._impact_head.pack_forget()
             self._impact_row.pack_forget()
-            self._impact_today_card.pack_forget()
             self._impact_detail.configure(height=block_h)
             self._impact_detail.pack(fill="x", padx=20)
             # Realise the canvas width before drawing — a first-open panel has
@@ -4289,8 +4355,9 @@ class AppWindow:
 
         def _swap():
             self._impact_detail.pack_forget()
+            self._impact_head.pack(fill="x", padx=20,
+                                   pady=self._IMPACT_HEAD_PADY)
             self._impact_row.pack(fill="x", padx=20)
-            self._impact_today_card.pack(fill="x", padx=20, pady=(8, 0))
             for k in self._impact_cards:
                 self._impact_cards[k]["hover"] = False
                 self._layout_impact_card(k)
@@ -4924,9 +4991,8 @@ class AppWindow:
 
         words_map = snap.get("words") or {}
         tw = int(words_map.get(rng, snap.get("today_words", 0)))
-        if hasattr(self, "_impact_today_lbl"):
-            self._impact_today_lbl.configure(
-                text=f"·  {tw:,} word{'' if tw == 1 else 's'} dictated")
+        self._impact_words = tw
+        self._fit_impact_words()
 
         # An open breakdown is showing the same numbers — keep it live.
         if getattr(self, "_impact_open", None):
@@ -5185,7 +5251,7 @@ class AppWindow:
             if self._ptt_hotkey:
                 self._home_ptt_lbl.configure(text=self._ptt_hotkey)
                 if not row.winfo_ismapped():
-                    row.pack(fill="x", pady=(4, 0),
+                    row.pack(fill="x", pady=(3, 0),
                              before=self._refine_hint_row)
             else:
                 row.pack_forget()

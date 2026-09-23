@@ -34,13 +34,14 @@ class NoResizeContractTests(unittest.TestCase):
         for fn in (AppWindow._open_impact_detail, AppWindow._close_impact_detail):
             self.assertIn("_atomic_ui", inspect.getsource(fn), fn.__name__)
 
-    def test_the_panel_replaces_the_words_bar_as_well_as_the_cards(self):
-        # Replacing only the cards would leave the words bar orphaned below a
-        # panel that already carries the same figures, and the block would no
-        # longer be the height the panel was measured against.
+    def test_the_panel_replaces_the_heading_row_as_well_as_the_cards(self):
+        # The heading row (title, range picker, word count) is part of the
+        # block the panel is measured against: replacing only the cards would
+        # leave it orphaned above a panel carrying the same figures, and the
+        # panel would lose the room it needs for its rows.
         src = inspect.getsource(AppWindow._open_impact_detail)
         self.assertIn("_impact_row.pack_forget", src)
-        self.assertIn("_impact_today_card.pack_forget", src)
+        self.assertIn("_impact_head.pack_forget", src)
 
     def test_hover_swaps_the_image_instead_of_redrawing_the_card(self):
         src = inspect.getsource(AppWindow._hover_impact_card)
