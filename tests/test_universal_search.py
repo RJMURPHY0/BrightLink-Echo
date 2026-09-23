@@ -116,6 +116,91 @@ class UniversalSearchTests(unittest.TestCase):
         self.assertTrue(isinstance(self.w._usearch_ai, tuple)
                         or self.w._usearch_ai == "thinking")
 
+    def _evt(self, char, state=0, keysym=None):
+        class _E:
+            pass
+        e = _E()
+        e.char = char
+        e.state = state
+        e.keysym = keysym or char
+        return e
+
+    def _arm_type_anywhere(self, focused):
+        # Pretend the dashboard is on screen (headless root never maps) and pin
+        # which widget owns focus (headless focus_get is unreliable).
+        self.w._usearch_host.winfo_ismapped = lambda: True
+        self.w._root.focus_get = lambda: focused
+
+    def test_type_anywhere_routes_into_bar(self):
+        self._arm_type_anywhere(self.root)          # focus is not the bar
+        self.w._usearch_type_anywhere(self._evt("h"))
+        self.assertEqual(self.w._usearch_entry.get(), "h")
+        self.assertEqual(self.w._usearch_query, "h")
+
+    def test_type_anywhere_ignores_modifier_combo(self):
+        self._arm_type_anywhere(self.root)
+        self.w._usearch_type_anywhere(self._evt("a", state=0x0004))  # Ctrl+A
+        self.assertEqual(self.w._usearch_entry.get(), self.w._USEARCH_PLACE)
+
+    def test_type_anywhere_skips_when_other_field_focused(self):
+        other = tk.Entry(self.root)
+        self.addCleanup(other.destroy)
+        self._arm_type_anywhere(other)
+        self.w._usearch_type_anywhere(self._evt("x"))
+        self.assertEqual(self.w._usearch_entry.get(), self.w._USEARCH_PLACE)
+
+    def test_type_anywhere_skips_nonprintable(self):
+        self._arm_type_anywhere(self.root)
+        self.w._usearch_type_anywhere(self._evt("\r", keysym="Return"))
+        self.assertEqual(self.w._usearch_entry.get(), self.w._USEARCH_PLACE)
+
+    def test_click_outside_blurs_the_bar(self):
+        import unittest.mock as mock
+        with mock.patch.object(self.w._root, "focus_get",
+                               return_value=self.w._usearch_entry), \
+             mock.patch.object(self.w._root, "focus_set") as fs:
+            class _E:
+                pass
+            e = _E()
+            e.widget = self.root          # a non-bar, non-text widget
+            self.w._usearch_click_outside(e)
+            self.assertTrue(fs.called)
+
+    def test_click_inside_bar_keeps_focus(self):
+        import unittest.mock as mock
+        with mock.patch.object(self.w._root, "focus_get",
+                               return_value=self.w._usearch_entry), \
+             mock.patch.object(self.w._root, "focus_set") as fs:
+            class _E:
+                pass
+            e = _E()
+            e.widget = self.w._usearch_host
+            self.w._usearch_click_outside(e)
+            self.assertFalse(fs.called)
+
+    def test_apply_page_switches_to_filter_mode(self):
+        seen = []
+        self.w._page_search = {
+            "history": {"placeholder": "Search transcriptions…",
+                        "filter": lambda q: seen.append(q)}}
+        self.w._usearch_apply_page("history")
+        self.assertEqual(self.w._usearch_mode, "filter")
+        self.assertEqual(self.w._usearch_placeholder, "Search transcriptions…")
+        self.assertIn("", seen)                 # reset to unfiltered on entry
+        # Typing routes to the page's own filter, not the jump dropdown.
+        self.w._usearch_update("hello")
+        self.assertIn("hello", seen)
+        self.assertEqual(self.w._usearch_results, [])
+
+    def test_apply_page_is_universal_off_a_list_page(self):
+        self.w._page_search = {}
+        self.w._usearch_apply_page("home")
+        self.assertEqual(self.w._usearch_mode, "universal")
+        self.assertEqual(self.w._usearch_placeholder, self.w._USEARCH_PLACE)
+        # Universal typing still produces jump matches.
+        self.w._usearch_update("history")
+        self.assertTrue(self.w._usearch_results)
+
     def test_answer_renders_with_chip(self):
         self.w._usearch_query = "trim"
         self.w._usearch_results = []

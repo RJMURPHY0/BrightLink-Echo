@@ -138,8 +138,9 @@ class FilterTests(unittest.TestCase):
 
 
 class SourceContractTests(unittest.TestCase):
-    """The real builder must create the bar and take the index — a filter with
-    no index silently does nothing."""
+    """Settings no longer has its own inline bar: the one top search bar is the
+    settings search. The builder must register that filter and take the index —
+    a filter with no index silently does nothing."""
 
     def setUp(self):
         path = os.path.join(os.path.dirname(os.path.dirname(
@@ -149,20 +150,18 @@ class SourceContractTests(unittest.TestCase):
         start = src.index("    def _build_settings_tab(")
         self.body = src[start:src.index("    # ── Settings search")]
 
-    def test_search_bar_is_built(self):
+    def test_settings_registers_the_top_bar_filter(self):
+        self.assertIn('_register_page_search("settings"', self.body)
         self.assertIn("_apply_settings_search", self.body)
-        self.assertIn("self._search_bar(", self.body)
+
+    def test_no_inline_search_bar(self):
+        # The duplicate second bar is gone.
+        self.assertNotIn("self._search_bar(", self.body)
 
     def test_index_is_taken_after_the_page_is_built(self):
         self.assertIn("self._index_settings_search()", self.body)
-        self.assertLess(self.body.index("self._search_bar("),
+        self.assertLess(self.body.index('_register_page_search("settings"'),
                         self.body.index("self._index_settings_search()"))
-
-    def test_search_is_packed_above_the_scroll_area(self):
-        # Packed before the ScrollPane, so it takes the top strip and does not
-        # scroll away with the content.
-        self.assertLess(self.body.index("self._search_bar("),
-                        self.body.index('self._settings_cv.pack(side="left"'))
 
     def test_every_section_registers_itself(self):
         self.assertIn("self._settings_sections.add(str(row))", self.body)

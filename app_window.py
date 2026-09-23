@@ -2458,8 +2458,9 @@ class AppWindow:
         self._gear_btn.bind("<Leave>",    lambda _e: self._gear_btn.configure(
             fg=C["accent"] if getattr(self, "_current_tab", "") == "settings" else C["subtext"]))
 
-        # Hairline divider — inside container so it hides with the header
-        tk.Frame(self._header_outer, bg=C["divider"], height=1).pack(fill="x")
+        # No hairline under the lockup: on the dashboard the one separation line
+        # sits below the search bar (Ryan's layout: logos, bar, then the line),
+        # and the login/splash screens read fine without it.
 
     # ── Universal search ───────────────────────────────────────────────────────
     #
@@ -2485,56 +2486,107 @@ class AppWindow:
         self._usearch_results = []
         self._usearch_ai = None
         self._usearch_job = None
+        # Context: the one bar changes what it does per page. "universal" (Home
+        # / Learning / Hotkey) jumps to pages/settings and asks AI; "filter"
+        # (History / Settings / the library pages) filters that page's own list
+        # in place, like the search bars it replaced. Ask AI works in both.
+        self._usearch_mode = "universal"
+        self._usearch_filter = None
+        self._usearch_placeholder = self._USEARCH_PLACE
 
-        height = 40
+        height = 42
         cv = tk.Canvas(host, height=height, bg=C["bg"], highlightthickness=0,
                        bd=0)
         cv.pack(fill="x", padx=20)
         self._usearch_cv = cv
         inner = tk.Frame(cv, bg=C["input_bg"])
 
-        mag = tk.Canvas(inner, width=18, height=18, bg=C["input_bg"],
-                        highlightthickness=0, bd=0)
-        mag.create_oval(4, 4, 12, 12, outline=C["subtext"], width=1.5)
-        mag.create_line(11.5, 11.5, 15.5, 15.5, fill=C["subtext"], width=1.5,
-                        capstyle="round")
-        mag.pack(side="left", padx=(14, 8))
+        # Crisp PIL magnifier rather than a hand-drawn canvas oval.
+        mag = None
+        try:
+            mimg = ui_render.icon_glyph(inner, "search", 17, C["subtext"],
+                                        bg=C["input_bg"])
+        except Exception:
+            mimg = None
+        if mimg is not None:
+            self._usearch_mag_img = mimg
+            mag = tk.Label(inner, image=mimg, bg=C["input_bg"])
+        else:
+            mag = tk.Canvas(inner, width=18, height=18, bg=C["input_bg"],
+                            highlightthickness=0, bd=0)
+            mag.create_oval(4, 4, 12, 12, outline=C["subtext"], width=1.5)
+            mag.create_line(11.5, 11.5, 15.5, 15.5, fill=C["subtext"],
+                            width=1.5, capstyle="round")
+        mag.pack(side="left", padx=(15, 8))
 
-        # Ask AI pill on the right, the same idea as the CRM's search bar.
-        ask = tk.Canvas(inner, width=76, height=26, bg=C["input_bg"],
-                        highlightthickness=0, bd=0, cursor="hand2")
-        _rr(ask, 1, 1, 75, 25, 12, fill=C["accent"], outline="", tags="pill")
-        ask.create_text(38, 13, text="✦ Ask AI", fill="#0a0a0a",
-                        font=("Segoe UI", 9, "bold"), tags="pill")
-        ask.pack(side="right", padx=(6, 8))
-        ask.bind("<Button-1>", self._usearch_ask_ai)
-        self._usearch_ask_btn = ask
+        # Ask AI on the right — a crisp PIL sparkle icon plus native ClearType
+        # text, not a filled pill, matching the CRM's search bar. Clicking it
+        # (or Enter on a question) runs Ask AI.
+        askf = tk.Frame(inner, bg=C["input_bg"], cursor="hand2")
+        askf.pack(side="right", padx=(6, 15))
+        spark = None
+        try:
+            spark = ui_render.icon_glyph(askf, "sparkle", 15, C["accent"],
+                                         bg=C["input_bg"])
+        except Exception:
+            spark = None
+        ask_widgets = [askf]
+        if spark is not None:
+            self._usearch_spark_img = spark      # keep a ref so it is not GC'd
+            spl = tk.Label(askf, image=spark, bg=C["input_bg"], cursor="hand2")
+            spl.pack(side="left", padx=(0, 5))
+            ask_widgets.append(spl)
+        askt = tk.Label(askf, text="Ask AI", fg=C["accent"], bg=C["input_bg"],
+                        font=("Segoe UI", 10, "bold"), cursor="hand2")
+        askt.pack(side="left")
+        ask_widgets.append(askt)
+        for _wdg in ask_widgets:
+            _wdg.bind("<Button-1>", self._usearch_ask_ai)
+            _wdg.bind("<Enter>", lambda _e: askt.configure(fg=C["accent_hover"]))
+            _wdg.bind("<Leave>", lambda _e: askt.configure(fg=C["accent"]))
+        self._usearch_ask_btn = askf
 
+        # takefocus=0 so the bar never grabs focus on Tab or when the window is
+        # re-activated — it only ever activates when the user clicks it or
+        # starts typing (both call focus_set explicitly). That is what keeps it
+        # passive while the user just clicks around the app.
         entry = tk.Entry(inner, bg=C["input_bg"], fg=C["subtext"], relief="flat",
                          bd=0, highlightthickness=0, insertbackground=C["text"],
-                         font=("Segoe UI", 10))
-        entry.insert(0, self._USEARCH_PLACE)
+                         font=("Segoe UI", 11), takefocus=0)
+        entry.insert(0, self._usearch_placeholder)
         entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self._usearch_entry = entry
 
         win = cv.create_window(2, height // 2, window=inner, anchor="w")
-        st = {"focus": False}
+        st = {"focus": False, "img": None}
 
         def _draw(_e=None):
             w = cv.winfo_width()
             if w <= 1:
                 return
             cv.delete("bg")
-            _rr(cv, 1, 1, w - 1, height - 1, 10, fill=C["input_bg"],
-                outline=C["accent"] if st["focus"] else C["border"], width=1,
-                tags="bg")
+            outline = C["accent"] if st["focus"] else C["border"]
+            # Crisp PIL-rendered field (supersampled, cached) rather than the
+            # canvas polygon — always high-res, like the app's cards.
+            img = None
+            try:
+                img = ui_render.round_rect(cv, w, height, 11, C["input_bg"],
+                                           outline, 1, C["bg"])
+            except Exception:
+                img = None
+            if img is not None:
+                st["img"] = img            # keep a ref so it is not GC'd
+                cv.create_image(0, 0, image=img, anchor="nw", tags="bg")
+            else:
+                _rr(cv, 1, 1, w - 1, height - 1, 11, fill=C["input_bg"],
+                    outline=outline, width=1, tags="bg")
             cv.tag_lower("bg")
             cv.itemconfigure(win, width=w - 4)
 
         cv.bind("<Configure>", _draw)
 
         def _focus_in(_e):
-            if entry.get() == self._USEARCH_PLACE:
+            if entry.get() == self._usearch_placeholder:
                 entry.delete(0, "end")
                 entry.configure(fg=C["text"])
             st["focus"] = True
@@ -2549,7 +2601,7 @@ class AppWindow:
 
         def _key(_e):
             raw = entry.get()
-            q = "" if raw == self._USEARCH_PLACE else raw.strip()
+            q = "" if raw == self._usearch_placeholder else raw.strip()
             if self._usearch_job is not None:
                 try:
                     self._root.after_cancel(self._usearch_job)
@@ -2563,7 +2615,82 @@ class AppWindow:
         entry.bind("<KeyRelease>", _key)
         entry.bind("<Return>", self._usearch_enter)
         entry.bind("<Escape>", self._usearch_escape)
+        # A click anywhere on the field puts the cursor in it, ready to type.
         cv.bind("<Button-1>", lambda _e: entry.focus_set())
+        mag.bind("<Button-1>", lambda _e: entry.focus_set())
+        inner.bind("<Button-1>", lambda _e: entry.focus_set())
+
+        # Type-anywhere: start typing on the dashboard and it lands in the bar,
+        # even without clicking it first.
+        self._root.bind("<Key>", self._usearch_type_anywhere, add="+")
+        # Clicking anywhere that is NOT the bar blurs it, so it drops back to
+        # the passive grey look instead of staying accent-bordered (a click on a
+        # Label/Canvas never moves focus on its own, so the entry would keep it).
+        self._root.bind("<Button-1>", self._usearch_click_outside, add="+")
+
+    def _usearch_click_outside(self, event):
+        ent = getattr(self, "_usearch_entry", None)
+        if ent is None:
+            return
+        try:
+            if self._root.focus_get() is not ent:
+                return          # the bar isn't focused — nothing to blur
+        except Exception:
+            return
+        node = event.widget
+        host = getattr(self, "_usearch_host", None)
+        panel = getattr(self, "_usearch_panel", None)
+        while node is not None:
+            if node is host or node is panel:
+                return          # click landed inside the bar or its results
+            node = getattr(node, "master", None)
+        # Another text field takes focus by itself; anything else leaves the
+        # entry focused, so move focus off it explicitly.
+        if isinstance(event.widget, (tk.Entry, tk.Text, tk.Spinbox)):
+            return
+        try:
+            self._root.focus_set()
+        except tk.TclError:
+            pass
+
+    def _usearch_type_anywhere(self, event):
+        """Route a printable keystroke into the search bar when nothing else is
+        being typed into. Skipped when a text field already has focus, a
+        modifier shortcut is held, or a hotkey is being captured — so it never
+        eats a key meant for somewhere else."""
+        host = getattr(self, "_usearch_host", None)
+        ent = getattr(self, "_usearch_entry", None)
+        if host is None or ent is None:
+            return
+        try:
+            if not host.winfo_ismapped():
+                return          # not on the dashboard (login / splash)
+        except tk.TclError:
+            return
+        if getattr(self, "_recording_hotkey", False):
+            return
+        try:
+            fw = self._root.focus_get()
+        except Exception:
+            fw = None
+        if fw is ent:
+            return              # already typing in the bar
+        if isinstance(fw, (tk.Entry, tk.Text, tk.Spinbox)):
+            return              # another field owns the keystroke
+        # Ctrl (0x4) or Alt (0x20000, Windows) held → it's a shortcut, not text.
+        if event.state & 0x0004 or event.state & 0x20000:
+            return
+        ch = event.char
+        if not ch or len(ch) != 1 or ord(ch) < 32 or ord(ch) == 127:
+            return              # non-printable (arrows, Enter, Backspace, …)
+        ent.focus_set()
+        if ent.get() == self._usearch_placeholder:
+            ent.delete(0, "end")
+            ent.configure(fg=C["text"])
+        ent.insert("end", ch)
+        ent.icursor("end")
+        self._usearch_update(ent.get())
+        return "break"
 
     def _usearch_update(self, query: str) -> None:
         q = (query or "").strip()
@@ -2571,6 +2698,18 @@ class AppWindow:
         if q != self._usearch_query:
             self._usearch_ai = None
         self._usearch_query = q
+
+        # Filter mode: drive the current page's own filter in place, exactly
+        # like the search bar this one replaced. No jump dropdown.
+        if self._usearch_mode == "filter" and self._usearch_filter is not None:
+            self._usearch_results = []
+            self._hide_usearch_panel()
+            try:
+                self._usearch_filter(q)
+            except Exception:
+                pass
+            return
+
         if not q:
             self._usearch_results = []
             self._hide_usearch_panel()
@@ -2582,6 +2721,12 @@ class AppWindow:
     def _usearch_enter(self, _e=None):
         q = self._usearch_query.strip()
         if not q:
+            return "break"
+        # Filter mode: the page is already filtered; Enter only reaches for AI
+        # when what was typed reads as a question.
+        if self._usearch_mode == "filter":
+            if app_search.looks_like_question(q):
+                self._usearch_ask_ai()
             return "break"
         if self._usearch_results and not app_search.looks_like_question(q):
             self._usearch_navigate(self._usearch_results[0])
@@ -2645,6 +2790,11 @@ class AppWindow:
 
     def _render_usearch_panel(self) -> None:
         if not self._usearch_query:
+            self._hide_usearch_panel()
+            return
+        # Filter mode: the page filters itself in place, so the panel only ever
+        # appears to carry an Ask AI answer — never a jump list.
+        if self._usearch_mode == "filter" and self._usearch_ai is None:
             self._hide_usearch_panel()
             return
         p = self._usearch_panel_widget()
@@ -2807,7 +2957,7 @@ class AppWindow:
         try:
             if not ent.get().strip():
                 ent.delete(0, "end")
-                ent.insert(0, self._USEARCH_PLACE)
+                ent.insert(0, self._usearch_placeholder)
                 ent.configure(fg=C["subtext"])
         except tk.TclError:
             pass
@@ -2822,7 +2972,7 @@ class AppWindow:
         try:
             ent.delete(0, "end")
             if defocus:
-                ent.insert(0, self._USEARCH_PLACE)
+                ent.insert(0, self._usearch_placeholder)
                 ent.configure(fg=C["subtext"])
                 self._root.focus_set()
         except tk.TclError:
@@ -2843,10 +2993,10 @@ class AppWindow:
                 self._focus_setting(title)
 
     def _focus_setting(self, title: str) -> None:
-        """Open Settings filtered to one card (or section), reusing the
-        settings search so only the match shows."""
-        q = (title or "").strip().lower()
-        ent = getattr(self, "_settings_search", None)
+        """Open Settings filtered to one card (or section). The one top bar is
+        now the settings search, so drive it: show the title and filter to it."""
+        q = (title or "").strip()
+        ent = getattr(self, "_usearch_entry", None)
         if ent is not None:
             try:
                 ent.delete(0, "end")
@@ -2854,10 +3004,50 @@ class AppWindow:
                 ent.configure(fg=C["text"])
             except tk.TclError:
                 pass
+        self._usearch_query = q
         try:
-            self._apply_settings_search(q)
+            self._apply_settings_search(q.lower())
         except Exception:
             pass
+
+    def _usearch_apply_page(self, name: str) -> None:
+        """Retune the one search bar for the page just opened: filter mode with
+        that page's own filter (History / Settings / the library pages), or
+        universal jump + Ask AI everywhere else. Clears whatever was typed and
+        resets the page's filter so it opens unfiltered."""
+        ps = getattr(self, "_page_search", None)
+        spec = ps.get(name) if ps else None
+        if spec:
+            self._usearch_mode = "filter"
+            self._usearch_filter = spec["filter"]
+            self._usearch_placeholder = spec["placeholder"]
+        else:
+            self._usearch_mode = "universal"
+            self._usearch_filter = None
+            self._usearch_placeholder = self._USEARCH_PLACE
+        self._usearch_query = ""
+        self._usearch_ai = None
+        self._usearch_results = []
+        self._hide_usearch_panel()
+        ent = getattr(self, "_usearch_entry", None)
+        if ent is not None:
+            try:
+                if self._root.focus_get() is ent:
+                    self._root.focus_set()      # blur so the placeholder shows
+            except Exception:
+                pass
+            try:
+                ent.delete(0, "end")
+                ent.insert(0, self._usearch_placeholder)
+                ent.configure(fg=C["subtext"])
+            except tk.TclError:
+                pass
+        # Reset the page's own filter so it opens showing everything.
+        if spec:
+            try:
+                spec["filter"]("")
+            except Exception:
+                pass
 
     # ── Dashboard shell ───────────────────────────────────────────────────────
 
@@ -2883,7 +3073,15 @@ class AppWindow:
         # their cards (each toggle/link registers itself), then topped with the
         # pages themselves.
         self._search_catalogue = []
+        # page name -> {"placeholder", "filter"} for the one bar's filter mode.
+        self._page_search = {}
         self._build_universal_search(parent)
+
+        # Ryan's layout: logos, then the search bar directly beneath them, then
+        # a separation line, then the tabs. C["border"] (not the near-invisible
+        # divider) so the line actually reads.
+        tk.Frame(parent, bg=C["border"], height=1).pack(fill="x",
+                                                        pady=(12, 0))
 
         # Full width: the strip keeps its own side padding, because the end
         # tabs' feet reach past their boxes, and it draws the line the tabs
@@ -2891,7 +3089,7 @@ class AppWindow:
         self._tab_strip = bookmark_tabs.BookmarkTabs(
             parent, self._DASH_TABS, on_select=self._switch_dash_tab,
             bg=C["bg"], line=C["border"])
-        self._tab_strip.pack(fill="x", pady=(14, 0))
+        self._tab_strip.pack(fill="x", pady=(12, 0))
 
         # Content area — all tab frames stacked in same grid cell, tkraise() to switch
         self._dash_content = tk.Frame(parent, bg=C["bg"])
@@ -2987,9 +3185,11 @@ class AppWindow:
         self._current_tab = name
 
         # A search results panel floats over the content area, so it must not
-        # linger over the tab we just switched to.
+        # linger over the tab we just switched to. The one search bar also
+        # retunes itself for the page (placeholder + filter vs universal).
         if hasattr(self, "_usearch_panel"):
             self._hide_usearch_panel()
+            self._usearch_apply_page(name)
 
         # A capture left running on another tab keeps every global bind
         # suspended and swallows keystrokes meant for this one.
@@ -5418,8 +5618,11 @@ class AppWindow:
             self._hist_query = query
             self._apply_history_search()
 
-        self._hist_search = self._search_bar(
-            parent, "Search transcriptions…", _on_hist_query)
+        # The one top bar is the transcriptions search on this page — no second
+        # bar. It filters via this same callback in place.
+        self._hist_search = None
+        self._register_page_search("history", "Search transcriptions…",
+                                   _on_hist_query)
 
         # Middle row: the rounded card sits on the left and an external
         # scrollbar sits on the far right, OUTSIDE the card border (matching the
@@ -6908,6 +7111,16 @@ class AppWindow:
                         "keywords": kind, "location": "",
                         "target": ("tab", kind)})
 
+    def _register_page_search(self, name: str, placeholder: str,
+                              filter_fn) -> None:
+        """Register a page's own filter so the one top bar can drive it in
+        filter mode. Lazily creates the map so a page built in isolation (a
+        test) doesn't need the whole dashboard."""
+        if not hasattr(self, "_page_search"):
+            self._page_search = {}
+        self._page_search[name] = {"placeholder": placeholder,
+                                   "filter": filter_fn}
+
     def _register_search_setting(self, title: str, subtext: str,
                                  key: str = "") -> None:
         """Add a toggle/dropdown setting to the universal-search catalogue.
@@ -6977,9 +7190,10 @@ class AppWindow:
         self._settings_query = ""
         self._settings_rows = []
         self._settings_sections = set()
-        self._settings_search = self._search_bar(
-            parent, "Search settings…", self._apply_settings_search,
-            padx=20, pady=(10, 8))
+        # No inline search bar: the one top bar is the settings search here.
+        self._settings_search = None
+        self._register_page_search("settings", "Search settings…",
+                                   self._apply_settings_search)
         self._settings_sb.pack(side="right", fill="y")
         self._settings_cv.pack(side="left", fill="both", expand=True)
 
@@ -8030,15 +8244,14 @@ class AppWindow:
         add_btn.bind("<Enter>", lambda _e: add_btn.configure(bg=C["accent_hover"]))
         add_btn.bind("<Leave>", lambda _e: add_btn.configure(bg=C["accent"]))
 
-        search_holder = tk.Frame(tools, bg=C["bg"])
-        search_holder.pack(side="left", fill="x", expand=True)
-
         def _on_query(q: str) -> None:
             state["query"] = q
             self._render_library(kind)
 
-        state["search"] = self._search_bar(
-            search_holder, spec["search"], _on_query, padx=(20, 10), pady=(0, 8))
+        # No inline search bar: the one top bar searches this page. Its filter
+        # is this same callback.
+        state["search"] = None
+        self._register_page_search(kind, spec["search"], _on_query)
 
         # ScrollPane, never a Canvas: canvas blit-scroll is what minted the
         # ghost duplicates the v1.6.36 structural fix removed.
@@ -8545,16 +8758,13 @@ class AppWindow:
             font=("Segoe UI", 9))
         state["forget_all"].pack()
 
-        search_holder = tk.Frame(tools, bg=C["bg"])
-        search_holder.pack(side="left", fill="x", expand=True)
-
         def _on_query(q: str) -> None:
             state["query"] = q
             self._render_phrases()
 
-        state["search"] = self._search_bar(
-            search_holder, "Search phrases…", _on_query, padx=(20, 10),
-            pady=(0, 8))
+        # No inline search bar: the one top bar searches this page.
+        state["search"] = None
+        self._register_page_search("phrases", "Search phrases…", _on_query)
 
         body = tk.Frame(parent, bg=C["bg"])
         body.pack(fill="both", expand=True)

@@ -173,9 +173,12 @@ class SharedSearchBarTests(unittest.TestCase):
         self.root.after(150, self.root.quit)
         self.root.mainloop()
 
-    def test_history_uses_the_shared_control(self):
-        self.assertIn("_search_bar",
-                      inspect.getsource(AppWindow._build_history_tab))
+    def test_history_registers_the_top_bar_filter(self):
+        # History no longer has its own inline bar: the one top search bar is
+        # the transcriptions search, driven via _page_search.
+        src = inspect.getsource(AppWindow._build_history_tab)
+        self.assertIn('_register_page_search("history"', src)
+        self.assertNotIn("self._search_bar(", src)
 
     def test_it_starts_showing_the_placeholder(self):
         self.assertEqual("Search things…", self.entry.get())
@@ -345,9 +348,10 @@ class LivePageTests(unittest.TestCase):
         self._build()
         self.w._lib_start_add(self.kind)
         self.root.update()
-        # [0] is the search box; the editor's own fields follow.
+        # The inline search box is gone (the one top bar searches now), so the
+        # editor's own fields are first: [0] term, [1] sounds-like.
         fields = self._editor_fields()
-        term, sounds = fields[1], fields[2]
+        term, sounds = fields[0], fields[1]
         term.insert(0, "Pipedrive")
         sounds.insert("1.0", "pipe drive\npied drive")
         err = types.SimpleNamespace(configure=lambda **kw: None)

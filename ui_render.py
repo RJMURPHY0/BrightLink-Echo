@@ -502,6 +502,20 @@ def _glyph_paint(d, s, name: str, size: int, color: str) -> None:
         for cx, cy, r in ((16.5, 7, 2.6), (10.5, 5, 1.5), (19, 12.5, 1.5)):
             L((cx - r, cy), (cx + r, cy))
             L((cx, cy - r), (cx, cy + r))
+    elif name == "search":
+        # magnifier — circle lens + handle. Crisp, replacing the hand-drawn
+        # canvas oval used in the old search bars.
+        d.ellipse([4.5 * u, 4.5 * u, 14.5 * u, 14.5 * u],
+                  outline=color, width=lw)
+        L((14.2, 14.2), (19.5, 19.5))
+    elif name == "sparkle":
+        # four-pointed sparkle (concave star) — Ask AI. Filled polygon so it is
+        # crisp at any size, unlike the ✦ font glyph. Tips at N/E/S/W (radius
+        # ~9.8), concave inner points on the diagonals (radius ~3.6) so the star
+        # reads full, not like a thin plus.
+        pts = [(12, 2.2), (14.55, 9.45), (21.8, 12), (14.55, 14.55),
+               (12, 21.8), (9.45, 14.55), (2.2, 12), (9.45, 9.45)]
+        d.polygon([(x * u, y * u) for x, y in pts], fill=color)
     elif name == "check":
         # copied-to-clipboard tick
         L((4.5, 12.5), (10, 18), (19.5, 6.5))
