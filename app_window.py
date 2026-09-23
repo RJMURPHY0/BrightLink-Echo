@@ -9,6 +9,7 @@ import brand
 import bisect
 import threading
 import time
+import app_search
 import tkinter as tk
 import tkinter.font as tkfont
 import bookmark_tabs
@@ -2460,6 +2461,404 @@ class AppWindow:
         # Hairline divider — inside container so it hides with the header
         tk.Frame(self._header_outer, bg=C["divider"], height=1).pack(fill="x")
 
+    # ── Universal search ───────────────────────────────────────────────────────
+    #
+    # A single bar under the header that searches every page and setting and,
+    # on demand, asks the AI about the app. Typing filters the catalogue built
+    # by the tabs below (each toggle/link registers itself); a result jumps
+    # straight to that page, or to Settings filtered to that card. Ask AI sends
+    # the question plus the catalogue to the same refiner the popup uses and
+    # shows a short, app-scoped answer with jump chips.
+    #
+    # The results float in a placed panel over the content area rather than a
+    # Toplevel — every Toplevel in this app has cost a Z-order or DPI bug, and a
+    # placed child inherits the window's own coordinate space and theme.
+
+    _USEARCH_PLACE = "Search settings, features, or ask AI…"
+
+    def _build_universal_search(self, parent: tk.Frame) -> None:
+        host = tk.Frame(parent, bg=C["bg"])
+        host.pack(fill="x", pady=(12, 0))
+        self._usearch_host = host
+        self._usearch_panel = None
+        self._usearch_query = ""
+        self._usearch_results = []
+        self._usearch_ai = None
+        self._usearch_job = None
+
+        height = 40
+        cv = tk.Canvas(host, height=height, bg=C["bg"], highlightthickness=0,
+                       bd=0)
+        cv.pack(fill="x", padx=20)
+        self._usearch_cv = cv
+        inner = tk.Frame(cv, bg=C["input_bg"])
+
+        mag = tk.Canvas(inner, width=18, height=18, bg=C["input_bg"],
+                        highlightthickness=0, bd=0)
+        mag.create_oval(4, 4, 12, 12, outline=C["subtext"], width=1.5)
+        mag.create_line(11.5, 11.5, 15.5, 15.5, fill=C["subtext"], width=1.5,
+                        capstyle="round")
+        mag.pack(side="left", padx=(14, 8))
+
+        # Ask AI pill on the right, the same idea as the CRM's search bar.
+        ask = tk.Canvas(inner, width=76, height=26, bg=C["input_bg"],
+                        highlightthickness=0, bd=0, cursor="hand2")
+        _rr(ask, 1, 1, 75, 25, 12, fill=C["accent"], outline="", tags="pill")
+        ask.create_text(38, 13, text="✦ Ask AI", fill="#0a0a0a",
+                        font=("Segoe UI", 9, "bold"), tags="pill")
+        ask.pack(side="right", padx=(6, 8))
+        ask.bind("<Button-1>", self._usearch_ask_ai)
+        self._usearch_ask_btn = ask
+
+        entry = tk.Entry(inner, bg=C["input_bg"], fg=C["subtext"], relief="flat",
+                         bd=0, highlightthickness=0, insertbackground=C["text"],
+                         font=("Segoe UI", 10))
+        entry.insert(0, self._USEARCH_PLACE)
+        entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self._usearch_entry = entry
+
+        win = cv.create_window(2, height // 2, window=inner, anchor="w")
+        st = {"focus": False}
+
+        def _draw(_e=None):
+            w = cv.winfo_width()
+            if w <= 1:
+                return
+            cv.delete("bg")
+            _rr(cv, 1, 1, w - 1, height - 1, 10, fill=C["input_bg"],
+                outline=C["accent"] if st["focus"] else C["border"], width=1,
+                tags="bg")
+            cv.tag_lower("bg")
+            cv.itemconfigure(win, width=w - 4)
+
+        cv.bind("<Configure>", _draw)
+
+        def _focus_in(_e):
+            if entry.get() == self._USEARCH_PLACE:
+                entry.delete(0, "end")
+                entry.configure(fg=C["text"])
+            st["focus"] = True
+            _draw()
+            if self._usearch_query:
+                self._render_usearch_panel()
+
+        def _focus_out(_e):
+            st["focus"] = False
+            _draw()
+            self._root.after(170, self._maybe_hide_usearch)
+
+        def _key(_e):
+            raw = entry.get()
+            q = "" if raw == self._USEARCH_PLACE else raw.strip()
+            if self._usearch_job is not None:
+                try:
+                    self._root.after_cancel(self._usearch_job)
+                except tk.TclError:
+                    pass
+            self._usearch_job = self._root.after(
+                90, lambda: self._usearch_update(q))
+
+        entry.bind("<FocusIn>", _focus_in)
+        entry.bind("<FocusOut>", _focus_out)
+        entry.bind("<KeyRelease>", _key)
+        entry.bind("<Return>", self._usearch_enter)
+        entry.bind("<Escape>", self._usearch_escape)
+        cv.bind("<Button-1>", lambda _e: entry.focus_set())
+
+    def _usearch_update(self, query: str) -> None:
+        q = (query or "").strip()
+        # New typing supersedes any Ask AI answer on screen.
+        if q != self._usearch_query:
+            self._usearch_ai = None
+        self._usearch_query = q
+        if not q:
+            self._usearch_results = []
+            self._hide_usearch_panel()
+            return
+        self._usearch_results = app_search.match_entries(
+            q, self._search_catalogue, limit=8)
+        self._render_usearch_panel()
+
+    def _usearch_enter(self, _e=None):
+        q = self._usearch_query.strip()
+        if not q:
+            return "break"
+        if self._usearch_results and not app_search.looks_like_question(q):
+            self._usearch_navigate(self._usearch_results[0])
+        else:
+            self._usearch_ask_ai()
+        return "break"
+
+    def _usearch_escape(self, _e=None):
+        self._hide_usearch_panel()
+        self._clear_usearch_entry(defocus=True)
+        return "break"
+
+    def _usearch_ask_ai(self, _e=None):
+        q = self._usearch_query.strip()
+        if not q:
+            return "break"
+        refiner = getattr(self, "_ai_refiner", None)
+        if refiner is None or not getattr(refiner, "is_available", False):
+            self._usearch_ai = ("answer",
+                                "Add an OpenRouter or Anthropic key in Settings "
+                                "to use Ask AI.")
+            self._render_usearch_panel()
+            return "break"
+        self._usearch_ai = "thinking"
+        self._render_usearch_panel()
+        token = q
+
+        def _work():
+            try:
+                prompt = app_search.help_prompt(self._search_catalogue)
+                ans = refiner.refine(q, custom_prompt=prompt)
+            except Exception as exc:
+                print(f"[AppWindow] Ask AI failed: {exc}")
+                ans = ""
+            self._ui_after(0, lambda: self._usearch_ai_done(token, ans))
+
+        threading.Thread(target=_work, daemon=True).start()
+        return "break"
+
+    def _usearch_ai_done(self, token: str, ans: str) -> None:
+        if token != self._usearch_query.strip():
+            return          # the query moved on while the model was thinking
+        ans = (ans or "").strip()
+        self._usearch_ai = ("answer", ans or "No answer — try rephrasing.")
+        self._render_usearch_panel()
+
+    # ── Results panel ────────────────────────────────────────────────────────
+
+    def _usearch_panel_widget(self) -> tk.Frame:
+        p = getattr(self, "_usearch_panel", None)
+        if p is not None:
+            try:
+                if p.winfo_exists():
+                    return p
+            except tk.TclError:
+                pass
+        p = tk.Frame(self._dash_frame, bg=C["surface"], highlightthickness=1,
+                     highlightbackground=C["border"], highlightcolor=C["border"])
+        self._usearch_panel = p
+        return p
+
+    def _render_usearch_panel(self) -> None:
+        if not self._usearch_query:
+            self._hide_usearch_panel()
+            return
+        p = self._usearch_panel_widget()
+        for w in p.winfo_children():
+            w.destroy()
+
+        # Ask AI trigger / answer at the top.
+        ai = self._usearch_ai
+        if ai == "thinking":
+            tk.Label(p, text="✦  Thinking…", fg=C["accent"], bg=C["surface"],
+                     font=("Segoe UI", 9), anchor="w").pack(
+                         fill="x", padx=14, pady=(10, 8))
+        elif isinstance(ai, tuple) and ai[0] == "answer":
+            tk.Label(p, text=ai[1], fg=C["text"], bg=C["surface"],
+                     font=("Segoe UI", 9), anchor="w", justify="left",
+                     wraplength=self._usearch_wrap()).pack(
+                         fill="x", padx=14, pady=(10, 6))
+            chips = app_search.linked_entries(ai[1], self._search_catalogue)
+            if chips:
+                crow = tk.Frame(p, bg=C["surface"])
+                crow.pack(fill="x", padx=12, pady=(0, 8))
+                for e in chips:
+                    self._usearch_chip(crow, e)
+        else:
+            self._usearch_ask_row(p)
+
+        results = self._usearch_results
+        if results:
+            self._usearch_divider(p)
+            tk.Label(p, text="JUMP TO", fg=C["subtext"], bg=C["surface"],
+                     font=("Segoe UI", 7, "bold"), anchor="w").pack(
+                         fill="x", padx=14, pady=(6, 2))
+            for e in results:
+                self._usearch_result_row(p, e)
+        elif not ai:
+            tk.Label(p, text="No matches — press Enter to ask AI",
+                     fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 9),
+                     anchor="w").pack(fill="x", padx=14, pady=(0, 10))
+
+        self._show_usearch_panel()
+
+    def _usearch_wrap(self) -> int:
+        try:
+            w = self._usearch_host.winfo_width() - 68
+        except tk.TclError:
+            w = 360
+        return max(200, w)
+
+    def _usearch_divider(self, parent) -> None:
+        tk.Frame(parent, bg=C["divider"], height=1).pack(fill="x", padx=12)
+
+    def _usearch_ask_row(self, parent) -> None:
+        row = tk.Frame(parent, bg=C["surface"], cursor="hand2")
+        row.pack(fill="x")
+        q = self._usearch_query
+        lbl = tk.Label(row, text=f"✦   Ask AI:  “{q}”", fg=C["accent"],
+                       bg=C["surface"], font=("Segoe UI", 9), anchor="w")
+        lbl.pack(fill="x", padx=14, pady=9)
+        self._usearch_hover(row, (row, lbl), self._usearch_ask_ai)
+
+    def _usearch_chip(self, parent, entry: dict) -> None:
+        chip = tk.Label(parent, text=f"  {entry['title']}  ›  ",
+                        fg=C["text"], bg=C["input_bg"], font=("Segoe UI", 8),
+                        cursor="hand2")
+        chip.pack(side="left", padx=(0, 6), pady=2)
+        chip.bind("<Button-1>", lambda _e, en=entry: self._usearch_navigate(en))
+
+    def _usearch_result_row(self, parent, entry: dict) -> None:
+        row = tk.Frame(parent, bg=C["surface"], cursor="hand2")
+        row.pack(fill="x")
+        col = tk.Frame(row, bg=C["surface"])
+        col.pack(side="left", fill="x", expand=True, padx=14, pady=6)
+        title = tk.Label(col, text=entry.get("title", ""), fg=C["text"],
+                         bg=C["surface"], font=("Segoe UI", 9), anchor="w")
+        title.pack(anchor="w")
+        kind = entry.get("kind")
+        loc = entry.get("location") or ""
+        tag = "Page" if kind == "page" else (f"Setting · {loc}" if loc
+                                             else "Setting")
+        tagl = tk.Label(row, text=tag, fg=C["subtext"], bg=C["surface"],
+                        font=("Segoe UI", 8))
+        tagl.pack(side="right", padx=(0, 14))
+        self._usearch_hover(row, (row, col, title, tagl),
+                            lambda _e=None, en=entry: self._usearch_navigate(en))
+
+    def _usearch_hover(self, row, widgets, action) -> None:
+        def _enter(_e):
+            for w in widgets:
+                try:
+                    w.configure(bg=C["surface_hover"])
+                except tk.TclError:
+                    pass
+
+        def _leave(_e):
+            for w in widgets:
+                try:
+                    w.configure(bg=C["surface"])
+                except tk.TclError:
+                    pass
+        for w in widgets:
+            w.bind("<Enter>", _enter)
+            w.bind("<Leave>", _leave)
+            w.bind("<Button-1>", action)
+
+    def _show_usearch_panel(self) -> None:
+        p = getattr(self, "_usearch_panel", None)
+        host = getattr(self, "_usearch_host", None)
+        if p is None or host is None:
+            return
+        try:
+            hh = host.winfo_height() or host.winfo_reqheight()
+            y = host.winfo_y() + hh + 2
+        except tk.TclError:
+            return
+        # relwidth spans the dashboard, minus the 20px gutter on each side that
+        # the search bar itself keeps — so the panel edges line up with the bar
+        # without depending on a realised pixel width.
+        try:
+            p.place(in_=self._dash_frame, x=20, y=y, relwidth=1.0, width=-40)
+            p.lift()
+        except tk.TclError:
+            pass
+
+    def _hide_usearch_panel(self) -> None:
+        p = getattr(self, "_usearch_panel", None)
+        if p is None:
+            return
+        try:
+            p.place_forget()
+        except tk.TclError:
+            pass
+
+    def _maybe_hide_usearch(self) -> None:
+        # Keep the panel up while the AI answer is on screen, or while the
+        # pointer is inside the panel or the search bar (a result click lands
+        # here first). Otherwise the search bar lost focus for real — hide it.
+        if self._usearch_ai is not None:
+            return
+        try:
+            if self._root.focus_get() is self._usearch_entry:
+                return
+            x, y = self._root.winfo_pointerxy()
+            under = self._root.winfo_containing(x, y)
+        except (tk.TclError, KeyError):
+            under = None
+        p = getattr(self, "_usearch_panel", None)
+        host = getattr(self, "_usearch_host", None)
+        w = under
+        while w is not None:
+            if w is p or w is host:
+                return
+            w = getattr(w, "master", None)
+        self._hide_usearch_panel()
+        self._restore_usearch_placeholder()
+
+    def _restore_usearch_placeholder(self) -> None:
+        ent = getattr(self, "_usearch_entry", None)
+        if ent is None:
+            return
+        try:
+            if not ent.get().strip():
+                ent.delete(0, "end")
+                ent.insert(0, self._USEARCH_PLACE)
+                ent.configure(fg=C["subtext"])
+        except tk.TclError:
+            pass
+
+    def _clear_usearch_entry(self, defocus: bool = False) -> None:
+        self._usearch_query = ""
+        self._usearch_ai = None
+        self._usearch_results = []
+        ent = getattr(self, "_usearch_entry", None)
+        if ent is None:
+            return
+        try:
+            ent.delete(0, "end")
+            if defocus:
+                ent.insert(0, self._USEARCH_PLACE)
+                ent.configure(fg=C["subtext"])
+                self._root.focus_set()
+        except tk.TclError:
+            pass
+
+    def _usearch_navigate(self, entry: dict) -> None:
+        self._hide_usearch_panel()
+        self._clear_usearch_entry(defocus=True)
+        tgt = entry.get("target") if entry else None
+        if not tgt:
+            return
+        if tgt[0] == "tab":
+            self._switch_dash_tab(tgt[1])
+        elif tgt[0] == "setting":
+            _, tab, title = tgt
+            self._switch_dash_tab(tab)
+            if tab == "settings":
+                self._focus_setting(title)
+
+    def _focus_setting(self, title: str) -> None:
+        """Open Settings filtered to one card (or section), reusing the
+        settings search so only the match shows."""
+        q = (title or "").strip().lower()
+        ent = getattr(self, "_settings_search", None)
+        if ent is not None:
+            try:
+                ent.delete(0, "end")
+                ent.insert(0, title)
+                ent.configure(fg=C["text"])
+            except tk.TclError:
+                pass
+        try:
+            self._apply_settings_search(q)
+        except Exception:
+            pass
+
     # ── Dashboard shell ───────────────────────────────────────────────────────
 
     # The dashboard's tabs: (page, label, glyph). Drawn as BrightLink's own
@@ -2479,6 +2878,13 @@ class AppWindow:
     }
 
     def _build_dashboard(self, parent: tk.Frame) -> None:
+        # Universal search sits between the header and the tabs, spanning the
+        # window. The catalogue it searches is filled as the tabs below build
+        # their cards (each toggle/link registers itself), then topped with the
+        # pages themselves.
+        self._search_catalogue = []
+        self._build_universal_search(parent)
+
         # Full width: the strip keeps its own side padding, because the end
         # tabs' feet reach past their boxes, and it draws the line the tabs
         # stand on across the whole window, as the old divider did.
@@ -2519,6 +2925,31 @@ class AppWindow:
         self._build_library_page(self._snippets_frame, "snippets")
         self._build_phrases_page(self._phrases_frame)
 
+        # The pages themselves, ahead of the settings so a page wins a tie with
+        # a setting that merely mentions it.
+        self._search_catalogue[:0] = [
+            {"kind": "page", "title": "Home",
+             "subtext": "Your impact: time saved, dictation speed and day "
+             "streak.", "keywords": "impact stats time saved streak speed "
+             "dashboard", "target": ("tab", "home")},
+            {"kind": "page", "title": "Learning",
+             "subtext": "The words, snippets and phrases the app has learned "
+             "from you.", "keywords": "vocabulary snippets phrases learned",
+             "target": ("tab", "learning")},
+            {"kind": "page", "title": "Hotkey",
+             "subtext": "Change the keys you hold to dictate, plus the "
+             "push-to-talk and refine keys.", "keywords": "shortcut change keys "
+             "push to talk ptt refine bind", "target": ("tab", "hotkey")},
+            {"kind": "page", "title": "History",
+             "subtext": "Every past dictation, searchable, with audio playback.",
+             "keywords": "past transcripts audio playback recordings",
+             "target": ("tab", "history")},
+            {"kind": "page", "title": "Settings",
+             "subtext": "All options and preferences.",
+             "keywords": "options preferences configuration",
+             "target": ("tab", "settings")},
+        ]
+
         # Route wheel input exactly once. The previous local + bind_all Hotkey
         # bindings handled the same event twice when the pointer was over Canvas.
         self._root.bind_all("<MouseWheel>", self._route_mousewheel)
@@ -2554,6 +2985,11 @@ class AppWindow:
     def _switch_dash_tab(self, name: str) -> None:
         previous = getattr(self, "_current_tab", None)
         self._current_tab = name
+
+        # A search results panel floats over the content area, so it must not
+        # linger over the tab we just switched to.
+        if hasattr(self, "_usearch_panel"):
+            self._hide_usearch_panel()
 
         # A capture left running on another tab keeps every global bind
         # suspended and swallows keystrokes meant for this one.
@@ -2973,6 +3409,10 @@ class AppWindow:
         descendant's bindtags, so filter to the toplevel's own events."""
         if event.widget is not self._root:
             return
+        # A resize moves the search bar, so a placed results panel would sit at
+        # the old spot — drop it and let the next keystroke re-place it.
+        if hasattr(self, "_usearch_panel"):
+            self._hide_usearch_panel()
         # Any root size change reflows the whole layout; stale pixels from the
         # old layout are what showed as duplicated/ghost rows after a resize
         # (including the login→dashboard size jump). One debounced async
@@ -6422,6 +6862,7 @@ class AppWindow:
                         wraplength=260)
         desc.pack(fill="x")
         self._autowrap(desc)
+        self._register_search_setting(title, subtext, key)
         return var
 
     def _link_card(self, parent, kind: str, title: str, subtext: str,
@@ -6459,6 +6900,27 @@ class AppWindow:
             w.configure(cursor="hand2")
             w.bind("<Button-1>", _open)
 
+        # A link card opens a full page, so the universal search treats it as a
+        # page jump rather than a setting to filter.
+        cat = getattr(self, "_search_catalogue", None)
+        if cat is not None:
+            cat.append({"kind": "page", "title": title, "subtext": subtext,
+                        "keywords": kind, "location": "",
+                        "target": ("tab", kind)})
+
+    def _register_search_setting(self, title: str, subtext: str,
+                                 key: str = "") -> None:
+        """Add a toggle/dropdown setting to the universal-search catalogue.
+        `_cat_location` names the tab currently being built, so a Learning
+        toggle lands there and a Settings one in Settings."""
+        cat = getattr(self, "_search_catalogue", None)
+        if cat is None or not title:
+            return
+        loc, tab = getattr(self, "_cat_location", ("Settings", "settings"))
+        cat.append({"kind": "setting", "title": title, "subtext": subtext,
+                    "keywords": (key or "").replace("_", " "),
+                    "location": loc, "target": ("setting", tab, title)})
+
     # ── Learning tab ─────────────────────────────────────────────────────────
 
     def _build_learning_tab(self, parent: tk.Frame) -> None:
@@ -6467,6 +6929,7 @@ class AppWindow:
         These were three rows halfway down Settings, which is not where anyone
         looks for them. Each card still opens the same full page, and that
         page's Back returns here."""
+        self._cat_location = ("Learning", "learning")
         self._setting_pills = getattr(self, "_setting_pills", {})
         self._setting_vars = getattr(self, "_setting_vars", {})
         self._learning_cv = ScrollPane(parent, bg=C["bg"])
@@ -6510,6 +6973,7 @@ class AppWindow:
         # strip) — a settings page this long is unusable if the search scrolls
         # away with the content. Same shared control as History and the
         # vocabulary / snippet pages.
+        self._cat_location = ("Settings", "settings")
         self._settings_query = ""
         self._settings_rows = []
         self._settings_sections = set()
@@ -6532,6 +6996,14 @@ class AppWindow:
             # Registered so the search filter knows which slaves are headers
             # (everything else between two headers belongs to the first).
             self._settings_sections.add(str(row))
+            # A section name is a searchable jump too: filtering Settings to it
+            # shows every card under it.
+            cat = getattr(self, "_search_catalogue", None)
+            if cat is not None:
+                cat.append({"kind": "setting", "title": title,
+                            "subtext": f"{title} settings.", "keywords": "",
+                            "location": "Settings",
+                            "target": ("setting", "settings", title)})
 
         def _card_icon(row, icon: str, bg=None):
             self._card_glyph(row, icon, bg)
@@ -7254,6 +7726,23 @@ class AppWindow:
         save_btn.pack(side="right")
 
         self._index_settings_search()
+
+        # Named non-toggle settings the universal search should reach directly.
+        # Their titles match the card text, so the jump filters Settings to them.
+        cat = getattr(self, "_search_catalogue", None)
+        if cat is not None:
+            cat.append({"kind": "setting", "title": "Sentence Endings",
+                        "subtext": "Whether a full stop is added at the end of "
+                        "a dictation: Smart, Always or Never.",
+                        "keywords": "end punctuation full stop period",
+                        "location": "Settings",
+                        "target": ("setting", "settings", "sentence endings")})
+            cat.append({"kind": "setting", "title": "Popup Position",
+                        "subtext": "Where the recording pill sits on screen and "
+                        "how far it is nudged from the taskbar.",
+                        "keywords": "popup pill position height align nudge",
+                        "location": "Settings",
+                        "target": ("setting", "settings", "popup position")})
 
     # ── Settings search ──────────────────────────────────────────────────────
 

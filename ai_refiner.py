@@ -273,14 +273,27 @@ class AIRefiner:
                 "prose, and do not add any list that is not already there."
             )
 
-        # Line breaks the app laid out (email greeting and sign-off, auto
-        # paragraphs) are shape, not errors. context_fix also rejects any
-        # result that moves one; saying so up front saves the wasted pass.
-        if mode == "context_fix" and "\n" in text:
-            prompt += (
-                " Keep every line break exactly where it is: same lines, same "
-                "blank lines, nothing joined and nothing split."
-            )
+        # Line breaks already in the text (an email's greeting and sign-off,
+        # auto paragraphs, or anything the user typed) are layout, not errors.
+        # Keep them by DEFAULT: a light-touch pass ("Fix All", context_fix) and
+        # any custom Ask ("make this better") must not flatten a laid-out email
+        # back into one line. Only the modes that exist TO restructure —
+        # email/formal/casual/concise/prompt_optimiser — are allowed to reflow.
+        # A custom instruction may still override this in its own words.
+        if "\n" in text and (custom_prompt or mode in ("punctuation",
+                                                       "context_fix")):
+            if custom_prompt:
+                prompt += (
+                    " Unless the instruction above explicitly asks you to "
+                    "change the layout, keep every existing line break and "
+                    "blank line exactly where it is: same lines, same "
+                    "paragraphs, nothing joined and nothing split."
+                )
+            else:
+                prompt += (
+                    " Keep every line break exactly where it is: same lines, "
+                    "same blank lines, nothing joined and nothing split."
+                )
 
         # Email sign-off: hand the model the sender's real name so a bare
         # sign-off ("Thanks,") gets a name and no placeholder is invented.
