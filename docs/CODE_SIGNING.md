@@ -8,6 +8,33 @@ Signing runs in `.github/workflows/build-release.yml`, under the company
 
 Facts below were checked against Microsoft Learn on 2026-09-17.
 
+## Status: LIVE since 2026-09-23
+
+Identity validation passed on 2026-09-23 and Part 2 was completed the same day.
+**v1.6.88 is the first signed public release.** Both assets verify as
+
+```
+status: Valid  signer: CN=BRIGHTLINK (OS) LTD, O=BRIGHTLINK (OS) LTD, L=Syston, S=Leicester, C=GB
+```
+
+In place now: certificate profile `echopublic` on the `brightlinksigning`
+account (North Europe, Public Trust, Active), app registration
+`brightlink-echo-signing` holding **Artifact Signing Certificate Profile
+Signer** at the signing-account scope, a federated credential `github-release`
+on the `release` environment, and six repo variables including
+`REQUIRE_SIGNING=true`. No client secret exists.
+
+The federated credential uses the portal's **immutable-ID subject format**,
+`repo:RJMURPHY0@<orgId>/BrightLink-Echo@<repoId>:environment:release`. Those
+numeric IDs survive a repo rename, unlike the name-based form that the
+2026-09-22 rename would have broken.
+
+Parts 1 and 2 below are kept as the record of how it was set up, and as the
+runbook if the certificate profile or app registration ever has to be rebuilt.
+The one thing that must never change is the **certificate subject**: SmartScreen
+reputation binds to it, so street address and postcode were deliberately left
+out and the subject must stay exactly as above.
+
 ---
 
 ## What signing does, and what it does not
