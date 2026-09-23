@@ -5,6 +5,8 @@
 > **[⬇ Install BrightLink Echo](https://github.com/RJMURPHY0/BrightLink-Echo/releases/latest)**
 >
 > [Direct download (always latest)](https://github.com/RJMURPHY0/BrightLink-Echo/releases/latest/download/BrightLink-Echo.exe)
+>
+> Digitally signed by **BRIGHTLINK (OS) LTD**. Windows may still show an "unrecognised app" warning on first run — click **More info → Run anyway**. That prompt appears because the signing certificate is new, and it stops once enough people have installed.
 
 ---
 
@@ -33,7 +35,7 @@ Built for Windows. Transcription runs **fully locally** using [faster-whisper](h
 ### Option 1 — Single exe (recommended, no Python needed)
 
 1. [**Download BrightLink-Echo.exe**](https://github.com/RJMURPHY0/BrightLink-Echo/releases/latest/download/BrightLink-Echo.exe)
-2. Double-click it — if Windows shows a SmartScreen warning, click **More info → Run anyway**
+2. Double-click it. Windows may show a SmartScreen warning: click **More info → Run anyway**. The exe is signed by BRIGHTLINK (OS) LTD, so the dialog names the publisher; the warning is purely because the certificate is new and has not built reputation yet
 3. The app starts immediately in your system tray
 4. **Installs itself**: on first run it becomes a proper Windows application: a **Start-menu entry** (so it turns up in Start and in search), a **desktop shortcut**, and an entry in **Settings → Apps → Installed apps** with a working uninstaller. No admin rights needed; everything is per-user.
 5. **Auto-starts with Windows**: the app registers itself as a Task Scheduler logon task, so it launches automatically every time you log in (with above-normal priority to load before Teams, OneDrive, etc.)
