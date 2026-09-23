@@ -49,6 +49,7 @@ from config import Config
 # window could paint. They are imported inside _init_core (background thread)
 # so first paint is near-instant; _core_ready gates everything that needs them.
 from spoken_commands import apply_spoken_commands
+from disfluency import destutter
 from list_format import format_lists
 from email_format import format_email, format_signoff, is_email_app
 import sentence_end
@@ -62,7 +63,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.6.92"
+APP_VERSION = "1.6.93"
 
 
 class _RECT(ctypes.Structure):
@@ -1633,6 +1634,16 @@ class WhisperFlowApp:
             self.hotkey_manager.set_idle()
             return
 
+        # Stutters and restarts once more over the WHOLE dictation. The engines
+        # already run destutter per streamed chunk, so a double that straddles
+        # a chunk join ("…you" | "you click…") used to survive. Idempotent on
+        # text it already cleaned. Skipped under Live Typing: those words are
+        # already in the document.
+        if transcribed_text and not getattr(self.config, "live_inject", False):
+            _ds = destutter(transcribed_text, source="assembled")
+            if _ds != transcribed_text:
+                transcribed_text = _ds
+
         # Spoken symbol commands: "slash settings" -> "/settings". Applied once
         # here so injection, the popup, history logging, the upgrade passes and
         # the live-typing reconcile all see the same converted text.
@@ -3102,6 +3113,7 @@ class WhisperFlowApp:
             from injector import (
                 _Input, _KbdInput, _INPUT_KEYBOARD, _KEYEVENTF_KEYUP,
                 _get_focused_child, _release_modifiers, Injector,
+                _clipboard_snapshot, _clipboard_write_snapshot,
             )
             # Private WinDLL instance: typing a function on the CACHED
             # ctypes.windll.user32 rewrites it for every module (the
@@ -3110,9 +3122,10 @@ class WhisperFlowApp:
             u32 = ctypes.WinDLL("user32")
             u32.GetClipboardSequenceNumber.restype = ctypes.wintypes.DWORD
 
-            # Preserve whatever the user had copied. Refining a selection must
-            # never silently eat their clipboard.
-            original_clip = self._read_clipboard()
+            # Preserve whatever the user had copied, every format (an image or
+            # copied files as well as text). Refining a selection must never
+            # silently eat their clipboard.
+            original_clip = _clipboard_snapshot()
             seq0 = u32.GetClipboardSequenceNumber()
 
             # The chord modifier (Alt / Ctrl / Shift / Win) may still be held; a
@@ -3146,7 +3159,12 @@ class WhisperFlowApp:
             # Put the user's clipboard back (bump=False so the restore is not
             # mistaken for a fresh paste by the delayed-restore guard).
             try:
-                Injector._clipboard_set(original_clip, bump=False)
+                if original_clip:
+                    if (not _clipboard_write_snapshot(original_clip)
+                            and original_clip.text):
+                        Injector._clipboard_set(original_clip.text, bump=False)
+                else:
+                    Injector._clipboard_clear()
             except Exception:
                 pass
 

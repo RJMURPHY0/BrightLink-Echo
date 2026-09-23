@@ -71,10 +71,69 @@ class FunctionDoubleTests(unittest.TestCase):
         self.assertEqual(disfluency.destutter("turn it on on on or off"),
                          "turn it on or off")
 
-    def test_capital_second_is_kept_and_stays_capital(self):
-        # "restricted and And if" — the second, capitalised copy is kept.
+    def test_a_restart_capital_mid_sentence_is_lowered(self):
+        # "restricted and And if": the engine capitalised the restart after the
+        # pause, but the dropped copy shows the word is mid-sentence.
         self.assertEqual(disfluency.destutter("ones you restricted and And if I"),
-                         "ones you restricted And if I")
+                         "ones you restricted and if I")
+        self.assertEqual(disfluency.destutter("make sure it's also a A thing"),
+                         "make sure it's also a thing")
+
+    def test_i_and_acronyms_keep_their_capitals(self):
+        self.assertEqual(disfluency.destutter("so i I think"), "so I think")
+        self.assertEqual(disfluency.destutter("then it IT said"), "then it IT said")
+
+    def test_wider_never_doubled_words(self):
+        # From real dictations (2026-09-21..23).
+        for src, want in [
+            ("have like if if you can", "have like if you can"),
+            ("so it's it's it's much easier", "so it's much easier"),
+            ("Yeah, just just just come up with", "Yeah, just come up with"),
+            ("What what do you think", "What do you think"),
+            ("it would be more more potentially", "it would be more potentially"),
+            ("Can you also make make it so", "Can you also make it so"),
+            ("an easy transition between between them", "an easy transition between them"),
+            ("stuff that I've I've liked", "stuff that I've liked"),
+            ("so yeah, maybe maybe leave it", "so yeah, maybe leave it"),
+            ("because they’re they’re things", "because they’re things"),
+        ]:
+            self.assertEqual(disfluency.destutter(src), want, src)
+
+
+class PhraseRestartTests(unittest.TestCase):
+    """A 2-4 word unfinished phrase said twice in a row. All from real
+    dictations."""
+
+    def test_restarts_collapse(self):
+        for src, want in [
+            ("notes or something in the in the CRM", "notes or something in the CRM"),
+            ("the thing to be to be like the side", "the thing to be like the side"),
+            ("you know, it will it will basically tell you",
+             "you know, it will basically tell you"),
+            ("Bring that up to fill the fill the space.", "Bring that up to fill the space."),
+            ("the home page? Does it does it like slowly change",
+             "the home page? Does it like slowly change"),
+            ("and then, like, if you're If you're working overtime",
+             "and then, like, if you're working overtime"),
+            ("I want to I want to go", "I want to go"),
+            ("in the in the in the CRM", "in the CRM"),
+        ]:
+            self.assertEqual(disfluency.destutter(src), want, src)
+
+    def test_a_restart_at_the_start_keeps_its_capital(self):
+        self.assertEqual(disfluency.destutter("In the in the morning we go"),
+                         "In the morning we go")
+
+    def test_emphasis_and_idioms_survive(self):
+        for s in ["I know, I know, it's late.", "come on, come on, hurry up",
+                  "thank you thank you so much", "it went on and on and on",
+                  "over and over and over again", "breathe in and out, in and out",
+                  "you know you know", "It's fine, it's fine.", "do it, do it",
+                  "one two one two testing", "much much better",
+                  "hold on hold on", "For example. For example, if",
+                  "Is it? Is it?", "blah blah blah", "the dot dot dot menu",
+                  "yeah yeah and then"]:
+            self.assertEqual(disfluency.destutter(s), s, s)
 
 
 class NeverTouchTests(unittest.TestCase):
@@ -143,24 +202,40 @@ class CorpusRegressionTests(unittest.TestCase):
 
     def _explained(self, before: str, after: str) -> bool:
         """The collapser only ever DELETES tokens, never invents or reorders
-        them, and every deleted token is either a collapsible function word or a
-        false-start fragment of some word in the utterance. Compared on token
-        KEYS so a carried capital ("Rec" -> "Recent") is not read as a new word.
+        them, and every deleted run is a collapsible function word, a
+        false-start fragment of some word in the utterance, or one copy of an
+        exactly repeated phrase. Compared on token KEYS so a carried capital
+        ("Rec" -> "Recent") is not read as a new word.
         """
-        from collections import Counter
         a = [disfluency._key(t) for t in before.split()]
         b = [disfluency._key(t) for t in after.split()]
-        if len(b) >= len(a):            # a real change only ever shortens
+        if len(b) >= len(a):
             return False
-        if Counter(b) - Counter(a):     # no key may appear that wasn't there
-            return False
-        for w in (Counter(a) - Counter(b)).elements():
-            if w in disfluency._DUP_COLLAPSE:
+        i = j = 0
+        while i < len(a):
+            if j < len(b) and a[i] == b[j]:
+                i += 1
+                j += 1
                 continue
-            if any(disfluency._is_false_start(w, f) for f in a):
-                continue
-            return False
-        return True
+            # a deleted run starting at a[i]: find where b resumes
+            ok = False
+            for n in range(1, 5):
+                run = a[i:i + n]
+                if len(run) < n:
+                    break
+                repeats = run == a[i - n:i] or run == a[i + n:i + 2 * n]
+                single = n == 1 and (
+                    run[0] in disfluency._DUP_COLLAPSE
+                    or any(disfluency._is_false_start(run[0], f) for f in a))
+                if repeats or single:
+                    rest = a[i + n:]
+                    if rest[:1] == b[j:j + 1] or (not rest and j == len(b))                             or rest[:1] == a[i:i + 1]:
+                        i += n
+                        ok = True
+                        break
+            if not ok:
+                return False
+        return j == len(b)
 
     def test_every_corpus_change_is_a_known_stutter(self):
         texts = self._load()

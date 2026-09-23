@@ -21,8 +21,13 @@ Two guards, and a pair only collapses when it clears one of two narrow shapes:
     and `cur` is not merely `prev` plus an inflection. "rec" -> "recent",
     "prob" -> "probably", "config" -> "configuration". The fragment is dropped.
 
-  * FUNCTION-WORD DOUBLE — an exact adjacent repeat of a function word that is
-    never validly said twice ("the the", "I I", "to to"). The first is dropped.
+  * FUNCTION-WORD DOUBLE — an exact adjacent repeat of a word that is never
+    validly said twice ("the the", "I I", "if if", "it's it's", "just just").
+    The first is dropped.
+
+  * PHRASE RESTART — a 2-4 word unfinished phrase said twice in a row ("in the
+    in the CRM", "it will it will be"). The first copy is dropped. See
+    `_is_phrase_restart` for what keeps emphasis ("I know, I know") intact.
 
 Everything else is left exactly as spoken. In particular:
 
@@ -75,7 +80,56 @@ to of in on at for with from by
 and or but
 is was are am be been will would can could should do does did has have
 this these those your my our
+if whether because
+what when where why how which whose
+into onto about between through during without within across against
+their his her its them us me
+just maybe also actually basically probably
+more
+make get want need think
+it's that's there's what's he's she's let's
+i'm i've i'll i'd
+you're you've you'll you'd
+we're we've we'll we'd
+they're they've they'll they'd
+don't doesn't didn't can't couldn't won't wouldn't shouldn't
+isn't wasn't aren't weren't haven't hasn't
 """.split())
+
+# ── Phrase restarts ──────────────────────────────────────────────────────────
+# A 2-4 word phrase said twice in a row ("in the in the CRM", "it will it will
+# just be", "fill the fill the space") is a restart: the speaker began, paused
+# and began again. The first copy is dropped.
+#
+# An exact repeat is also how people EMPHASISE ("I know, I know", "come on,
+# come on", "thank you, thank you", "on and on and on"), so a phrase only
+# collapses when it is visibly unfinished:
+#   * it LEADS with a word that cannot start a finished emphatic phrase
+#     (a preposition, article, conjunction, wh-word, "if", "to" or an
+#     auxiliary): "in the", "to be", "does it", "if you're", "it will" (below);
+#   * or it ENDS on a word that leaves the phrase hanging (an article, a
+#     possessive, "to", "of" or an auxiliary): "fill the", "I want to",
+#     "it will".
+# A phrase ending in "and"/"or" is never collapsed: "on and on and on" and
+# "over and over" are idioms, not restarts.
+_PHRASE_LEAD = frozenset("""
+the a an this these those that my your our their his her its
+to of in on at for with from by into onto about over under after before
+between through during without within across against around
+and or but so because if whether then
+what when where why how which who whose
+is was are am be been will would can could should shall may might must
+does did has have had
+""".split())
+_PHRASE_DANGLE = frozenset("""
+the a an this these those my your our their his her its
+to of
+is was are am be been will would can could should shall may might must
+does did has have had
+""".split())
+_PHRASE_NEVER_END = frozenset(("and", "or", "nor"))
+_I_FORMS = frozenset(("i", "i'm", "i've", "i'll", "i'd"))
+_PHRASE_MIN, _PHRASE_MAX = 2, 4
 
 # Ordinary words that may look like a fragment of the next word but are complete
 # words in their own right, and so must never be dropped ("the theory", "he
@@ -156,7 +210,7 @@ def _report(detail: dict) -> None:
 
 def _key(tok: str) -> str:
     """Comparison key: edge punctuation and case carry no stutter information."""
-    return tok.strip(_STRIP).lower()
+    return tok.strip(_STRIP).lower().replace("’", "'")
 
 
 def _ends_sentence(tok: str) -> bool:
@@ -191,6 +245,25 @@ def _is_function_double(prev_key: str, cur_key: str) -> bool:
     return prev_key == cur_key and prev_key in _DUP_COLLAPSE
 
 
+def _is_acronym(tok: str) -> bool:
+    core = tok.strip(_STRIP)
+    return len(core) > 1 and core.isupper()
+
+
+def _is_phrase_restart(keys: List[str]) -> bool:
+    """`keys` (one copy of an exactly repeated phrase) is an unfinished
+    fragment, so the repeat is a restart rather than emphasis."""
+    if not (_PHRASE_MIN <= len(keys) <= _PHRASE_MAX) or not all(keys):
+        return False
+    if len(set(keys)) == 1:
+        return False                    # "no no", "very very": single-word rule
+    # "on and on", "in and out", "black and white": a conjunction inside the
+    # phrase makes it a pair, and pairs are repeated for effect.
+    if any(k in _PHRASE_NEVER_END for k in keys[1:]):
+        return False
+    return keys[0] in _PHRASE_LEAD or keys[-1] in _PHRASE_DANGLE
+
+
 def _carry_capital(dropped: str, kept: str) -> str:
     """Move a leading capital from the dropped false-start onto the kept word.
 
@@ -203,6 +276,16 @@ def _carry_capital(dropped: str, kept: str) -> str:
     k = kept[lead:]
     if d and k and d[0].isupper() and k[:1].islower():
         return kept[:lead] + k[0].upper() + k[1:]
+    # The reverse: "also a A thing", "if you're If you're working". The engine
+    # capitalised the restart after the pause, but the dropped copy shows the
+    # word sits mid-sentence. Only for a function word (never a name) and
+    # never for "I".
+    ck = _key(kept)
+    if (d and k and d[0].islower() and k[:1].isupper()
+            and not k[1:2].isupper()            # an acronym keeps its caps
+            and (ck in _DUP_COLLAPSE or ck in _PHRASE_LEAD)
+            and ck not in _I_FORMS):
+        return kept[:lead] + k[0].lower() + k[1:]
     return kept
 
 
@@ -233,11 +316,47 @@ def destutter(text: str, source: str = "") -> str:
                               or _is_function_double(pk, ck)):
                 # The last kept token is the false start / first double: drop it
                 # and keep this one, carrying any sentence-leading capital across.
+                if _is_function_double(pk, ck) and (
+                        _is_acronym(final[last]) != _is_acronym(tok)):
+                    last = i            # "it IT", "us US": two different words
+                    continue
                 final[i] = _carry_capital(final[last], tok)
                 dropped.add(last)
                 last = i
                 continue
         last = i
+
+    # ── Phase 1b: phrase restarts, over the tokens still standing. Longest
+    # first at each position; after a collapse the scan steps back one phrase
+    # so "in the in the in the" resolves, but never restarts from the top
+    # (that made a long pathological input quadratic: 1.4s on 1,500 words). ──
+    kept = [i for i in range(len(toks)) if i not in dropped]
+    kk = [_key(final[i]) for i in kept]
+    j = 0
+    while j < len(kept):
+        hit = 0
+        for n in range(_PHRASE_MAX, _PHRASE_MIN - 1, -1):
+            if j + 2 * n > len(kept):
+                continue
+            ka = kk[j:j + n]
+            if ka != kk[j + n:j + 2 * n] or not _is_phrase_restart(ka):
+                continue
+            if any(_ends_sentence(final[x]) for x in kept[j:j + n]):
+                continue
+            # "on and on and on", "over and over and over": the X of an
+            # "and X" repeat sits just before it. An idiom, not a restart.
+            if ka[0] in _PHRASE_NEVER_END and j > 0 and kk[j - 1] == ka[-1]:
+                continue
+            hit = n
+            break
+        if not hit:
+            j += 1
+            continue
+        final[kept[j + hit]] = _carry_capital(final[kept[j]], final[kept[j + hit]])
+        dropped.update(kept[j:j + hit])
+        del kept[j:j + hit]
+        del kk[j:j + hit]
+        j = max(0, j - _PHRASE_MAX)
 
     if not dropped:
         return text

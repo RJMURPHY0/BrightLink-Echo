@@ -132,9 +132,13 @@ class Config:
     # read once from app_settings on a fresh install; never refetched).
     window_sizes: dict = field(default_factory=dict)
     # Which dashboard layout the sizes above were saved against. Sizes saved
-    # before the compact layout (rev 1) are clamped to the new default height
-    # once; see AppWindow._migrate_window_sizes.
+    # against an older layout are brought to the current one once; see
+    # AppWindow._migrate_window_sizes.
     window_layout_rev: int = 0
+    # Dashboard spacing, {gap_name: px}, overriding app_window._GAP_DEFAULTS.
+    # Set by the super admin in the app and pushed to app_settings; every
+    # other install mirrors the pushed value here so it holds offline.
+    dashboard_gaps: dict = field(default_factory=dict)
     # Custom vocabulary and snippets, keyed by signed-in account email exactly
     # like window_sizes above ("_local" while signed out) — two people sharing
     # a machine must not inherit each other's word lists. Entries are dicts;

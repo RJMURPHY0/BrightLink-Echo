@@ -6,6 +6,10 @@ clipboard, or non-text content we could not back up) the old code simply
 returned — so the dictation stayed on the clipboard, which is exactly what the
 Copy to Clipboard setting is supposed to opt IN to. With the setting off the
 clipboard is emptied instead.
+
+v1.6.93: the backup is a full snapshot (images, copied files, rich text), so a
+copied image survives a dictation with the setting off, and with the setting on
+nothing is restored at all.
 """
 import os
 import sys
@@ -94,6 +98,104 @@ class ClipboardRestoreTests(unittest.TestCase):
             self._settle()
         self.assertEqual(0, self.cleared)
         self.assertEqual(["the user's own copy"], self.restored)
+
+    def _with_fake_writer(self, result):
+        written = []
+        real = I._clipboard_write_snapshot
+
+        def _fake(snap):
+            written.append(snap)
+            return result
+        I._clipboard_write_snapshot = _fake
+        self.addCleanup(setattr, I, "_clipboard_write_snapshot", real)
+        return written
+
+    def test_a_copied_image_comes_back_when_the_setting_is_off(self):
+        # The reported case: copy an image, dictate, the image must still be
+        # there to paste afterwards.
+        I.Injector.keep_clipboard = False
+        written = self._with_fake_writer(True)
+        snap = I.ClipboardSnapshot([(8, b"DIB bytes")], "")
+        with _NoDelay():
+            I.Injector._clipboard_restore(snap, I._clip_gen)
+            self._settle()
+        self.assertEqual([snap], written)
+        self.assertEqual(0, self.cleared)
+        self.assertEqual([], self.restored)
+
+    def test_setting_on_never_restores_so_the_dictation_stays(self):
+        I.Injector.keep_clipboard = True
+        written = self._with_fake_writer(True)
+        with _NoDelay():
+            I.Injector._clipboard_restore(
+                I.ClipboardSnapshot([(8, b"DIB")], ""), I._clip_gen)
+            I.Injector._clipboard_restore("old text", I._clip_gen)
+            self._settle()
+        self.assertEqual([], written)
+        self.assertEqual([], self.restored)
+        self.assertEqual(0, self.cleared)
+
+    def test_a_failed_snapshot_write_still_puts_the_text_back(self):
+        I.Injector.keep_clipboard = False
+        self._with_fake_writer(False)
+        snap = I.ClipboardSnapshot(
+            [(13, "hello\x00".encode("utf-16-le"))], "hello")
+        with _NoDelay():
+            I.Injector._clipboard_restore(snap, I._clip_gen)
+            self._settle()
+        self.assertEqual(["hello"], self.restored)
+
+    def test_an_empty_snapshot_clears_like_empty_text(self):
+        I.Injector.keep_clipboard = False
+        self._with_fake_writer(True)
+        with _NoDelay():
+            I.Injector._clipboard_restore(I.ClipboardSnapshot([], ""), I._clip_gen)
+            self._settle()
+        self.assertEqual(1, self.cleared)
+
+
+@unittest.skipUnless(sys.platform == "win32", "Win32 clipboard")
+class RealClipboardRoundTripTests(unittest.TestCase):
+    """Against the real Windows clipboard: an image + HTML + text snapshot
+    survives a dictation overwriting it. The user's own clipboard is saved
+    first and put back afterwards."""
+
+    def setUp(self):
+        self._saved = I._clipboard_snapshot()
+
+    def tearDown(self):
+        if self._saved:
+            I._clipboard_write_snapshot(self._saved)
+        else:
+            I.Injector._clipboard_clear()
+
+    def test_image_html_and_text_survive_a_paste_overwrite(self):
+        import ctypes
+        import struct
+        hdr = struct.pack("<IiiHHIIiiII", 40, 2, 2, 1, 32, 0, 16, 0, 0, 0, 0)
+        dib = hdr + bytes([255, 0, 0, 255] * 4)
+        html = ctypes.windll.user32.RegisterClipboardFormatW("HTML Format")
+        self.assertTrue(I._clipboard_write_snapshot(I.ClipboardSnapshot(
+            [(8, dib), (html, b"<b>hi</b>\x00"),
+             (13, "caption\x00".encode("utf-16-le"))], "caption")))
+
+        ok, prev = I.Injector._clipboard_set("dictated words")
+        self.assertTrue(ok)
+        self.assertIsInstance(prev, I.ClipboardSnapshot)
+        self.assertEqual("dictated words", I._clipboard_snapshot().text)
+
+        self.assertTrue(I._clipboard_write_snapshot(prev))
+        back = dict(I._clipboard_snapshot().formats)
+        self.assertEqual(dib, back[8][:len(dib)])
+        self.assertTrue(back[html].startswith(b"<b>hi</b>"))
+        self.assertEqual("caption", I._clipboard_snapshot().text)
+
+    def test_ole_plumbing_and_gdi_handles_are_never_copied(self):
+        self.assertTrue(I._snapshot_skips(2))       # CF_BITMAP
+        self.assertTrue(I._snapshot_skips(14))      # CF_ENHMETAFILE
+        self.assertTrue(I._snapshot_skips(0x300))   # GDI object range
+        self.assertFalse(I._snapshot_skips(8))      # CF_DIB
+        self.assertFalse(I._snapshot_skips(15))     # CF_HDROP (copied files)
 
 
 class SettingWiringTests(unittest.TestCase):

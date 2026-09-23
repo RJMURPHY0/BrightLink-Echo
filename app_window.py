@@ -7,6 +7,7 @@ Dark theme with rounded-corner cards via Canvas.
 
 import brand
 import bisect
+import json
 import threading
 import time
 import app_search
@@ -47,15 +48,38 @@ C = {
 }
 
 WINDOW_W = 420
-# Home's natural height (measured, and pinned by tests/test_app_window_sizing):
-# every Home card on screen with no scrolling. It was 680, which on a 150%
-# laptop left ~50px of the screen and made every drag trip Snap Layouts. The
-# Hotkey tab, which set that figure, scrolls on its ScrollPane like Settings.
-DASH_H   = 568
-# Bump when the dashboard's natural height drops, so sizes saved against the
-# taller layout are clamped once (_migrate_window_sizes) rather than leaving
-# an empty band under the cards.
-_WINDOW_LAYOUT_REV = 1
+# Home's natural height at _GAP_DEFAULTS (measured 663, pinned by
+# tests/test_app_window_sizing) plus a few px under the words bar. The v1.6.90
+# design at 680 actually needed ~703 and clipped; trimming the gaps (22 above
+# and 34 below the logo, mostly) is what fits it. The Hotkey tab scrolls its
+# last few px on its ScrollPane, like Settings.
+DASH_H   = 670
+# Bump when the dashboard's natural height changes, so sizes saved against the
+# old layout are brought to the new one once (_migrate_window_sizes). Rev 1 was
+# the v1.6.91 compact layout (568); rev 2 restores the v1.6.90 design.
+_WINDOW_LAYOUT_REV = 2
+
+# ── Dashboard spacing ─────────────────────────────────────────────────────────
+# Every vertical gap in the dashboard chrome and on Home, by name, in px. The
+# defaults are the v1.6.90 design with its dead space trimmed (the logo had 22
+# above and 22 below it, plus 12 more before the search bar). The super admin
+# drags these in the app (footer: Spacing) and the result is pushed to
+# app_settings["dashboard_gaps"], which every install applies on launch.
+# DASH_H is the natural height at these defaults; a changed gap moves the
+# window height by the same amount (_natural_dash_h), so nothing clips and no
+# empty band appears.
+_GAP_DEFAULTS = {
+    "logo_top": 14,        # window top -> logo
+    "logo_search": 20,     # logo -> search bar
+    "search_line": 10,     # search bar -> separation line
+    "line_tabs": 8,        # separation line -> tabs
+    "tabs_content": 8,     # tabs -> first card
+    "status_impact": 14,   # status card -> "Your impact"
+    "impact_cards": 6,     # "Your impact" -> the three cards
+    "cards_words": 8,      # the cards -> words bar
+    "footer": 8,           # footer padding, above and below
+}
+_GAP_MIN, _GAP_MAX = 0, 60
 
 # Resizable-window bounds. Content reflows down to MIN_W; anything narrower
 # would clip the impact cards and the hotkey pills.
@@ -2432,18 +2456,17 @@ class AppWindow:
         # Wrap header + divider in a container so it can be hidden during login
         self._header_outer = tk.Frame(self._root, bg=C["bg"])
 
-        # 10px above and below: the header used to take 22 + 22, and on a 150%
-        # laptop the dashboard then filled the whole screen height.
-        header = tk.Frame(self._header_outer, bg=C["bg"], pady=10)
-        header.pack(fill="x")
+        # Spacing above the logo is a named gap (logo_top); the space below it
+        # belongs to the search bar's gap, so the header carries none.
+        header = tk.Frame(self._header_outer, bg=C["bg"])
+        header.pack(fill="x", pady=(self._gap("logo_top"), 0))
+        self._gap_widget("logo_top", header)
 
         # The BrightLink | Echo lockup, centred on the WINDOW. It used to be
         # packed beside the gear, which centred it in the space left of the
         # gear and put it visibly off-centre.
         from logo_cache import get_lockup_photo
-        # 34, not 42: the lockup still reads at a glance, and the splash and
-        # sign-in pages (which have the room) keep the full 42.
-        self._logo_photo = get_lockup_photo(self._root, C["bg"], height=34)
+        self._logo_photo = get_lockup_photo(self._root, C["bg"], height=42)
 
         if self._logo_photo:
             tk.Label(header, image=self._logo_photo, bg=C["bg"]).pack()
@@ -2459,7 +2482,7 @@ class AppWindow:
         self._gear_btn = tk.Label(
             header, text="⚙",
             fg=C["subtext"], bg=C["bg"],
-            font=("Segoe UI", 15), cursor="hand2", padx=12,
+            font=("Segoe UI", 17), cursor="hand2", padx=12,
         )
         self._gear_btn.place(relx=1.0, rely=0.5, x=-4, anchor="e")
         self._gear_btn.bind("<Button-1>", lambda _e: self._switch_dash_tab("settings"))
@@ -2488,7 +2511,8 @@ class AppWindow:
 
     def _build_universal_search(self, parent: tk.Frame) -> None:
         host = tk.Frame(parent, bg=C["bg"])
-        host.pack(fill="x")
+        host.pack(fill="x", pady=(self._gap("logo_search"), 0))
+        self._gap_widget("logo_search", host)
         self._usearch_host = host
         self._usearch_panel = None
         self._usearch_query = ""
@@ -2507,7 +2531,7 @@ class AppWindow:
         self._usearch_force_dropdown = False
         self._usearch_filter_hits = None
 
-        height = 38
+        height = 42
         cv = tk.Canvas(host, height=height, bg=C["bg"], highlightthickness=0,
                        bd=0)
         cv.pack(fill="x", padx=20)
@@ -3170,8 +3194,9 @@ class AppWindow:
         # Ryan's layout: logos, then the search bar directly beneath them, then
         # a separation line, then the tabs. C["border"] (not the near-invisible
         # divider) so the line actually reads.
-        tk.Frame(parent, bg=C["border"], height=1).pack(fill="x",
-                                                        pady=(10, 0))
+        _line = tk.Frame(parent, bg=C["border"], height=1)
+        _line.pack(fill="x", pady=(self._gap("search_line"), 0))
+        self._gap_widget("search_line", _line)
 
         # Full width: the strip keeps its own side padding, because the end
         # tabs' feet reach past their boxes, and it draws the line the tabs
@@ -3179,11 +3204,14 @@ class AppWindow:
         self._tab_strip = bookmark_tabs.BookmarkTabs(
             parent, self._DASH_TABS, on_select=self._switch_dash_tab,
             bg=C["bg"], line=C["border"])
-        self._tab_strip.pack(fill="x", pady=(8, 0))
+        self._tab_strip.pack(fill="x", pady=(self._gap("line_tabs"), 0))
+        self._gap_widget("line_tabs", self._tab_strip)
 
         # Content area — all tab frames stacked in same grid cell, tkraise() to switch
         self._dash_content = tk.Frame(parent, bg=C["bg"])
-        self._dash_content.pack(fill="both", expand=True, pady=(8, 0))
+        self._dash_content.pack(fill="both", expand=True,
+                                pady=(self._gap("tabs_content"), 0))
+        self._gap_widget("tabs_content", self._dash_content)
         self._dash_content.grid_rowconfigure(0, weight=1)
         self._dash_content.grid_columnconfigure(0, weight=1)
 
@@ -3251,8 +3279,9 @@ class AppWindow:
                 pass
 
         # Footer
-        footer = tk.Frame(parent, bg=C["bg"], padx=24, pady=6)
+        footer = tk.Frame(parent, bg=C["bg"], padx=24, pady=self._gap("footer"))
         footer.pack(fill="x", side="bottom")
+        self._gap_widget("footer", footer)
 
         email = self._auth.user_email or ""
         self._email_display = tk.Label(
@@ -3265,6 +3294,9 @@ class AppWindow:
         self._ghost_btn(footer, "Quit", self._do_quit).pack(side="right", padx=(8, 0))
         self._sign_btn = self._ghost_btn(footer, "Sign Out", self._do_sign_action)
         self._sign_btn.pack(side="right")
+        # Super admin only (shown by _apply_auth_ui): drag the dashboard's gaps.
+        self._spacing_btn = self._ghost_btn(footer, "Spacing",
+                                            self._toggle_spacing_edit)
 
         tk.Frame(parent, bg=C["divider"], height=1).pack(fill="x", before=footer)
 
@@ -3376,6 +3408,10 @@ class AppWindow:
             self._refresh_library_counts()
         elif name in self._LIB_SPECS:
             self._render_library(name)
+
+        # Spacing edit: the gaps on screen changed with the page.
+        if getattr(self, "_spacing_edit", False):
+            self._root.after_idle(self._place_gap_handles)
 
     def _build_embedded_login(self) -> None:
         from login_window import LoginWindow
@@ -3670,6 +3706,9 @@ class AppWindow:
         self._migrate_window_sizes()
         self._resize(*self._saved_dash_size())
         self._dash_visible = True
+        # The super admin's spacing, re-read every launch so a change reaches
+        # everyone without a release.
+        self._fetch_dashboard_gaps()
         # Fresh installs read the super-admin default size once (never again
         # after any size exists locally).
         self._maybe_fetch_install_default()
@@ -3699,12 +3738,13 @@ class AppWindow:
         return None
 
     def _migrate_window_sizes(self) -> None:
-        """Once per layout revision: clamp saved heights taller than DASH_H.
+        """Once per layout revision: bring saved heights to the current layout.
 
-        They were chosen against a layout ~140px taller, so carried over they
-        leave an empty band under the cards. A drag after this is the user's
-        own choice and is kept. The super admin's clamped size is pushed as
-        the install default too, so fresh installs start compact."""
+        Rev 2 restores the v1.6.90 design, which is taller than the v1.6.91
+        compact one that clamped everyone to 568. A height below the natural
+        height clips Home (it has no ScrollPane), so it is raised to fit. A
+        drag after this is the user's own choice and is kept. The super
+        admin's size is pushed as the install default too."""
         cfg = self._config
         if cfg is None:
             return
@@ -3714,12 +3754,13 @@ class AppWindow:
             rev = 0
         if rev >= _WINDOW_LAYOUT_REV:
             return
+        natural = self._natural_dash_h()
         sizes = getattr(cfg, "window_sizes", None)
         sizes = dict(sizes) if isinstance(sizes, dict) else {}
         for key, raw in list(sizes.items()):
             size = self._parse_size(raw)
-            if size and size[1] > DASH_H:
-                sizes[key] = f"{size[0]}x{DASH_H}"
+            if size and size[1] < natural:
+                sizes[key] = f"{size[0]}x{natural}"
         cfg.window_sizes = sizes
         cfg.window_layout_rev = _WINDOW_LAYOUT_REV
         try:
@@ -3727,13 +3768,331 @@ class AppWindow:
         except Exception as e:
             print(f"[AppWindow] Window size migration save failed: {e}")
         value = sizes.get(SUPER_ADMIN_EMAIL)
-        if (value and self._account_size_key() == SUPER_ADMIN_EMAIL
+        if (value and self._is_super_admin()
                 and self._db is not None
                 and hasattr(self._db, "set_app_setting")):
             try:
                 self._db.set_app_setting("default_window_size", value)
             except Exception as e:
                 print(f"[AppWindow] Default size push failed: {e}")
+
+    # ── Dashboard spacing (super-admin editable) ──────────────────────────────
+
+    def _is_super_admin(self) -> bool:
+        email = (getattr(getattr(self, "_auth", None), "user_email", "")
+                 or "").strip().lower()
+        return email == SUPER_ADMIN_EMAIL
+
+    @staticmethod
+    def _clean_gaps(raw) -> dict:
+        """Only known gap names with sane integer values survive."""
+        out = {}
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                if k in _GAP_DEFAULTS:
+                    try:
+                        out[k] = max(_GAP_MIN, min(_GAP_MAX, int(v)))
+                    except (TypeError, ValueError):
+                        pass
+        return out
+
+    def _gaps_now(self) -> dict:
+        gaps = dict(_GAP_DEFAULTS)
+        cfg = getattr(self, "_config", None)
+        gaps.update(self._clean_gaps(getattr(cfg, "dashboard_gaps", None)))
+        return gaps
+
+    def _gap(self, key: str) -> int:
+        return self._gaps_now()[key]
+
+    def _gap_widget(self, key: str, widget) -> None:
+        if not hasattr(self, "_gap_widgets"):
+            self._gap_widgets = {}
+        self._gap_widgets[key] = widget
+
+    @staticmethod
+    def _gap_span(gaps: dict) -> int:
+        """Height the gaps add to the window. The footer pads both sides."""
+        return sum(gaps.values()) + gaps["footer"]
+
+    def _natural_dash_h(self) -> int:
+        """Home's natural height at the current gaps: DASH_H at the defaults,
+        moved by exactly what the gaps add or take away."""
+        return (DASH_H + self._gap_span(self._gaps_now())
+                - self._gap_span(_GAP_DEFAULTS))
+
+    def _apply_gap(self, key: str) -> None:
+        """Re-pack the widget that carries one gap, at its current value."""
+        w = getattr(self, "_gap_widgets", {}).get(key)
+        if w is None:
+            return
+        g = self._gaps_now()
+        try:
+            if key == "footer":
+                w.configure(pady=g["footer"])
+            elif w.winfo_manager() != "pack":
+                return          # unpacked right now; re-packs read _gap()
+            elif key in ("status_impact", "impact_cards"):
+                w.pack_configure(pady=(g["status_impact"], g["impact_cards"]))
+            else:
+                w.pack_configure(pady=(g[key], 0))
+        except tk.TclError:
+            pass
+
+    def _set_gaps(self, gaps: dict) -> None:
+        """Adopt a whole set of gaps: store, re-pack, and move the window height
+        by the change in natural height so nothing clips and no band opens."""
+        if not self._config:
+            return
+        before = self._natural_dash_h()
+        self._config.dashboard_gaps = self._clean_gaps(gaps)
+        for key in _GAP_DEFAULTS:
+            self._apply_gap(key)
+        self._grow_window(self._natural_dash_h() - before)
+        try:
+            self._config.save_async()
+        except Exception:
+            pass
+
+    def _grow_window(self, delta: int) -> None:
+        """Change the dashboard height by `delta`, keeping its position. The
+        size lands through <Configure> like a user drag, so it is saved (and,
+        for the super admin, pushed as the install default)."""
+        if not delta or not getattr(self, "_dash_visible", False):
+            return
+        try:
+            if self._root.state() == "zoomed":
+                return
+            w, h = self._root.winfo_width(), self._root.winfo_height()
+            # winfo_height lags a geometry() call until Tk's next pass, so
+            # several changes in one pass (a fast drag, a pushed set) would
+            # each start from the same stale height. Build on the last request.
+            pending = getattr(self, "_grow_pending", None)
+            if pending is not None:
+                h = pending
+            h = max(MIN_H, h + delta)
+            self._grow_pending = h
+            self._root.geometry(f"{w}x{h}")
+            job = getattr(self, "_grow_pending_job", None)
+            if job is not None:
+                self._root.after_cancel(job)
+            self._grow_pending_job = self._root.after(
+                300, lambda: setattr(self, "_grow_pending", None))
+        except tk.TclError:
+            pass
+
+    def _fetch_dashboard_gaps(self) -> None:
+        """Every launch: mirror the super admin's pushed spacing."""
+        if (self._db is None or not hasattr(self._db, "fetch_app_setting")
+                or getattr(self, "_gaps_fetching", False)):
+            return
+        self._gaps_fetching = True
+
+        def _fetch():
+            try:
+                raw = self._db.fetch_app_setting("dashboard_gaps")
+                gaps = self._clean_gaps(json.loads(raw)) if raw else None
+            except Exception:
+                gaps = None
+            self._gaps_fetching = False
+            if gaps is not None:
+                self._ui_after(0, self._adopt_remote_gaps, gaps)
+
+        threading.Thread(target=_fetch, daemon=True,
+                         name="dashboard-gaps").start()
+
+    def _adopt_remote_gaps(self, gaps: dict) -> None:
+        # Never while the super admin is mid-edit: a stale fetch would undo
+        # the drag they are making.
+        if getattr(self, "_spacing_edit", False):
+            return
+        if gaps != self._clean_gaps(getattr(self._config, "dashboard_gaps", None)):
+            print(f"[AppWindow] Dashboard spacing from admin: {gaps}")
+            self._set_gaps(gaps)
+            self._repaint_all(erase=True)
+
+    def _push_dashboard_gaps(self) -> None:
+        if (not self._is_super_admin() or self._db is None
+                or not hasattr(self._db, "set_app_setting")):
+            return
+        try:
+            self._db.set_app_setting(
+                "dashboard_gaps",
+                json.dumps(self._clean_gaps(self._config.dashboard_gaps),
+                           sort_keys=True))
+        except Exception as e:
+            print(f"[AppWindow] Spacing push failed: {e}")
+
+    def _refresh_spacing_btn(self) -> None:
+        """The footer's Spacing button exists for the super admin only."""
+        btn = getattr(self, "_spacing_btn", None)
+        if btn is None:
+            return
+        try:
+            if self._is_super_admin():
+                if not btn.winfo_ismapped():
+                    btn.pack(side="right", padx=(0, 10), before=self._sign_btn)
+            else:
+                self._end_spacing_edit()
+                btn.pack_forget()
+        except tk.TclError:
+            pass
+
+    def _toggle_spacing_edit(self) -> None:
+        if getattr(self, "_spacing_edit", False):
+            self._end_spacing_edit()
+            return
+        if not self._is_super_admin():
+            return
+        self._spacing_edit = True
+        self._gap_handles = {}
+        self._gap_handle_last = {}
+        if getattr(self, "_current_tab", "") != "home":
+            self._switch_dash_tab("home")
+        self._style_spacing_btn("Done", C["accent"])
+        self._root.after_idle(self._place_gap_handles)
+        # Again once a tab switch above has mapped Home: a gap whose widget
+        # is not mapped yet gets no handle on the first pass.
+        self._root.after(120, self._place_gap_handles)
+
+    def _end_spacing_edit(self) -> None:
+        if not getattr(self, "_spacing_edit", False):
+            return
+        self._spacing_edit = False
+        job = getattr(self, "_gap_handle_job", None)
+        if job is not None:
+            try:
+                self._root.after_cancel(job)
+            except tk.TclError:
+                pass
+            self._gap_handle_job = None
+        for cv in getattr(self, "_gap_handles", {}).values():
+            try:
+                cv.destroy()
+            except tk.TclError:
+                pass
+        self._gap_handles = {}
+        self._style_spacing_btn("Spacing", C["subtext"])
+        self._repaint_all(erase=True)
+
+    def _style_spacing_btn(self, text: str, rest_fg: str) -> None:
+        btn = getattr(self, "_spacing_btn", None)
+        if btn is None:
+            return
+        try:
+            btn.configure(text=text, fg=rest_fg)
+            btn.bind("<Leave>", lambda _e: btn.configure(fg=rest_fg))
+        except tk.TclError:
+            pass
+
+    def _gap_band(self, key: str):
+        """(top, bottom) of a gap in root coordinates, or None when the widget
+        carrying it is not on screen (another tab, a breakdown open)."""
+        w = getattr(self, "_gap_widgets", {}).get(key)
+        if w is None:
+            return None
+        try:
+            if not w.winfo_ismapped():
+                return None
+            g = self._gap(key)
+            top = w.winfo_rooty() - self._root.winfo_rooty()
+            if key == "footer":
+                return top, top + g
+            if key == "impact_cards":
+                bottom = top + w.winfo_height()
+                return bottom, bottom + g
+            return top - g, top
+        except tk.TclError:
+            return None
+
+    _HANDLE_H = 12
+
+    def _place_gap_handles(self) -> None:
+        """Edit mode: a dashed accent handle across the middle of every gap on
+        screen, labelled with its px. Drag to change it, double-click for the
+        default."""
+        if not getattr(self, "_spacing_edit", False):
+            return
+        try:
+            width = self._root.winfo_width()
+        except tk.TclError:
+            return
+        # Cards size themselves asynchronously (and a breakdown can open), so
+        # a handle placed once drifts off its gap. While editing, re-place
+        # every 250ms: nine canvases, nothing else.
+        job = getattr(self, "_gap_handle_job", None)
+        if job is not None:
+            try:
+                self._root.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._gap_handle_job = self._root.after(250, self._place_gap_handles)
+        for key in _GAP_DEFAULTS:
+            band = self._gap_band(key)
+            cv = self._gap_handles.get(key)
+            if band is None:
+                if cv is not None:
+                    cv.place_forget()
+                    self._gap_handle_last.pop(key, None)
+                continue
+            if cv is None:
+                cv = tk.Canvas(self._root, height=self._HANDLE_H, bg=C["bg"],
+                               highlightthickness=0, bd=0,
+                               cursor="sb_v_double_arrow")
+                cv.bind("<ButtonPress-1>",
+                        lambda e, k=key: self._gap_drag_start(k, e))
+                cv.bind("<B1-Motion>", lambda e, k=key: self._gap_drag(k, e))
+                cv.bind("<ButtonRelease-1>",
+                        lambda e, k=key: self._gap_drag_end(k))
+                cv.bind("<Double-Button-1>",
+                        lambda e, k=key: self._gap_reset(k))
+                self._gap_handles[key] = cv
+            mid = (band[0] + band[1]) // 2
+            state = (mid, width, self._gap(key), cv.winfo_ismapped())
+            if self._gap_handle_last.get(key) == state:
+                continue            # nothing moved since the last pass
+            self._gap_handle_last[key] = state
+            cv.place(x=0, y=mid - self._HANDLE_H // 2, width=width,
+                     height=self._HANDLE_H)
+            # Canvas.lift is tag_raise (canvas items), not the widget raise.
+            self._root.tk.call("raise", cv._w)
+            cv.delete("all")
+            cy = self._HANDLE_H // 2
+            cv.create_line(0, cy, width, cy, fill=C["accent"], dash=(4, 3))
+            txt = f"{self._gap(key)}"
+            pw = 10 + 7 * len(txt)
+            cv.create_rectangle(8, 0, 8 + pw, self._HANDLE_H,
+                                fill=C["accent_dim"], outline="")
+            cv.create_text(8 + pw // 2, cy, text=txt, fill=C["accent"],
+                           font=("Segoe UI", 7, "bold"))
+
+    def _gap_drag_start(self, key: str, event) -> None:
+        self._gap_drag_state = (key, event.y_root, self._gap(key))
+
+    def _gap_drag(self, key: str, event) -> None:
+        st = getattr(self, "_gap_drag_state", None)
+        if not st or st[0] != key:
+            return
+        new = max(_GAP_MIN, min(_GAP_MAX, st[2] + (event.y_root - st[1])))
+        if new == self._gap(key):
+            return
+        gaps = self._gaps_now()
+        gaps[key] = new
+        self._set_gaps(gaps)
+        self._root.after_idle(self._place_gap_handles)
+
+    def _gap_drag_end(self, key: str) -> None:
+        self._gap_drag_state = None
+        self._push_dashboard_gaps()
+        self._repaint_all(erase=True)
+        self._root.after_idle(self._place_gap_handles)
+
+    def _gap_reset(self, key: str) -> None:
+        gaps = self._gaps_now()
+        gaps[key] = _GAP_DEFAULTS[key]
+        self._set_gaps(gaps)
+        self._push_dashboard_gaps()
+        self._root.after_idle(self._place_gap_handles)
 
     def _saved_dash_size(self) -> tuple:
         """Resolve the dashboard size: this account's saved size, else the
@@ -3743,7 +4102,7 @@ class AppWindow:
         if isinstance(sizes, dict):
             size = (self._parse_size(sizes.get(self._account_size_key()))
                     or self._parse_size(sizes.get("_default")))
-        w, h = size or (WINDOW_W, DASH_H)
+        w, h = size or (WINDOW_W, self._natural_dash_h())
         try:
             # Clamp to the monitor the window is on, not the primary: a size
             # saved on a big screen must not survive onto a smaller second one
@@ -3764,6 +4123,8 @@ class AppWindow:
         # the old spot — drop it and let the next keystroke re-place it.
         if hasattr(self, "_usearch_panel"):
             self._hide_usearch_panel()
+        if getattr(self, "_spacing_edit", False):
+            self._root.after_idle(self._place_gap_handles)
         # Any root size change reflows the whole layout; stale pixels from the
         # old layout are what showed as duplicated/ghost rows after a resize
         # (including the login→dashboard size jump). One debounced async
@@ -3878,29 +4239,28 @@ class AppWindow:
         except Exception:
             pass
         if (self._dash_visible and self._win_save_job is None
-                and self._applied_size == (WINDOW_W, DASH_H)):
+                and self._applied_size == (WINDOW_W, self._natural_dash_h())):
             self._resize(*self._saved_dash_size())
 
     # ── Home tab ──────────────────────────────────────────────────────────────
 
     def _build_home_tab(self, parent: tk.Frame) -> None:
-        # Status card. Kept tight (14pt status, 11px inner padding, 3px row
-        # gaps): Home has no ScrollPane, so every pixel here is window height.
-        sc = self._card(parent, inner_pad=(18, 11), margin=(0, 0))
+        # Status card. The space under it is the "Your impact" heading's gap.
+        sc = self._card(parent, margin=(0, 0))
         self._status_lbl = tk.Label(
             sc, text="● Ready",
             fg=C["success"], bg=C["surface"],
-            font=("Segoe UI", 14, "bold"), anchor="w",
+            font=("Segoe UI", 17, "bold"), anchor="w",
         )
         self._status_lbl.pack(fill="x")
 
-        tk.Frame(sc, bg=C["border"], height=1).pack(fill="x", pady=(7, 9))
+        tk.Frame(sc, bg=C["border"], height=1).pack(fill="x", pady=(10, 10))
 
         hint_row = tk.Frame(sc, bg=C["surface"])
         hint_row.pack(fill="x")
 
         # Hotkey pill
-        pill_bg = tk.Frame(hint_row, bg=C["accent_dim"], padx=8, pady=2)
+        pill_bg = tk.Frame(hint_row, bg=C["accent_dim"], padx=8, pady=3)
         pill_bg.pack(side="left")
         hint_text = self._hotkey if self._hotkey else "—"
         self._home_hotkey_lbl = tk.Label(
@@ -3929,9 +4289,9 @@ class AppWindow:
 
         # Refine hotkey pill
         refine_hint_row = tk.Frame(sc, bg=C["surface"])
-        refine_hint_row.pack(fill="x", pady=(3, 0))
+        refine_hint_row.pack(fill="x", pady=(4, 0))
 
-        refine_pill_bg = tk.Frame(refine_hint_row, bg=C["accent_dim"], padx=8, pady=2)
+        refine_pill_bg = tk.Frame(refine_hint_row, bg=C["accent_dim"], padx=8, pady=3)
         refine_pill_bg.pack(side="left")
         refine_hint_text = self._refine_hotkey if self._refine_hotkey else "—"
         self._home_refine_hotkey_lbl = tk.Label(
@@ -3955,7 +4315,7 @@ class AppWindow:
         self._refine_hint_row = refine_hint_row
         self._home_ptt_row = tk.Frame(sc, bg=C["surface"])
         _ptt_pill_bg = tk.Frame(self._home_ptt_row, bg=C["accent_dim"],
-                                padx=8, pady=2)
+                                padx=8, pady=3)
         _ptt_pill_bg.pack(side="left")
         self._home_ptt_lbl = tk.Label(
             _ptt_pill_bg, text=self._ptt_hotkey or "—",
@@ -3996,31 +4356,25 @@ class AppWindow:
 
     # ── Your impact section ───────────────────────────────────────────────────
 
-    # The heading row sits inside the stack with this padding, and the close
-    # swap re-packs it with the same, so the block keeps one height.
-    _IMPACT_HEAD_PADY = (12, 8)
-
     def _build_impact_section(self, parent: tk.Frame) -> None:
-        # Stack: the heading row (title, range picker, word count) + the three
-        # cards, and the breakdown panel that replaces BOTH of them. The panel
-        # is sized to the exact height they occupied, so opening a breakdown
-        # never grows the window — a resize mid-transition is both jarring and
-        # the thing that made the swap flicker.
-        #
-        # The range picker lives in the heading, above the cards it scopes,
-        # rather than in a bar of its own below them: same control, one row
-        # less of window height.
-        self._impact_stack = tk.Frame(parent, bg=C["bg"])
-        self._impact_stack.pack(fill="x")
-        head = tk.Frame(self._impact_stack, bg=C["bg"])
-        head.pack(fill="x", padx=20, pady=self._IMPACT_HEAD_PADY)
-        self._impact_head = head
-        self._impact_title_lbl = tk.Label(
-            head, text="Your impact",
+        title = tk.Label(
+            parent, text="Your impact",
             fg=C["text"], bg=C["bg"],
             font=("Segoe UI", 12, "bold"), anchor="w",
         )
-        self._impact_title_lbl.pack(side="left")
+        title.pack(fill="x", padx=20, pady=(self._gap("status_impact"),
+                                            self._gap("impact_cards")))
+        self._gap_widget("status_impact", title)
+        self._gap_widget("impact_cards", title)
+
+        # Stack: the three cards + the words bar, and the breakdown panel that
+        # replaces BOTH of them. The panel is sized to the exact height they
+        # occupied, so opening a breakdown never grows the window — a resize
+        # mid-transition is both jarring and the thing that made the swap
+        # flicker. Children carry their own padx (the today bar is a _card,
+        # which adds its own), so the stack itself has none.
+        self._impact_stack = tk.Frame(parent, bg=C["bg"])
+        self._impact_stack.pack(fill="x")
         row = tk.Frame(self._impact_stack, bg=C["bg"])
         row.pack(fill="x", padx=20)
         self._impact_row = row
@@ -4029,7 +4383,6 @@ class AppWindow:
         row.grid_rowconfigure(0, minsize=_IMPACT_CARD_H)
 
         self._impact_font_value = tkfont.Font(family="Segoe UI", size=18, weight="bold")
-        self._impact_font_count = tkfont.Font(family="Segoe UI", size=10)
         self._impact_font_unit  = tkfont.Font(family="Segoe UI", size=10)
         # Headline that rides the panel header row (time panel), so the body has
         # room for a fourth row — measured to place the "saved so far" caption.
@@ -4086,12 +4439,34 @@ class AppWindow:
         # user's real measured average (see StatsStore.snapshot).
         self._set_impact_card("speed", "160", "wpm", "4× faster than typing")
 
-        # Range selector — scopes the three cards and the word count to
-        # today/week/month/year/all time or a custom span.
+        # Today bar
+        bar = self._card(self._impact_stack, inner_pad=(14, 10),
+                         margin=(self._gap("cards_words"), 0))
+        self._impact_today_card = bar.master  # the rounded-rect Canvas host
+        self._gap_widget("cards_words", self._impact_today_card)
+        brow = tk.Frame(bar, bg=C["surface"])
+        brow.pack(fill="x")
+        icv = tk.Canvas(brow, bg=C["surface"], highlightthickness=0, bd=0,
+                        width=21, height=21)
+        icv.pack(side="left")
+        try:
+            import ui_render
+            _doc = ui_render.icon_doc(icv, 21, C["subtext"], bg=C["surface"])
+        except Exception:
+            _doc = None
+        if _doc is not None:
+            icv.create_image(0, 0, image=_doc, anchor="nw")
+        else:
+            _rr(icv, 3, 1, 15, 17, 3, fill=C["surface"], outline=C["subtext"], width=1.4)
+            icv.create_line(6, 7, 12, 7, fill=C["subtext"], width=1.4)
+            icv.create_line(6, 11, 12, 11, fill=C["subtext"], width=1.4)
+        # Words-dictated range selector — replaces the static "Today" label so
+        # the footer count can switch between today/week/month/year/all time.
         # Uses the shared Dropdown control (same as the mic and popup-position
         # selectors), not tk.OptionMenu — that posts a native Win32 menu which
         # ignores the configured colours and rendered as a white box. Left
-        # un-widened (no fill="x") so it stays compact beside the title.
+        # un-widened (no fill="x") so it stays compact and inline where the
+        # bold "Today" label was.
         _RANGE_LABELS = {
             "today": "Today",
             "week":  "This week",
@@ -4134,49 +4509,22 @@ class AppWindow:
 
         # RangePicker, not Dropdown: the same list plus a From / to tab, so the
         # cards can be scoped to any span and not just the five named windows.
-        # Packed right-to-left: the count hugs the edge, the picker sits
-        # before it, and the title keeps the left.
-        self._impact_today_lbl = tk.Label(
-            head, text="·  0 words dictated",
-            fg=C["subtext"], bg=C["bg"], font=("Segoe UI", 10),
-        )
-        self._impact_today_lbl.pack(side="right", padx=(6, 0))
-        _range_menu = RangePicker(head, self._impact_range_var,
-                                  list(_RANGE_LABELS.values()), bg=C["bg"],
+        _range_menu = RangePicker(brow, self._impact_range_var,
+                                  list(_RANGE_LABELS.values()), bg=C["surface"],
                                   font=("Segoe UI", 10, "bold"),
                                   on_period=_on_period, on_custom=_on_custom)
         if _span:
             _range_menu.set_custom(*_span)
-        _range_menu.pack(side="right", padx=(6, 0))
+        _range_menu.pack(side="left", padx=(6, 0))
         self._impact_range_menu = _range_menu
 
-        # At the narrowest window the full count collides with the title;
-        # drop "dictated" there rather than clip it.
-        head.bind("<Configure>", lambda _e: self._fit_impact_words(), add="+")
+        self._impact_today_lbl = tk.Label(
+            brow, text="·  0 words dictated",
+            fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 10),
+        )
+        self._impact_today_lbl.pack(side="left", padx=(6, 0))
 
         self._refresh_impact()
-
-    def _fit_impact_words(self) -> None:
-        """Word count beside the range picker: "N words dictated", or just
-        "N words" when the heading row is too narrow to hold the long form."""
-        lbl = getattr(self, "_impact_today_lbl", None)
-        if lbl is None:
-            return
-        tw = int(getattr(self, "_impact_words", 0))
-        noun = "word" if tw == 1 else "words"
-        text = f"·  {tw:,} {noun} dictated"
-        try:
-            head = self._impact_head
-            room = head.winfo_width()
-            if room > 1:
-                font = self._impact_font_count
-                used = (self._impact_title_lbl.winfo_reqwidth()
-                        + self._impact_range_menu.winfo_reqwidth() + 12)
-                if used + font.measure(text) > room:
-                    text = f"·  {tw:,} {noun}"
-        except (AttributeError, tk.TclError):
-            pass
-        lbl.configure(text=text)
 
     def _set_impact_card(self, key: str, value: str, unit: str, sub: str) -> None:
         card = self._impact_cards.get(key)
@@ -4331,8 +4679,8 @@ class AppWindow:
         self._impact_opened_at = time.monotonic()
 
         def _swap():
-            self._impact_head.pack_forget()
             self._impact_row.pack_forget()
+            self._impact_today_card.pack_forget()
             self._impact_detail.configure(height=block_h)
             self._impact_detail.pack(fill="x", padx=20)
             # Realise the canvas width before drawing — a first-open panel has
@@ -4355,9 +4703,9 @@ class AppWindow:
 
         def _swap():
             self._impact_detail.pack_forget()
-            self._impact_head.pack(fill="x", padx=20,
-                                   pady=self._IMPACT_HEAD_PADY)
             self._impact_row.pack(fill="x", padx=20)
+            self._impact_today_card.pack(fill="x", padx=20,
+                                         pady=(self._gap("cards_words"), 0))
             for k in self._impact_cards:
                 self._impact_cards[k]["hover"] = False
                 self._layout_impact_card(k)
@@ -4991,8 +5339,9 @@ class AppWindow:
 
         words_map = snap.get("words") or {}
         tw = int(words_map.get(rng, snap.get("today_words", 0)))
-        self._impact_words = tw
-        self._fit_impact_words()
+        if hasattr(self, "_impact_today_lbl"):
+            self._impact_today_lbl.configure(
+                text=f"·  {tw:,} word{'' if tw == 1 else 's'} dictated")
 
         # An open breakdown is showing the same numbers — keep it live.
         if getattr(self, "_impact_open", None):
@@ -5251,7 +5600,7 @@ class AppWindow:
             if self._ptt_hotkey:
                 self._home_ptt_lbl.configure(text=self._ptt_hotkey)
                 if not row.winfo_ismapped():
-                    row.pack(fill="x", pady=(3, 0),
+                    row.pack(fill="x", pady=(4, 0),
                              before=self._refine_hint_row)
             else:
                 row.pack_forget()
@@ -9465,6 +9814,7 @@ class AppWindow:
             self._settings_email_lbl.configure(text=account_text)
         if hasattr(self, "_sign_btn"):
             self._sign_btn.configure(text=action_text)
+        self._refresh_spacing_btn()
         if hasattr(self, "_settings_auth_btn"):
             self._settings_auth_btn.configure(
                 text=action_text, fg=C["error"] if signed_in else C["accent"])

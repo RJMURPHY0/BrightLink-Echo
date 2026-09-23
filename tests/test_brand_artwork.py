@@ -115,10 +115,7 @@ class IconTests(unittest.TestCase):
 class WiringTests(unittest.TestCase):
     def test_every_surface_uses_the_new_artwork(self):
         aw = _src("app_window.py")
-        # The splash keeps the full 42; the dashboard header runs at 34 so the
-        # window fits a 150% laptop screen without filling its height.
-        self.assertEqual(aw.count("get_lockup_photo(self._root, C[\"bg\"], height=42)"), 1)
-        self.assertEqual(aw.count("get_lockup_photo(self._root, C[\"bg\"], height=34)"), 1)
+        self.assertEqual(aw.count("get_lockup_photo(self._root, C[\"bg\"], height=42)"), 2)
         self.assertIn("get_lockup_photo(self._root, C[\"bg\"], height=42)",
                       _src("login_window.py"))
         self.assertIn("get_badge_photo(self.root, CP[\"bg\"], height=28)",

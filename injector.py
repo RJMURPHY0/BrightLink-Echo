@@ -52,6 +52,14 @@ _k32.GlobalUnlock.argtypes = [_HGLOBAL]
 _k32.GlobalUnlock.restype = ctypes.wintypes.BOOL
 _k32.GlobalFree.argtypes = [_HGLOBAL]
 _k32.GlobalFree.restype = _HGLOBAL
+_k32.GlobalSize.argtypes = [_HGLOBAL]
+_k32.GlobalSize.restype = ctypes.c_size_t
+
+_u32.EnumClipboardFormats.argtypes = [ctypes.c_uint]
+_u32.EnumClipboardFormats.restype = ctypes.c_uint
+_u32.GetClipboardFormatNameW.argtypes = [
+    ctypes.c_uint, ctypes.wintypes.LPWSTR, ctypes.c_int]
+_u32.GetClipboardFormatNameW.restype = ctypes.c_int
 
 # Declare return/arg types so we can actually trust PostMessageW / SendInput
 # results — without these ctypes assumes int and silent failures look like wins.
@@ -82,6 +90,224 @@ _clip_gen = 0
 # paste would otherwise capture OUR OWN injected text as "previous" and the
 # user's real clipboard would be lost. Carried forward instead.
 _orig_pending = None
+
+
+# ── Full clipboard snapshot ───────────────────────────────────────────────────
+# A paste injection used to back up CF_UNICODETEXT only, so a copied screenshot,
+# copied files or formatted text was lost the moment the user dictated with
+# Copy to Clipboard off. The snapshot keeps every format whose data is plain
+# global memory (text, rich text, HTML, DIB/PNG images, file lists, and the
+# "keep out of clipboard history" flags a password manager sets) and writes
+# them all back. The same approach AutoHotkey's ClipboardAll has used for years.
+
+_CF_UNICODETEXT = 13
+# Formats whose handle is NOT an HGLOBAL (GDI objects, metafiles, owner-drawn,
+# private ranges). Their bytes cannot be copied; the image survives anyway
+# because Windows synthesises CF_DIB from CF_BITMAP and we keep the DIB.
+_CF_SKIP = frozenset((2, 3, 9, 14, 0x80, 0x82, 0x83, 0x8E))
+_CF_PRIVATE_LO, _CF_GDIOBJ_HI = 0x200, 0x3FF
+_CF_DIBS = (8, 17)          # CF_DIB, CF_DIBV5
+# Registered OLE plumbing that points at a live object in the source process.
+# Restoring the pointer without the object is meaningless; the real data
+# formats beside it carry the content.
+_CF_SKIP_NAMES = frozenset(("DataObject", "Ole Private Data"))
+# Bounds: this runs on the paste path, before Ctrl+V. A huge render (a vast
+# Excel range asked for as a picture) must never stall the dictation, so the
+# snapshot stops collecting once either limit is hit and keeps what it has.
+_SNAP_MAX_BYTES = 96 * 1024 * 1024
+_SNAP_BUDGET_SECS = 0.35
+
+
+class ClipboardSnapshot:
+    """Every copyable clipboard format, in the source app's order.
+
+    Truthy when it holds anything. `text` is the CF_UNICODETEXT form (or "")."""
+    __slots__ = ("formats", "text")
+
+    def __init__(self, formats, text=""):
+        self.formats = formats          # list of (format_id, bytes)
+        self.text = text
+
+    def __bool__(self):
+        return bool(self.formats)
+
+    def has_nontext(self) -> bool:
+        return any(f not in (1, 7, 13, 16) for f, _ in self.formats)
+
+
+def _format_name(fmt: int) -> str:
+    if fmt < 0xC000:
+        return ""
+    buf = ctypes.create_unicode_buffer(128)
+    try:
+        n = _u32.GetClipboardFormatNameW(fmt, buf, 128)
+    except Exception:
+        return ""
+    return buf.value if n > 0 else ""
+
+
+def _snapshot_skips(fmt: int) -> bool:
+    if fmt in _CF_SKIP or _CF_PRIVATE_LO <= fmt <= _CF_GDIOBJ_HI:
+        return True
+    return _format_name(fmt) in _CF_SKIP_NAMES
+
+
+def _read_hglobal(h) -> bytes:
+    size = _k32.GlobalSize(h)
+    if not size:
+        return b""
+    ptr = _k32.GlobalLock(h)
+    if not ptr:
+        return b""
+    try:
+        return ctypes.string_at(ptr, size)
+    finally:
+        _k32.GlobalUnlock(h)
+
+
+def _open_clipboard_retry(tries: int = 8) -> bool:
+    """OpenClipboard, waiting briefly for a clipboard listener (Windows
+    clipboard history, a sync client) that opens it the moment it changes."""
+    for i in range(tries):
+        try:
+            if _u32.OpenClipboard(None):
+                return True
+        except Exception:
+            return False
+        if i + 1 < tries:
+            time.sleep(0.01)
+    return False
+
+
+_ERROR_CLIPBOARD_NOT_OPEN = 1418
+
+
+class _ClipboardLost(Exception):
+    """The clipboard was taken from us mid-pass (ERROR_CLIPBOARD_NOT_OPEN).
+    Measured: a clipboard listener can do this within ~50ms of a change even
+    while we hold it open, so the whole pass is retried rather than trusted."""
+
+
+def _lost() -> bool:
+    return ctypes.get_last_error() == _ERROR_CLIPBOARD_NOT_OPEN
+
+
+def _snapshot_once() -> ClipboardSnapshot:
+    snap = ClipboardSnapshot([], "")
+    if not _open_clipboard_retry():
+        return snap
+    try:
+        fmts = []
+        fmt = 0
+        while True:
+            ctypes.set_last_error(0)
+            fmt = _u32.EnumClipboardFormats(fmt)
+            if not fmt:
+                if _lost():
+                    raise _ClipboardLost()
+                break
+            fmts.append(fmt)
+        if _CF_UNICODETEXT in fmts:
+            fmts.remove(_CF_UNICODETEXT)
+            fmts.insert(0, _CF_UNICODETEXT)
+        deadline = time.monotonic() + _SNAP_BUDGET_SECS
+        total = 0
+        for fmt in fmts:
+            if snap.formats and time.monotonic() > deadline:
+                print("[Injector] Clipboard snapshot hit its time budget; "
+                      f"kept {len(snap.formats)} format(s)")
+                break
+            if _snapshot_skips(fmt):
+                continue
+            # CF_DIB and CF_DIBV5 are the same picture, and Windows synthesises
+            # either from the other. Keep the first listed (the source's own)
+            # and let the system rebuild the second: half the copy on the
+            # paste path.
+            if fmt in _CF_DIBS and any(f in _CF_DIBS for f, _ in snap.formats):
+                continue
+            ctypes.set_last_error(0)
+            h = _u32.GetClipboardData(fmt)
+            if not h:
+                if _lost():
+                    raise _ClipboardLost()
+                continue
+            data = _read_hglobal(h)
+            if not data or total + len(data) > _SNAP_MAX_BYTES:
+                continue
+            total += len(data)
+            snap.formats.append((fmt, data))
+            if fmt == _CF_UNICODETEXT:
+                try:
+                    snap.text = data.decode("utf-16-le").split("\x00", 1)[0]
+                except Exception:
+                    pass
+    finally:
+        try:
+            _u32.CloseClipboard()
+        except Exception:
+            pass
+    return snap
+
+
+def _clipboard_snapshot() -> ClipboardSnapshot:
+    """Copy every HGLOBAL format off the clipboard. Never raises; an unreadable
+    clipboard gives an empty snapshot. CF_UNICODETEXT is read first so the
+    text survives even when the budget cuts the rest short."""
+    for attempt in range(4):
+        try:
+            return _snapshot_once()
+        except _ClipboardLost:
+            time.sleep(0.03 * (attempt + 1))
+        except Exception:
+            break
+    return ClipboardSnapshot([], "")
+
+
+def _write_once(snap: ClipboardSnapshot) -> int:
+    GMEM_MOVEABLE = 0x0002
+    if not _open_clipboard_retry():
+        return 0
+    written = 0
+    try:
+        ctypes.set_last_error(0)
+        if not _u32.EmptyClipboard() and _lost():
+            raise _ClipboardLost()
+        for fmt, data in snap.formats:
+            h = _k32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+            if not h:
+                continue
+            ptr = _k32.GlobalLock(h)
+            if not ptr:
+                _k32.GlobalFree(h)
+                continue
+            ctypes.memmove(ptr, data, len(data))
+            _k32.GlobalUnlock(h)
+            ctypes.set_last_error(0)
+            if _u32.SetClipboardData(fmt, h):
+                written += 1       # the system owns the handle now
+            else:
+                _k32.GlobalFree(h)
+                if _lost():
+                    raise _ClipboardLost()
+    finally:
+        try:
+            _u32.CloseClipboard()
+        except Exception:
+            pass
+    return written
+
+
+def _clipboard_write_snapshot(snap: ClipboardSnapshot) -> bool:
+    """Put a snapshot back on the clipboard. True when every format landed,
+    or at least one did when some format was refused outright. Never raises."""
+    for attempt in range(4):
+        try:
+            return _write_once(snap) > 0
+        except _ClipboardLost:
+            time.sleep(0.03 * (attempt + 1))
+        except Exception:
+            break
+    return False
 
 
 # ── Win32 constants ───────────────────────────────────────────────────────────
@@ -991,13 +1217,17 @@ class Injector:
         return has_any and not has_text
 
     @staticmethod
-    def _clipboard_set(text: str, bump: bool = True) -> tuple[bool, str]:
+    def _clipboard_set(text: str, bump: bool = True):
         """
         Write *text* to the Windows clipboard via ctypes (no pyperclip dependency).
-        Returns (success, previous_text). Success is verified by readback —
+        Returns (success, previous). Success is verified by readback —
         callers MUST NOT send Ctrl+V when success is False, or whatever stale
         content sits on the clipboard (a password, an old copy) gets pasted
         instead of the dictation.
+
+        With bump=True, *previous* is a ClipboardSnapshot of EVERY copyable
+        format (image, files, rich text, not only plain text) for
+        _clipboard_restore to put back. With bump=False it is "".
 
         bump=True advances the global clipboard generation so a delayed restore
         from an earlier paste knows it has been superseded. Restores pass
@@ -1009,20 +1239,8 @@ class Injector:
                 _clip_gen += 1
         CF_UNICODETEXT = 13
         GMEM_MOVEABLE = 0x0002
-        # ── Read previous content ──
-        previous = ""
-        if _u32.OpenClipboard(None):
-            try:
-                h = _u32.GetClipboardData(CF_UNICODETEXT)
-                if h:
-                    ptr = _k32.GlobalLock(h)
-                    if ptr:
-                        previous = ctypes.wstring_at(ptr)
-                        _k32.GlobalUnlock(h)
-            except Exception:
-                pass
-            finally:
-                _u32.CloseClipboard()
+        # ── Snapshot previous content (only a paste ever restores it) ──
+        previous = _clipboard_snapshot() if bump else ""
 
         if bump:
             global _orig_pending
@@ -1117,18 +1335,25 @@ class Injector:
             _u32.CloseClipboard()
 
     @staticmethod
-    def _clipboard_restore(original: str, gen: int) -> None:
-        """Restore the clipboard to *original* after a short delay, but only if
-        no newer paste has happened in the meantime (otherwise we'd clobber it).
+    def _clipboard_restore(original, gen: int) -> None:
+        """Restore the clipboard to *original* (a ClipboardSnapshot, or plain
+        text) after a short delay, but only if no newer paste has happened in
+        the meantime (otherwise we'd clobber it).
 
-        With nothing to restore (empty clipboard, or non-text content we could
-        not back up) the clipboard is EMPTIED instead — leaving the dictation
-        sitting there is exactly what the Copy to Clipboard setting turns on,
-        so doing it with the setting off ignored the user's choice. When the
-        setting IS on, app.py rewrites the text after injection anyway."""
+        Copy to Clipboard ON: nothing is restored. The dictation stays on the
+        clipboard, which is what the setting asks for, and the same holds for
+        text the popup inserts.
+
+        Copy to Clipboard OFF: the user's previous clipboard comes back, images
+        and copied files included. With nothing to restore (the clipboard was
+        empty) it is EMPTIED instead, so the dictation never lingers there."""
+        global _orig_pending
+        if Injector.keep_clipboard:
+            with _clip_lock:
+                if _clip_gen == gen:
+                    _orig_pending = None   # the dictation IS the clipboard now
+            return
         if not original:
-            if Injector.keep_clipboard:
-                return
 
             def _clear():
                 time.sleep(1.5)      # same paste-settling delay as a restore
@@ -1159,7 +1384,12 @@ class Injector:
                 if _clip_gen != gen:
                     return  # a newer paste superseded us — it carries the original now
                 try:
-                    Injector._clipboard_set(original, bump=False)
+                    if isinstance(original, ClipboardSnapshot):
+                        if (not _clipboard_write_snapshot(original)
+                                and original.text):
+                            Injector._clipboard_set(original.text, bump=False)
+                    else:
+                        Injector._clipboard_set(original, bump=False)
                 except Exception:
                     pass
                 finally:
