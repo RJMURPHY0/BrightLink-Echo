@@ -70,6 +70,13 @@ jobs:
     # re-cut silently loses signing (docs/CODE_SIGNING.md).
     environment: release
 
+    # JOB level, not step level. A step's `if` is evaluated before that step's
+    # own `env:` block exists, and the `secrets` context is not available in a
+    # step `if` at all — so the VirusTotal gate below only works if the value
+    # is in scope for the whole job. Step-level, it silently skipped forever.
+    env:
+      VT_API_KEY: ${{ secrets.VT_API_KEY }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -212,8 +219,6 @@ jobs:
       - name: Scan with VirusTotal
         if: ${{ env.VT_API_KEY != '' }}
         continue-on-error: true
-        env:
-          VT_API_KEY: ${{ secrets.VT_API_KEY }}
         uses: crazy-max/ghaction-virustotal@v4
         with:
           vt_api_key: ${{ secrets.VT_API_KEY }}
