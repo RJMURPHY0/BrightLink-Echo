@@ -508,6 +508,10 @@ def _glyph_paint(d, s, name: str, size: int, color: str) -> None:
         d.ellipse([4.5 * u, 4.5 * u, 14.5 * u, 14.5 * u],
                   outline=color, width=lw)
         L((14.2, 14.2), (19.5, 19.5))
+    elif name == "chevron_down":
+        L((6.5, 9.5), (12, 15), (17.5, 9.5))
+    elif name == "chevron_up":
+        L((6.5, 14.5), (12, 9), (17.5, 14.5))
     elif name == "sparkle":
         # four-pointed sparkle (concave star) — Ask AI. Filled polygon so it is
         # crisp at any size, unlike the ✦ font glyph. Tips at N/E/S/W (radius

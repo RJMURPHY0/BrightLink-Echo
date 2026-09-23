@@ -201,6 +201,38 @@ class UniversalSearchTests(unittest.TestCase):
         self.w._usearch_update("history")
         self.assertTrue(self.w._usearch_results)
 
+    def test_filter_mode_no_matches_shows_dropdown(self):
+        def filt(q):
+            self.w._usearch_filter_hits = 0       # the page found nothing
+        self.w._page_search = {
+            "history": {"placeholder": "Search transcriptions…",
+                        "filter": filt}}
+        self.w._usearch_apply_page("history")
+        self.w._usearch_update("history")          # a term in the catalogue
+        self.assertEqual(self.w._usearch_panel.winfo_manager(), "place")
+        self.assertTrue(self.w._usearch_results)   # universal jumps offered
+
+    def test_filter_mode_with_matches_keeps_dropdown_hidden(self):
+        def filt(q):
+            self.w._usearch_filter_hits = 3
+        self.w._page_search = {
+            "history": {"placeholder": "x", "filter": filt}}
+        self.w._usearch_apply_page("history")
+        self.w._usearch_update("something")
+        p = self.w._usearch_panel
+        self.assertTrue(p is None or p.winfo_manager() != "place")
+
+    def test_chevron_pins_dropdown_open_and_closed(self):
+        self.w._page_search = {}
+        self.w._usearch_apply_page("home")        # universal, empty query
+        self.w._usearch_toggle_dropdown()
+        self.assertTrue(self.w._usearch_force_dropdown)
+        self.assertEqual(self.w._usearch_panel.winfo_manager(), "place")
+        self.assertTrue(self.w._usearch_results)  # pages as a nav menu
+        self.w._usearch_toggle_dropdown()
+        self.assertFalse(self.w._usearch_force_dropdown)
+        self.assertNotEqual(self.w._usearch_panel.winfo_manager(), "place")
+
     def test_answer_renders_with_chip(self):
         self.w._usearch_query = "trim"
         self.w._usearch_results = []

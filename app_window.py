@@ -2493,6 +2493,10 @@ class AppWindow:
         self._usearch_mode = "universal"
         self._usearch_filter = None
         self._usearch_placeholder = self._USEARCH_PLACE
+        # The chevron pins the jump/Ask AI dropdown open on any page; the panel
+        # otherwise appears in filter mode only when the page found no matches.
+        self._usearch_force_dropdown = False
+        self._usearch_filter_hits = None
 
         height = 42
         cv = tk.Canvas(host, height=height, bg=C["bg"], highlightthickness=0,
@@ -2519,11 +2523,31 @@ class AppWindow:
                             width=1.5, capstyle="round")
         mag.pack(side="left", padx=(15, 8))
 
+        # Chevron on the far right toggles the jump/Ask AI dropdown open on any
+        # page. Packed before Ask AI so it sits to its right.
+        self._usearch_caret_imgs = {}
+        for _st in ("chevron_down", "chevron_up"):
+            try:
+                self._usearch_caret_imgs[_st] = ui_render.icon_glyph(
+                    inner, _st, 16, C["subtext"], bg=C["input_bg"])
+            except Exception:
+                self._usearch_caret_imgs[_st] = None
+        caret = tk.Label(inner, bg=C["input_bg"], cursor="hand2")
+        if self._usearch_caret_imgs.get("chevron_down") is not None:
+            caret.configure(image=self._usearch_caret_imgs["chevron_down"])
+        else:
+            caret.configure(text="▾", fg=C["subtext"], font=("Segoe UI", 10))
+        caret.pack(side="right", padx=(0, 14))
+        caret.bind("<Button-1>", self._usearch_toggle_dropdown)
+        caret.bind("<Enter>", lambda _e: self._usearch_caret_colour(C["text"]))
+        caret.bind("<Leave>", lambda _e: self._usearch_caret_colour(C["subtext"]))
+        self._usearch_caret = caret
+
         # Ask AI on the right — a crisp PIL sparkle icon plus native ClearType
         # text, not a filled pill, matching the CRM's search bar. Clicking it
         # (or Enter on a question) runs Ask AI.
         askf = tk.Frame(inner, bg=C["input_bg"], cursor="hand2")
-        askf.pack(side="right", padx=(6, 15))
+        askf.pack(side="right", padx=(6, 6))
         spark = None
         try:
             spark = ui_render.icon_glyph(askf, "sparkle", 15, C["accent"],
@@ -2591,8 +2615,7 @@ class AppWindow:
                 entry.configure(fg=C["text"])
             st["focus"] = True
             _draw()
-            if self._usearch_query:
-                self._render_usearch_panel()
+            self._usearch_refresh_panel()
 
         def _focus_out(_e):
             st["focus"] = False
@@ -2632,26 +2655,31 @@ class AppWindow:
         ent = getattr(self, "_usearch_entry", None)
         if ent is None:
             return
-        try:
-            if self._root.focus_get() is not ent:
-                return          # the bar isn't focused — nothing to blur
-        except Exception:
-            return
+        # Inside the bar or its panel? Then leave everything as it is.
         node = event.widget
         host = getattr(self, "_usearch_host", None)
         panel = getattr(self, "_usearch_panel", None)
         while node is not None:
             if node is host or node is panel:
-                return          # click landed inside the bar or its results
+                return
             node = getattr(node, "master", None)
-        # Another text field takes focus by itself; anything else leaves the
-        # entry focused, so move focus off it explicitly.
-        if isinstance(event.widget, (tk.Entry, tk.Text, tk.Spinbox)):
-            return
+        # Clicked outside: close a chevron-pinned dropdown.
+        if getattr(self, "_usearch_force_dropdown", False):
+            self._usearch_force_dropdown = False
+            self._set_usearch_caret(False)
+            self._usearch_refresh_panel()
+        # And blur the entry if it had focus (another text field takes focus by
+        # itself, so leave that case alone).
         try:
-            self._root.focus_set()
-        except tk.TclError:
-            pass
+            focused = self._root.focus_get() is ent
+        except Exception:
+            focused = False
+        if focused and not isinstance(event.widget,
+                                      (tk.Entry, tk.Text, tk.Spinbox)):
+            try:
+                self._root.focus_set()
+            except tk.TclError:
+                pass
 
     def _usearch_type_anywhere(self, event):
         """Route a printable keystroke into the search bar when nothing else is
@@ -2700,23 +2728,73 @@ class AppWindow:
         self._usearch_query = q
 
         # Filter mode: drive the current page's own filter in place, exactly
-        # like the search bar this one replaced. No jump dropdown.
+        # like the search bar this one replaced.
         if self._usearch_mode == "filter" and self._usearch_filter is not None:
-            self._usearch_results = []
-            self._hide_usearch_panel()
             try:
                 self._usearch_filter(q)
             except Exception:
                 pass
-            return
+        self._usearch_refresh_panel()
 
-        if not q:
+    def _usearch_universal_results(self, q: str):
+        """Jump matches for the query, or — with an empty query (chevron opened
+        with nothing typed) — the pages, so the dropdown is a quick nav menu."""
+        if q:
+            return app_search.match_entries(q, self._search_catalogue, limit=8)
+        return [e for e in self._search_catalogue
+                if e.get("kind") == "page"][:8]
+
+    def _usearch_show_dropdown(self) -> bool:
+        """Whether the jump/Ask AI dropdown should be on screen right now."""
+        if self._usearch_ai is not None:
+            return True
+        if self._usearch_force_dropdown:
+            return True
+        if self._usearch_mode == "filter":
+            # Fall back to the dropdown only when the page found no matches.
+            hits = getattr(self, "_usearch_filter_hits", None)
+            return bool(self._usearch_query and hits == 0)
+        return bool(self._usearch_query)
+
+    def _usearch_refresh_panel(self) -> None:
+        if self._usearch_show_dropdown():
+            self._usearch_results = self._usearch_universal_results(
+                self._usearch_query)
+            self._render_usearch_panel()
+        else:
             self._usearch_results = []
             self._hide_usearch_panel()
+
+    def _usearch_toggle_dropdown(self, _e=None):
+        self._usearch_force_dropdown = not self._usearch_force_dropdown
+        self._set_usearch_caret(self._usearch_force_dropdown)
+        self._usearch_refresh_panel()
+        return "break"
+
+    def _set_usearch_caret(self, open_: bool) -> None:
+        caret = getattr(self, "_usearch_caret", None)
+        if caret is None:
             return
-        self._usearch_results = app_search.match_entries(
-            q, self._search_catalogue, limit=8)
-        self._render_usearch_panel()
+        imgs = getattr(self, "_usearch_caret_imgs", {})
+        img = imgs.get("chevron_up" if open_ else "chevron_down")
+        try:
+            if img is not None:
+                caret.configure(image=img)
+            else:
+                caret.configure(text="▴" if open_ else "▾")
+        except tk.TclError:
+            pass
+
+    def _usearch_caret_colour(self, colour: str) -> None:
+        caret = getattr(self, "_usearch_caret", None)
+        if caret is None:
+            return
+        try:
+            if caret.cget("image"):
+                return          # image glyph — colour is baked in
+            caret.configure(fg=colour)
+        except tk.TclError:
+            pass
 
     def _usearch_enter(self, _e=None):
         q = self._usearch_query.strip()
@@ -2735,6 +2813,8 @@ class AppWindow:
         return "break"
 
     def _usearch_escape(self, _e=None):
+        self._usearch_force_dropdown = False
+        self._set_usearch_caret(False)
         self._hide_usearch_panel()
         self._clear_usearch_entry(defocus=True)
         return "break"
@@ -2789,14 +2869,8 @@ class AppWindow:
         return p
 
     def _render_usearch_panel(self) -> None:
-        if not self._usearch_query:
-            self._hide_usearch_panel()
-            return
-        # Filter mode: the page filters itself in place, so the panel only ever
-        # appears to carry an Ask AI answer — never a jump list.
-        if self._usearch_mode == "filter" and self._usearch_ai is None:
-            self._hide_usearch_panel()
-            return
+        # Whether the panel shows is decided by _usearch_refresh_panel / the
+        # Ask AI handlers; this just draws the current state.
         p = self._usearch_panel_widget()
         for w in p.winfo_children():
             w.destroy()
@@ -2818,7 +2892,8 @@ class AppWindow:
                 crow.pack(fill="x", padx=12, pady=(0, 8))
                 for e in chips:
                     self._usearch_chip(crow, e)
-        else:
+        elif self._usearch_query:
+            # Only offer "Ask AI: <q>" when there is a query to ask about.
             self._usearch_ask_row(p)
 
         results = self._usearch_results
@@ -2829,7 +2904,7 @@ class AppWindow:
                          fill="x", padx=14, pady=(6, 2))
             for e in results:
                 self._usearch_result_row(p, e)
-        elif not ai:
+        elif not ai and self._usearch_query:
             tk.Label(p, text="No matches — press Enter to ask AI",
                      fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 9),
                      anchor="w").pack(fill="x", padx=14, pady=(0, 10))
@@ -2928,10 +3003,11 @@ class AppWindow:
             pass
 
     def _maybe_hide_usearch(self) -> None:
-        # Keep the panel up while the AI answer is on screen, or while the
-        # pointer is inside the panel or the search bar (a result click lands
-        # here first). Otherwise the search bar lost focus for real — hide it.
-        if self._usearch_ai is not None:
+        # Keep the panel up while the AI answer is on screen, while the chevron
+        # has it pinned, or while the pointer is inside the panel or the search
+        # bar (a result click lands here first). Otherwise it lost focus for
+        # real — hide it.
+        if self._usearch_ai is not None or self._usearch_force_dropdown:
             return
         try:
             if self._root.focus_get() is self._usearch_entry:
@@ -2966,6 +3042,8 @@ class AppWindow:
         self._usearch_query = ""
         self._usearch_ai = None
         self._usearch_results = []
+        self._usearch_force_dropdown = False
+        self._set_usearch_caret(False)
         ent = getattr(self, "_usearch_entry", None)
         if ent is None:
             return
@@ -3028,6 +3106,9 @@ class AppWindow:
         self._usearch_query = ""
         self._usearch_ai = None
         self._usearch_results = []
+        self._usearch_force_dropdown = False
+        self._usearch_filter_hits = None
+        self._set_usearch_caret(False)
         self._hide_usearch_panel()
         ent = getattr(self, "_usearch_entry", None)
         if ent is not None:
@@ -6023,6 +6104,7 @@ class AppWindow:
                      if q in ((it.get("refined_text") or it.get("transcribed_text")
                                or "").lower())
                      or q in (it.get("app_name") or "").lower()]
+        self._usearch_filter_hits = len(items)
         if not items:
             self._hist_set_placeholder(
                 "No matches." if q else "No transcriptions yet.")
@@ -8027,6 +8109,7 @@ class AppWindow:
             if r["is_section"]:
                 r["show"] = (not q) or r["section"]["hits"] > 0
         hits = sum(1 for r in rows if r["show"] and not r["is_section"])
+        self._usearch_filter_hits = hits
 
         def _swap():
             for r in rows:
@@ -8294,6 +8377,7 @@ class AppWindow:
 
             shown = [e for e in entries
                      if self._lib_matches(kind, e, state.get("query", ""))]
+            self._usearch_filter_hits = len(shown)
 
             if not entries and editing != "new":
                 self._draw_library_empty(holder, kind)
@@ -8795,6 +8879,7 @@ class AppWindow:
             query = state.get("query", "")
             shown = [r for r in rows
                      if not query or query in (r.get("phrase") or "").lower()]
+            self._usearch_filter_hits = len(shown)
             if not rows:
                 self._draw_phrases_empty(holder)
                 return
