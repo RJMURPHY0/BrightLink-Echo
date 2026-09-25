@@ -55,10 +55,48 @@ _ASYNC_SAVE_DEBOUNCE_S = 0.03
 
 
 # ── "Your impact" range keys ─────────────────────────────────────────────────
-# Either one of the five named windows or an explicit span written as
+# Either one of the named windows or an explicit span written as
 # "custom:YYYY-MM-DD:YYYY-MM-DD" (inclusive, start <= end). Kept here rather
 # than in the UI so config.load() and stats.snapshot() agree on what is legal.
-IMPACT_RANGES = ("today", "week", "month", "year", "all")
+# "year" (this calendar year) is no longer offered in the picker but stays
+# valid, so a saved value and old callers still resolve.
+IMPACT_RANGES = ("today", "yesterday", "week", "month", "6m", "12m", "year",
+                 "all")
+
+
+def _months_back(d, n: int):
+    """The same day n months earlier, clamped to that month's last day."""
+    import calendar
+    y, m = divmod(d.year * 12 + (d.month - 1) - n, 12)
+    m += 1
+    return d.replace(year=y, month=m,
+                     day=min(d.day, calendar.monthrange(y, m)[1]))
+
+
+def named_range_bounds(key, today):
+    """(start, end) inclusive for a named window, or None for lifetime.
+
+    The one definition of every named window: stats.snapshot() scopes the
+    cards with it and _words_by_range buckets the words count with it, so
+    the two can never disagree. "6m"/"12m" are rolling: the last 6 or 12
+    months up to and including today."""
+    import datetime as _dt
+    one = _dt.timedelta(days=1)
+    if key == "today":
+        return today, today
+    if key == "yesterday":
+        return today - one, today - one
+    if key == "week":                                   # Monday-start
+        return today - _dt.timedelta(days=today.weekday()), today
+    if key == "month":
+        return today.replace(day=1), today
+    if key == "6m":
+        return _months_back(today, 6) + one, today
+    if key == "12m":
+        return _months_back(today, 12) + one, today
+    if key == "year":
+        return today.replace(month=1, day=1), today
+    return None
 
 
 def parse_custom_range(value):
@@ -120,7 +158,7 @@ class Config:
     show_pill_arrows: bool = True  # Show the ▴▾◂▸ nudge arrows on the recording pill; off = clean pill (the saved position still applies)
     badge_dismiss_on_key: bool = True  # The post-dictation ✓ badge disappears the moment you press any key (modifiers and auto-repeat excluded); off = it stays until its timeout, the ✕, or you switch app
     hide_popup_in_screenshots: bool = False  # Exclude the pill/badge/refine panel from screenshots and screen recordings (SetWindowDisplayAffinity WDA_EXCLUDEFROMCAPTURE; needs Win10 2004+, silently stays visible on older builds)
-    impact_range: str = "all"  # "Your impact" window (dropdown scopes ALL three cards + words): today|week|month|year|all. Default 'all' = lifetime, the impressive first-impression figure
+    impact_range: str = "all"  # "Your impact" window (dropdown scopes ALL three cards + words): see IMPACT_RANGES, or a custom span. Default 'all' = lifetime, the impressive first-impression figure
     trim_silence: bool = True  # Drop fully-silent committed chunks (no words transcribed) from the stored clip to save local disk
     trailing_space: bool = False  # Append a space after each injection (useful when dictating mid-sentence)
     auto_enter: bool = False      # Press Enter after injection (useful for chat/search boxes)

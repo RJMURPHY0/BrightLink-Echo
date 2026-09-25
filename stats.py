@@ -208,10 +208,10 @@ def _compute_streak(used, today: datetime.date) -> int:
 
 
 def _words_by_range(days: dict, carry_words: int, today: datetime.date) -> dict:
-    wk_start = today - datetime.timedelta(days=today.weekday())  # Monday
-    mo_start = today.replace(day=1)
-    yr_start = today.replace(month=1, day=1)
-    totals = {"today": 0, "week": 0, "month": 0, "year": 0, "all": int(carry_words)}
+    from config import IMPACT_RANGES, named_range_bounds
+    bounds = {k: named_range_bounds(k, today) for k in IMPACT_RANGES}
+    totals = {k: 0 for k in IMPACT_RANGES}
+    totals["all"] = int(carry_words)
     for iso, rec in days.items():
         try:
             d = datetime.date.fromisoformat(iso)
@@ -221,20 +221,15 @@ def _words_by_range(days: dict, carry_words: int, today: datetime.date) -> dict:
         totals["all"] += w
         if d > today:
             continue  # never count a future-dated row in the windows
-        if d == today:
-            totals["today"] += w
-        if d >= wk_start:
-            totals["week"] += w
-        if d >= mo_start:
-            totals["month"] += w
-        if d >= yr_start:
-            totals["year"] += w
+        for k, b in bounds.items():
+            if b is not None and b[0] <= d <= b[1]:
+                totals[k] += w
     return totals
 
 
 def _words_for(days: dict, carry_words: int, today: datetime.date, rng: str,
                custom, total_words: int) -> dict:
-    """The five named totals, plus the custom span under its own key so the
+    """The named totals, plus the custom span under its own key so the
     footer count can be looked up by the same range key the cards use."""
     totals = _words_by_range(days, carry_words, today)
     if custom is not None:
@@ -333,8 +328,8 @@ class StatsStore:
         """Current metrics for the signed-in (or local) account.
 
         ``rng`` scopes the time-saved, dictation-speed, words and active-days
-        figures to a window: 'today', 'week' (Monday-start), 'month', 'year',
-        or 'all' (default — lifetime, and the ONLY window that folds in the
+        figures to a window: any key in config.IMPACT_RANGES (bounds from
+        config.named_range_bounds), a custom span, or 'all' (default — lifetime, and the ONLY window that folds in the
         collapsed ``carry`` totals from trimmed old days). The streak and the
         calendar's ``active_days`` are always lifetime: a streak is a running
         concept and the streak panel's calendar navigates months itself.
@@ -358,23 +353,21 @@ class StatsStore:
         except Exception:
             custom = None
 
+        try:
+            from config import named_range_bounds
+            bounds = custom or named_range_bounds(rng, today)
+        except Exception:
+            bounds = custom
+
         def _in_window(d: datetime.date) -> bool:
-            if custom is not None:
-                return custom[0] <= d <= custom[1]
-            if rng == "today":
-                return d == today
-            if rng == "week":
-                return today - datetime.timedelta(days=today.weekday()) <= d <= today
-            if rng == "month":
-                return d.year == today.year and d.month == today.month and d <= today
-            if rng == "year":
-                return d.year == today.year and d <= today
-            return True  # 'all' (or any unknown value) = lifetime
+            if bounds is None:
+                return True  # 'all' (or any unknown value) = lifetime
+            return bounds[0] <= d <= bounds[1]
 
         # Carry (collapsed old days) has no date, so it belongs only to an
         # UNBOUNDED window: 'all', or any unrecognised value (which _in_window
-        # also treats as lifetime). Only the four bounded windows exclude it.
-        windowed = custom is not None or rng in ("today", "week", "month", "year")
+        # also treats as lifetime). Every bounded window excludes it.
+        windowed = bounds is not None
 
         # Two accumulations in one pass: the selected window (drives the cards)
         # and lifetime (streak, calendar, and the wpm fallback for thin windows).

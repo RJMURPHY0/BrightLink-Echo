@@ -664,13 +664,24 @@ class Dropdown(tk.Canvas):
         self.create_text(self._PAD_X, h // 2, text=self._var.get(), anchor="w",
                          fill=C["text"], font=self._font_spec)
         # Chevron — two strokes, so it stays crisp at any DPI.
+        # Points the way the list opens: up when it rises over the control.
         cx = w - self._PAD_X - 5
         cy = h // 2 - 1
         col = C["accent"] if (self._hover or self._menu) else C["subtext"]
-        self.create_line(cx - 4, cy - 1, cx, cy + 3, fill=col, width=1.6,
-                         capstyle="round")
-        self.create_line(cx, cy + 3, cx + 4, cy - 1, fill=col, width=1.6,
-                         capstyle="round")
+        if self._chevron_up():
+            cy += 1
+            self.create_line(cx - 4, cy + 1, cx, cy - 3, fill=col, width=1.6,
+                             capstyle="round")
+            self.create_line(cx, cy - 3, cx + 4, cy + 1, fill=col, width=1.6,
+                             capstyle="round")
+        else:
+            self.create_line(cx - 4, cy - 1, cx, cy + 3, fill=col, width=1.6,
+                             capstyle="round")
+            self.create_line(cx, cy + 3, cx + 4, cy - 1, fill=col, width=1.6,
+                             capstyle="round")
+
+    def _chevron_up(self) -> bool:
+        return False
 
     def toggle(self) -> None:
         if self._menu is not None:
@@ -888,6 +899,7 @@ class RangePicker(Dropdown):
         self._entries = {}
         self._focus_field = "start"
         self._menu_above = False        # side chosen at open (see _opens_above)
+        self._dy = 0                    # content shift when the tabs sit at the bottom
         super().__init__(parent, variable, values, bg=bg, font=font)
 
     # ── the closed control ───────────────────────────────────────────────────
@@ -907,6 +919,19 @@ class RangePicker(Dropdown):
         except (tk.TclError, ValueError):
             pass
         super()._paint()
+
+    def _chevron_up(self) -> bool:
+        """Open: the side it opened on. Closed: the side it WILL open on, so
+        the arrow never points away from where the list appears."""
+        if self._menu is not None:
+            return bool(self._menu_above)
+        try:
+            if not self.winfo_ismapped():
+                return False
+            _l, mon_t, _r, mon_b = _monitor_work_area(self)
+            return bool(self._opens_above(mon_t, mon_b))
+        except Exception:
+            return False
 
     def set_custom(self, start, end) -> None:
         """Seed the calendar from a saved span (restoring config at startup)."""
@@ -1089,19 +1114,31 @@ class RangePicker(Dropdown):
         else:
             _rr(cv, 0, 0, w - 1, h - 1, 8, fill=C["surface"], outline=C["border"])
 
+        # The tabs sit on the edge NEXT TO the control: the bottom when the
+        # panel rises above it. That edge is the one glued to the control, so
+        # switching tabs (which changes the panel's height) moves only the far
+        # edge and the tabs stay under the pointer. Content shifts up by the
+        # tab band via _dy.
+        bottom = bool(self._menu_above)
+        tb = self._TAB_H
+        ty0 = h - tb if bottom else 0
+        self._dy = -tb if bottom else 0
         half = w // 2
         for i, (key, label) in enumerate((("periods", "Periods"),
                                           ("custom", "From / to"))):
             x0 = 1 + i * (half - 1)
             x1 = x0 + half - 2
             on = self._tab == key
-            cv.create_text((x0 + x1) // 2, self._TAB_H // 2 + 1, text=label,
+            cv.create_text((x0 + x1) // 2, ty0 + tb // 2 + 1, text=label,
                            fill=C["text"] if on else C["subtext"],
                            font=("Segoe UI", 9, "bold" if on else "normal"))
-            cv.create_line(x0 + 10, self._TAB_H - 2, x1 - 10, self._TAB_H - 2,
+            ly = ty0 + 2 if bottom else tb - 2
+            cv.create_line(x0 + 10, ly, x1 - 10, ly,
                            fill=C["accent"] if on else C["surface"], width=2)
-            self._hit(x0, 2, x1, self._TAB_H - 2, lambda k=key: self._set_tab(k))
-        cv.create_line(1, self._TAB_H, w - 1, self._TAB_H, fill=C["divider"])
+            self._hit(x0, ty0 + 2, x1, ty0 + tb - 2,
+                      lambda k=key: self._set_tab(k))
+        dl = ty0 if bottom else tb
+        cv.create_line(1, dl, w - 1, dl, fill=C["divider"])
 
         if self._tab == "periods":
             self._paint_periods()
@@ -1113,7 +1150,7 @@ class RangePicker(Dropdown):
         cv, w = self._menu_cv, self._menu_w
         current = self._var.get()
         for i, val in enumerate(self._values):
-            y = self._TAB_H + 6 + i * self._ROW_H
+            y = self._TAB_H + 6 + i * self._ROW_H + self._dy
             sel = val == current
             cv.create_text(16, y + self._ROW_H // 2, text=val, anchor="w",
                            fill=C["accent"] if sel else C["text"],
@@ -1129,22 +1166,23 @@ class RangePicker(Dropdown):
         cv, w = self._menu_cv, self._menu_w
         # Two dd/mm/yyyy fields. Real Entries, so a span can be typed as well as
         # clicked — the calendar writes into whichever field has focus.
+        dy = self._dy
         fw = (w - 24 - 22) // 2
         for i, key in enumerate(("start", "end")):
-            self._make_date_field(key, 12 + i * (fw + 22), 46, fw, 30)
-        cv.create_text(w // 2, 61, text="→", fill=C["subtext"],
+            self._make_date_field(key, 12 + i * (fw + 22), 46 + dy, fw, 30)
+        cv.create_text(w // 2, 61 + dy, text="→", fill=C["subtext"],
                        font=("Segoe UI", 10))
 
         m = self._cal_month
-        cv.create_text(w // 2, 100, text=m.strftime("%B %Y"), fill=C["text"],
-                       font=("Segoe UI", 10, "bold"))
+        cv.create_text(w // 2, 100 + dy, text=m.strftime("%B %Y"),
+                       fill=C["text"], font=("Segoe UI", 10, "bold"))
         for dx, step, glyph in ((22, -1, "‹"), (w - 22, 1, "›")):
-            cv.create_text(dx, 100, text=glyph, fill=C["subtext"],
+            cv.create_text(dx, 100 + dy, text=glyph, fill=C["subtext"],
                            font=("Segoe UI", 14))
-            self._hit(dx - 14, 86, dx + 14, 114,
+            self._hit(dx - 14, 86 + dy, dx + 14, 114 + dy,
                       lambda st=step: self._step_month(st))
 
-        wd_y = self._CAL_TOP
+        wd_y = self._CAL_TOP + dy
         for i, name in enumerate(("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su")):
             cv.create_text(self._cell_x(i), wd_y, text=name, fill=C["subtext"],
                            font=("Segoe UI", 8))
@@ -1183,7 +1221,7 @@ class RangePicker(Dropdown):
             self._hit(cx - 14, cy - 13, cx + 14, cy + 13,
                       lambda dd=day: self._pick_day(dd))
 
-        fy = self._menu_h - self._FOOT_H // 2
+        fy = self._menu_h + dy - self._FOOT_H // 2
         cv.create_text(18, fy, text="Clear", anchor="w", fill=C["subtext"],
                        font=("Segoe UI", 9))
         self._hit(12, fy - 12, 74, fy + 12, self._clear_custom)
@@ -4550,12 +4588,15 @@ class AppWindow:
         # ignores the configured colours and rendered as a white box. Left
         # un-widened (no fill="x") so it stays compact and inline where the
         # bold "Today" label was.
+        # "Last 12 months", not "Last year": "last year" reads as 2025.
         _RANGE_LABELS = {
-            "today": "Today",
-            "week":  "This week",
-            "month": "This month",
-            "year":  "This year",
-            "all":   "All time",
+            "today":     "Today",
+            "yesterday": "Yesterday",
+            "week":      "This week",
+            "month":     "This month",
+            "6m":        "Last 6 months",
+            "12m":       "Last 12 months",
+            "all":       "All time",
         }
         _RANGE_FROM_LABEL = {v: k for k, v in _RANGE_LABELS.items()}
         _cur_range = (getattr(self._config, "impact_range", "all")
@@ -4567,6 +4608,8 @@ class AppWindow:
         except Exception:
             _parse_span = lambda _v: None
         _span = _parse_span(_cur_range)
+        if _cur_range == "year":        # "This year" left the list (v1.6.97)
+            _cur_range = "12m"
         if _span is None and _cur_range not in _RANGE_LABELS:
             _cur_range = "all"
         self._impact_range = _cur_range
@@ -4950,7 +4993,9 @@ class AppWindow:
         """'this week' / 'this month' … for the selected window, '' for 'all'.
         Lets the breakdown panels say which period they are showing."""
         rng = snap.get("range", "all")
-        named = {"today": "today", "week": "this week", "month": "this month",
+        named = {"today": "today", "yesterday": "yesterday",
+                 "week": "this week", "month": "this month",
+                 "6m": "in the last 6 months", "12m": "in the last 12 months",
                  "year": "this year"}.get(rng)
         if named:
             return named

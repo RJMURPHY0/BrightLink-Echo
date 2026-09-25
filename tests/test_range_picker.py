@@ -19,7 +19,8 @@ import stats as stats_mod
 from app_window import C, Dropdown, RangePicker, _span_label
 
 _SHARED_ROOT = None
-_LABELS = ["Today", "This week", "This month", "This year", "All time"]
+_LABELS = ["Today", "Yesterday", "This week", "This month", "Last 6 months",
+           "Last 12 months", "All time"]
 
 
 def _shared_root():
@@ -305,6 +306,117 @@ class PlacementTests(unittest.TestCase):
         self.assertEqual(bottom(), first)
         self.p._set_tab("periods")
         self.assertEqual(bottom(), first)
+
+
+class OpenAboveLayoutTests(unittest.TestCase):
+    """Reported with screenshots (2026-09-25): opening upward, the chevron
+    still pointed down, and the tabs sat on the FAR edge, so switching tabs
+    (which changes the height) moved the tab row out from under the pointer.
+    The tabs now sit on the edge glued to the control."""
+
+    def setUp(self):
+        import app_window
+        self.root = _shared_root()
+        self.host = tk.Frame(self.root, bg=C["bg"])
+        self.host.pack()
+        self.addCleanup(self.host.destroy)
+        self.p = RangePicker(self.host, tk.StringVar(value="All time"),
+                             _LABELS, bg=C["surface"])
+        self.p.pack()
+        self.root.update_idletasks()
+        saved = app_window._monitor_work_area
+        app_window._monitor_work_area = lambda _w: (0, 0, 1280, 752)
+        self.addCleanup(lambda: setattr(app_window, "_monitor_work_area", saved))
+        self.p.winfo_rooty = lambda: 560
+        self.p.winfo_rootx = lambda: 120
+        self.p.winfo_height = lambda: 28
+        self.p.winfo_toplevel = lambda: _FakeWindow(60, 658)
+        self.p._foreground_is_ours = lambda: True
+        self.addCleanup(self.p.close)
+
+    def tab_hits(self):
+        return [h for h in self.p._hits if h[3] - h[1] == self.p._TAB_H - 4]
+
+    def test_tabs_sit_at_the_bottom_when_it_opens_above(self):
+        self.p._tab = "periods"
+        self.p.open()
+        self.assertTrue(self.p._menu_above)
+        for tab in ("periods", "custom", "periods"):
+            self.p._set_tab(tab)
+            hits = self.tab_hits()
+            self.assertEqual(len(hits), 2)
+            # Screen y of the tab band: panel top + in-panel y. Must not move.
+            geo = self.p._menu.geometry()
+            top = int(geo.split("+")[2])
+            ys = {top + h[1] for h in hits}
+            self.assertEqual(len(ys), 1)
+            if tab == "periods":
+                first = ys
+            self.assertEqual(ys, first, "tabs moved on a tab switch")
+            self.assertGreaterEqual(hits[0][1], self.p._menu_h - self.p._TAB_H)
+
+    def test_content_never_overlaps_the_bottom_tabs(self):
+        self.p._tab = "custom"
+        self.p.open()
+        band = self.p._menu_h - self.p._TAB_H
+        content = [h for h in self.p._hits if h not in self.tab_hits()]
+        self.assertTrue(content)
+        self.assertTrue(all(h[3] <= band for h in content),
+                        "calendar or footer runs into the tab band")
+        self.assertTrue(all(h[1] >= 0 for h in content))
+
+    def test_tabs_stay_on_top_when_it_opens_below(self):
+        self.p.winfo_rooty = lambda: 140
+        self.p._tab = "periods"
+        self.p.open()
+        self.assertFalse(self.p._menu_above)
+        self.assertTrue(all(h[1] < self.p._TAB_H for h in self.tab_hits()))
+
+    def test_chevron_points_the_way_it_opens(self):
+        self.p.winfo_ismapped = lambda: True
+        self.assertTrue(self.p._chevron_up())
+        self.p.winfo_rooty = lambda: 140
+        self.assertFalse(self.p._chevron_up())
+
+
+class NamedWindowTests(unittest.TestCase):
+    """Every named window comes from config.named_range_bounds, so the cards
+    and the words count agree."""
+
+    TODAY = datetime.date(2026, 9, 25)
+
+    def b(self, key):
+        return config_mod.named_range_bounds(key, self.TODAY)
+
+    def test_bounds(self):
+        d = datetime.date
+        self.assertEqual(self.b("today"), (d(2026, 9, 25), d(2026, 9, 25)))
+        self.assertEqual(self.b("yesterday"), (d(2026, 9, 24), d(2026, 9, 24)))
+        self.assertEqual(self.b("week"), (d(2026, 9, 21), d(2026, 9, 25)))
+        self.assertEqual(self.b("month"), (d(2026, 9, 1), d(2026, 9, 25)))
+        self.assertEqual(self.b("6m"), (d(2026, 3, 26), d(2026, 9, 25)))
+        self.assertEqual(self.b("12m"), (d(2025, 9, 26), d(2026, 9, 25)))
+        self.assertEqual(self.b("year"), (d(2026, 1, 1), d(2026, 9, 25)))
+        self.assertIsNone(self.b("all"))
+
+    def test_month_end_clamps(self):
+        got = config_mod.named_range_bounds("6m", datetime.date(2026, 8, 31))
+        self.assertEqual(got[0], datetime.date(2026, 3, 1))   # 28 Feb + 1
+
+    def test_every_key_is_a_valid_saved_value(self):
+        for k in config_mod.IMPACT_RANGES:
+            self.assertTrue(config_mod._valid_impact_range(k), k)
+
+    def test_words_buckets_match_the_bounds(self):
+        days = {"2026-09-25": {"w": 1}, "2026-09-24": {"w": 10},
+                "2026-05-01": {"w": 100}, "2025-12-01": {"w": 1000},
+                "2025-01-01": {"w": 10000}}
+        t = stats_mod._words_by_range(days, 5, self.TODAY)
+        self.assertEqual(t["today"], 1)
+        self.assertEqual(t["yesterday"], 10)
+        self.assertEqual(t["6m"], 111)
+        self.assertEqual(t["12m"], 1111)
+        self.assertEqual(t["all"], 11116)
 
 
 class StatsWindowTests(unittest.TestCase):
