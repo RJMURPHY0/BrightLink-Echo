@@ -141,6 +141,9 @@ class PickerTests(unittest.TestCase):
         # above Clear / Apply. The neighbouring months fill it now, dimmed.
         self.p._tab = "custom"
         self.p._cal_month = datetime.date(2026, 9, 1)
+        # The lose-foreground watch closes the panel at once when the test
+        # root is not the foreground window (the norm mid-suite).
+        self.p._watch_foreground = lambda: None
         self.p.open()
         self.addCleanup(self.p.close)
         cv = self.p._menu_cv

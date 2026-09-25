@@ -618,12 +618,17 @@ class HelpDotTests(unittest.TestCase):
                                  "%s uses jargon: %r" % (name, word))
 
     def test_the_tip_window_follows_the_dropdown_conventions(self):
+        # The tip itself lives in _HoverTip, shared with the History row
+        # icons, so there is one tooltip implementation in the app.
+        tip = self.src[self.src.index("class _HoverTip"):]
+        tip = tip[:tip.index("\nclass ")]
+        self.assertIn("overrideredirect(True)", tip)
+        self.assertIn('attributes("-topmost", True)', tip)
+        self.assertIn("_apply_popup_corners", tip)
+        self.assertIn("_monitor_work_area", tip,
+                      "clamp to the monitor it is on, not the primary")
         body = self.src[self.src.index("class HelpDot"):]
         body = body[:body.index("\nclass ")]
-        self.assertIn("overrideredirect(True)", body)
-        self.assertIn('attributes("-topmost", True)', body)
-        self.assertIn("_apply_popup_corners", body)
-        self.assertIn("_monitor_work_area", body,
-                      "clamp to the monitor it is on, not the primary")
+        self.assertIn("_HoverTip(self)", body)
         self.assertIn('self.bind("<Button-1>"', body,
                       "hover-only is unreachable for click-driven users")

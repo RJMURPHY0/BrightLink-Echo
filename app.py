@@ -63,7 +63,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.6.94"
+APP_VERSION = "1.6.95"
 
 
 class _RECT(ctypes.Structure):
@@ -404,7 +404,8 @@ class WhisperFlowApp:
             try:
                 self.app_window.attach_audio(
                     recorder=self.recorder, transcriber=self.transcriber,
-                    retranscribe=self._retranscribe_audio)
+                    retranscribe=self._retranscribe_audio,
+                    engine_meta=self._engine_meta)
             except Exception as e:
                 print(f"[App] attach_audio failed (non-fatal): {e}")
 
@@ -492,6 +493,19 @@ class WhisperFlowApp:
         lang = (getattr(self.config, "language", "en") or "en").lower()
         return (lang in ("", "en", "english")
                 and self.parakeet is not None and self.parakeet.is_loaded)
+
+    def _engine_meta(self) -> dict:
+        """What is transcribing right now: stamped on each local history record
+        so a feedback report can say which engine and model got it wrong."""
+        lang = getattr(self.config, "language", "en") or "en"
+        if self._use_parakeet():
+            engine = "parakeet"
+            model = f"parakeet-tdt-0.6b-{getattr(self.config, 'parakeet_version', 'v2')}"
+        else:
+            engine = "whisper"
+            model = getattr(self.config, "whisper_model", "") or ""
+        return {"engine": engine, "model": model, "language": lang,
+                "app_version": APP_VERSION}
 
     def _fast_engine(self):
         """Engine used for immediate/injection transcription."""
@@ -1894,6 +1908,10 @@ class WhisperFlowApp:
             # row share one identity — audio_store keys the WAV by created_at.
             import datetime as _dt
             _created_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
+            try:
+                _meta = self._engine_meta()
+            except Exception:
+                _meta = {}
             if audio_writer is not None:
                 audio_writer.finish(_created_at)
                 # Offer the clip to voice training. Silent no-op unless the
@@ -1908,7 +1926,8 @@ class WhisperFlowApp:
                 args=(transcribed_text,),
                 kwargs={"app_name": _app.get("app_name", ""),
                         "app_exe": _app.get("app_exe", ""),
-                        "created_at": _created_at},
+                        "created_at": _created_at,
+                        "meta": _meta},
                 daemon=True,
             ).start()
 

@@ -1464,6 +1464,86 @@ class SurfaceButton(RoundedButton):
 _GLASS_MUTED = "#8c8c8c"
 
 
+class _HoverTip:
+    """The app's one tooltip, shared by HelpDot and the History row icons.
+
+    An overrideredirect Toplevel built the same way the Dropdown list is
+    (topmost, DWM-rounded, never takes focus, clamped to the monitor it is on)
+    because every Toplevel in this app that went its own way has cost a
+    Z-order or DPI bug. It sits centred under its anchor and flips above it
+    when the monitor runs out of room.
+    """
+
+    _TIP_W = 260
+    _PAD = 10
+
+    def __init__(self, owner: tk.Misc):
+        self._owner = owner
+        self._tip = None
+
+    @property
+    def showing(self) -> bool:
+        return self._tip is not None
+
+    def show(self, text: str, cx: int, top: int, bottom: int) -> None:
+        """Show `text` centred on screen x `cx`, below the anchor spanning
+        screen y `top`..`bottom` (or above it when there is no room)."""
+        if self._tip is not None:
+            return
+        try:
+            if not self._owner.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        pad = self._PAD
+        font = tkfont.Font(family="Segoe UI", size=9)
+        # Measure the wrapped text so the tip is exactly as tall as it needs
+        # to be — a fixed height either clips a long line or leaves a gap.
+        probe = tk.Label(self._owner, text=text, font=font,
+                         wraplength=self._TIP_W - 2 * pad, justify="left")
+        probe.update_idletasks()
+        tw = min(self._TIP_W - 2 * pad, probe.winfo_reqwidth())
+        th = probe.winfo_reqheight()
+        probe.destroy()
+        w, h = tw + 2 * pad, th + 2 * pad
+
+        mon_l, mon_t, mon_r, mon_b = _monitor_work_area(self._owner)
+        x = cx - w // 2
+        y = bottom + 6
+        if y + h > mon_b - 8:                       # flip above when tight
+            y = top - h - 6
+        x = max(mon_l + 8, min(x, mon_r - w - 8))
+        y = max(mon_t + 8, min(y, mon_b - h - 8))
+
+        tip = tk.Toplevel(self._owner)
+        tip.overrideredirect(True)
+        tip.configure(bg=C["surface_hover"])
+        try:
+            tip.attributes("-topmost", True)
+            tip.attributes("-toolwindow", True)
+        except tk.TclError:
+            pass
+        tip.geometry("%dx%d+%d+%d" % (w, h, x, y))
+        tk.Label(tip, text=text, bg=C["surface_hover"],
+                 fg=C["text"], font=font, wraplength=tw, justify="left",
+                 anchor="w").place(x=pad, y=pad, width=tw, height=th)
+        self._tip = tip
+        try:
+            from popup import _apply_popup_corners
+            tip.update_idletasks()
+            _apply_popup_corners(tip.winfo_id())
+        except Exception:
+            pass
+
+    def hide(self) -> None:
+        tip, self._tip = self._tip, None
+        if tip is not None:
+            try:
+                tip.destroy()
+            except tk.TclError:
+                pass
+
+
 class HelpDot(tk.Canvas):
     """A small "?" bubble that explains a control on hover.
 
@@ -1477,7 +1557,6 @@ class HelpDot(tk.Canvas):
 
     _SIZE       = 15
     _DELAY_MS   = 220         # long enough that sweeping past does not flash
-    _TIP_W      = 260
 
     def __init__(self, parent, text: str, **kw):
         bg = kw.pop("bg", None) or parent.cget("bg")
@@ -1485,7 +1564,7 @@ class HelpDot(tk.Canvas):
                          width=self._SIZE, height=self._SIZE,
                          cursor="hand2", **kw)
         self._tip_text = text
-        self._tip = None
+        self._tip = _HoverTip(self)
         self._job = None
         self._hover = False
         self._photos = []
@@ -1547,55 +1626,17 @@ class HelpDot(tk.Canvas):
 
     def _show(self):
         self._job = None
-        if self._tip is not None or not self.winfo_exists():
-            return
-        pad = 10
-        font = tkfont.Font(family="Segoe UI", size=9)
-        # Measure the wrapped text so the tip is exactly as tall as it needs
-        # to be — a fixed height either clips a long line or leaves a gap.
-        probe = tk.Label(self, text=self._tip_text, font=font,
-                         wraplength=self._TIP_W - 2 * pad, justify="left")
-        probe.update_idletasks()
-        tw = min(self._TIP_W - 2 * pad, probe.winfo_reqwidth())
-        th = probe.winfo_reqheight()
-        probe.destroy()
-        w, h = tw + 2 * pad, th + 2 * pad
-
-        mon_l, mon_t, mon_r, mon_b = _monitor_work_area(self)
-        x = self.winfo_rootx() + self._SIZE // 2 - w // 2
-        y = self.winfo_rooty() + self._SIZE + 6
-        if y + h > mon_b - 8:                       # flip above when tight
-            y = self.winfo_rooty() - h - 6
-        x = max(mon_l + 8, min(x, mon_r - w - 8))
-        y = max(mon_t + 8, min(y, mon_b - h - 8))
-
-        top = tk.Toplevel(self)
-        top.overrideredirect(True)
-        top.configure(bg=C["surface_hover"])
         try:
-            top.attributes("-topmost", True)
-            top.attributes("-toolwindow", True)
+            if not self.winfo_exists():
+                return
+            x, y = self.winfo_rootx(), self.winfo_rooty()
         except tk.TclError:
-            pass
-        top.geometry("%dx%d+%d+%d" % (w, h, x, y))
-        tk.Label(top, text=self._tip_text, bg=C["surface_hover"],
-                 fg=C["text"], font=font, wraplength=tw, justify="left",
-                 anchor="w").place(x=pad, y=pad, width=tw, height=th)
-        self._tip = top
-        try:
-            from popup import _apply_popup_corners
-            top.update_idletasks()
-            _apply_popup_corners(top.winfo_id())
-        except Exception:
-            pass
+            return
+        self._tip.show(self._tip_text, x + self._SIZE // 2, y,
+                       y + self._SIZE)
 
     def _hide(self):
-        tip, self._tip = self._tip, None
-        if tip is not None:
-            try:
-                tip.destroy()
-            except tk.TclError:
-                pass
+        self._tip.hide()
 
 
 class KeyCapRow(tk.Canvas):
@@ -2143,6 +2184,7 @@ class AppWindow:
         # Expanded-row audio player / actions (playback is local-only: the
         # clip exists solely on the machine that dictated it).
         self._retranscribe = None          # attached by app._init_core
+        self._engine_meta = None           # () -> {engine, model, language, app_version}
         self._hist_retry_keys = set()
         self._audio_path_cache = {}
         self._wave_cache = {}
@@ -2317,7 +2359,7 @@ class AppWindow:
             pass
 
     def attach_audio(self, recorder=None, transcriber=None,
-                     retranscribe=None) -> None:
+                     retranscribe=None, engine_meta=None) -> None:
         """Late-bind the audio subsystem. The pipeline is built on a
         background thread after first paint (see app._init_core), so these
         arrive a moment after construction; every use site already guards
@@ -2328,6 +2370,8 @@ class AppWindow:
             self._transcriber = transcriber
         if retranscribe is not None:
             self._retranscribe = retranscribe
+        if engine_meta is not None:
+            self._engine_meta = engine_meta
 
     def _repaint_all(self, erase: bool = False) -> None:
         """Synchronous full repaint of the whole window tree:
@@ -3322,6 +3366,10 @@ class AppWindow:
     def _switch_dash_tab(self, name: str) -> None:
         previous = getattr(self, "_current_tab", None)
         self._current_tab = name
+        # The History flag's tip and feedback card belong to that page.
+        self._hide_flag_tip()
+        if name != "history":
+            self._close_feedback()
 
         # A search results panel floats over the content area, so it must not
         # linger over the tab we just switched to. The one search bar also
@@ -6557,6 +6605,8 @@ class AppWindow:
 
     def _render_history(self) -> None:
         self._hist_clear_confirm = False
+        self._hist_flag_hot = False
+        self._hide_flag_tip()
         cv = self._hist_cv
         width = cv.winfo_width()
         if width <= 10:
@@ -6733,7 +6783,9 @@ class AppWindow:
 
         # While the Cancel/Delete pair is showing it eats into the header, so the
         # header text has to stop well short of it or it renders underneath.
-        text_width = max((width - 227) if confirming else (width - 154), 80)
+        # (164, not the bin's old 154: the hover-only flag sits left of the bin
+        # and the preview must stop short of it.)
+        text_width = max((width - 227) if confirming else (width - 164), 80)
 
         if expanded:
             # One block of text per state: the full text is drawn below, so the
@@ -6802,6 +6854,12 @@ class AppWindow:
             for x in (9, 11, 13)
         ]
 
+        # Flag = "Send feedback". Hover-only like the bin, in its own slot to
+        # the bin's left. A PIL glyph (the high-res icon rule), so its image
+        # is set on hover against the hover fill it has to sit on.
+        flag_id = cv.create_image(width - self._HIST_FLAG_CX, y0 + 20,
+                                  anchor="center", state="hidden")
+
         entry["hits"] = []
         extras_refs = {}
         if expanded:
@@ -6812,7 +6870,7 @@ class AppWindow:
 
         self._hist_drawn_rows[entry["index"]] = {
             "bg": bg_id, "icon": icon_id, "icon_n": icon_n,
-            "copy": copy_items, "delete": delete_items,
+            "copy": copy_items, "delete": delete_items, "flag": flag_id,
             "time": time_id, "confirm": confirm_items,
             **extras_refs,
         }
@@ -6856,11 +6914,15 @@ class AppWindow:
                              fill=old_base)
             if old["time"] is not None:      # timestamp comes back
                 cv.itemconfigure(old["time"], state="normal")
+            if old.get("flag") is not None:
+                cv.itemconfigure(old["flag"], state="hidden")
             # PIL-rendered images carry a baked-in background — re-render any
             # on this row against its un-hovered base.
             self._sync_row_image_bg(old_index, old, old_base)
         self._hist_bin_hot = False
         self._hist_copy_hot = False
+        self._hist_flag_hot = False
+        self._hide_flag_tip()
         self._hist_hover_index = index
         row = self._hist_drawn_rows.get(index)
         # Rows are clickable (expand/copy/delete) — show a hand as feedback.
@@ -6889,6 +6951,331 @@ class AppWindow:
                 cv.itemconfigure(row["time"], state="hidden")
             for part in row["delete"]:
                 cv.itemconfigure(part, state="normal")
+            if row.get("flag") is not None:
+                photo = self._flag_photo(hover_bg, hot=False)
+                if photo is not None:
+                    cv.itemconfigure(row["flag"], image=photo, state="normal")
+
+    # ── History: Send feedback flag ──────────────────────────────────────────
+
+    _HIST_FLAG_CX = 81        # flag centre, px in from the canvas's right edge
+    _HIST_FLAG_ZONE = (96, 66)  # click/hover zone: width-96 … width-66
+    _FLAG_TIP_MS = 220        # same delay as HelpDot
+
+    def _flag_photo(self, bg: str, hot: bool):
+        # Held here per (bg, hot), not in ui_render's cache alone: that cache
+        # empties wholesale at 512 entries, which would blank a flag on screen.
+        # A handful of hover fills, so this never grows.
+        photos = self.__dict__.setdefault("_flag_photos", {})
+        key = (bg, hot)
+        if key not in photos:
+            colour = C["accent"] if hot else C["subtext"]
+            try:
+                photos[key] = ui_render.icon_glyph(
+                    self._hist_cv, "flag", 16, colour, bg=bg)
+            except Exception:
+                photos[key] = None
+        return photos[key]
+
+    def _on_history_flag(self, x: int, canvas_y: float, index) -> bool:
+        """True when the pointer is on the flag of the hovered row."""
+        if index is None or index != self._hist_hover_index:
+            return False
+        entry = self._hist_layout[index]
+        if entry["key"] == self._hist_confirm_key:
+            return False
+        width = self._hist_cv.winfo_width()
+        far, near = self._HIST_FLAG_ZONE
+        return (width - far <= x < width - near
+                and canvas_y <= entry["y0"] + 40)
+
+    def _feedback_available(self) -> bool:
+        db = getattr(self, "_db", None)
+        try:
+            return bool(db is not None and db.can_send_feedback)
+        except Exception:
+            return False
+
+    def _schedule_flag_tip(self, index) -> None:
+        self._hide_flag_tip()
+        cv = self._hist_cv
+
+        def _show():
+            self._flag_tip_job = None
+            if (not getattr(self, "_hist_flag_hot", False)
+                    or self._hist_hover_index != index):
+                return
+            try:
+                entry = self._hist_layout[index]
+                rx = cv.winfo_rootx() + cv.winfo_width() - self._HIST_FLAG_CX
+                cy = cv.winfo_rooty() + int(entry["y0"] + 20 - cv.canvasy(0))
+            except (tk.TclError, IndexError):
+                return
+            if getattr(self, "_flag_tip", None) is None:
+                self._flag_tip = _HoverTip(cv)
+            text = ("Send feedback" if self._feedback_available()
+                    else "Sign in to send feedback")
+            self._flag_tip.show(text, rx, cy - 10, cy + 10)
+
+        try:
+            self._flag_tip_job = self._root.after(self._FLAG_TIP_MS, _show)
+        except tk.TclError:
+            self._flag_tip_job = None
+
+    def _hide_flag_tip(self) -> None:
+        job = getattr(self, "_flag_tip_job", None)
+        if job is not None:
+            try:
+                self._root.after_cancel(job)
+            except (tk.TclError, ValueError):
+                pass
+            self._flag_tip_job = None
+        tip = getattr(self, "_flag_tip", None)
+        if tip is not None:
+            tip.hide()
+
+    # ── History: feedback dialog ─────────────────────────────────────────────
+    #
+    # A PLACED card over the dashboard, never a Toplevel: every Toplevel here
+    # has cost a Z-order or DPI bug. It covers the whole dashboard because it
+    # is a commit-style dialog (send or cancel), which is the one case where a
+    # modal is right. The correction box is prefilled with what Echo heard, so
+    # the user fixes only the wrong words and the report is an exact pair.
+
+    def _feedback_report(self, item: dict, expected: str,
+                         audio_path) -> dict:
+        created = item.get("created_at") or ""
+        meta, source = {}, "recorded"
+        try:
+            meta = self._db.local_meta(created) if self._db else {}
+        except Exception:
+            meta = {}
+        if not meta.get("engine"):
+            source = "config"
+            try:
+                meta = dict(self._engine_meta() if self._engine_meta else {},
+                            **{k: v for k, v in meta.items() if v})
+            except Exception:
+                pass
+        seconds = None
+        if audio_path:
+            try:
+                seconds = round(float(self._wave_info(audio_path)[0]), 2)
+            except Exception:
+                seconds = None
+        return {
+            "transcription_created_at": created or None,
+            "transcribed_text": item.get("transcribed_text") or "",
+            "refined_text": item.get("refined_text") or None,
+            "expected_text": expected,
+            "audio_seconds": seconds,
+            "app_name": item.get("app_name") or None,
+            "app_exe": item.get("app_exe") or None,
+            "engine": meta.get("engine"),
+            "model": meta.get("model"),
+            "engine_source": source,
+            "language": meta.get("language"),
+            "app_version": meta.get("app_version"),
+            "user_email": self._account_email() or None,
+        }
+
+    def _open_feedback(self, item: dict) -> None:
+        self._close_feedback()
+        heard = item.get("refined_text") or item.get("transcribed_text") or ""
+        audio_path = self._audio_path_for(item)
+        st = {"item": item, "heard": heard, "audio": audio_path,
+              "include": bool(audio_path), "sending": False}
+        self._fb = st
+
+        cover = tk.Frame(self._dash_frame, bg=C["bg"])
+        st["cover"] = cover
+        tk.Frame(cover, bg=C["bg"]).pack(fill="both", expand=True)
+        card = self._card(cover, inner_pad=(18, 16), margin=(0, 0))
+        tk.Frame(cover, bg=C["bg"]).pack(fill="both", expand=True)
+        bg = C["surface"]
+
+        head = tk.Frame(card, bg=bg)
+        head.pack(fill="x")
+        tk.Label(head, text="Report to improve model", bg=bg, fg=C["text"],
+                 font=("Segoe UI", 11, "bold")).pack(side="left")
+        close = tk.Label(head, text="✕", bg=bg, fg=C["subtext"],
+                         font=("Segoe UI", 10), cursor="hand2")
+        close.pack(side="right")
+        close.bind("<Button-1>", lambda _e: self._close_feedback())
+        close.bind("<Enter>", lambda _e: close.configure(fg=C["text"]))
+        close.bind("<Leave>", lambda _e: close.configure(fg=C["subtext"]))
+        tk.Label(card, text="Tell us what it should have said.", bg=bg,
+                 fg=C["subtext"], font=("Segoe UI", 9),
+                 anchor="w").pack(fill="x", pady=(2, 12))
+
+        def _caption(text):
+            tk.Label(card, text=text, bg=bg, fg=C["subtext"],
+                     font=("Segoe UI", 8), anchor="w").pack(fill="x",
+                                                            pady=(0, 4))
+
+        def _box(text, height, editable):
+            t = tk.Text(card, height=height, wrap="word", relief="flat", bd=6,
+                        highlightthickness=1,
+                        highlightbackground=C["border"],
+                        highlightcolor=C["accent"],
+                        bg=C["input_bg"],
+                        fg=C["text"] if editable else C["subtext"],
+                        insertbackground=C["text"], font=("Segoe UI", 9))
+            t.insert("1.0", text)
+            if not editable:
+                t.configure(state="disabled", cursor="arrow")
+            t.pack(fill="x", pady=(0, 10))
+            return t
+
+        _caption("WHAT ECHO HEARD")
+        _box(heard, 3, False)
+        _caption("WHAT IT SHOULD HAVE SAID")
+        st["entry"] = _box(heard, 4, True)
+
+        if audio_path:
+            row = tk.Frame(card, bg=bg, cursor="hand2")
+            row.pack(fill="x", pady=(0, 10))
+            box = tk.Canvas(row, width=16, height=16, bg=bg,
+                            highlightthickness=0, bd=0, cursor="hand2")
+            box.pack(side="left")
+            lbl = tk.Label(row, text="Include the recording", bg=bg,
+                           fg=C["text"], font=("Segoe UI", 9), cursor="hand2")
+            lbl.pack(side="left", padx=(8, 0))
+            st["tick"] = box
+            for w in (row, box, lbl):
+                w.bind("<Button-1>", lambda _e: self._toggle_feedback_audio())
+            self._paint_feedback_tick()
+
+        foot = tk.Frame(card, bg=bg)
+        foot.pack(fill="x")
+        st["status"] = tk.Label(foot, text="", bg=bg, fg=C["subtext"],
+                                font=("Segoe UI", 9), anchor="w")
+        st["status"].pack(side="left", fill="x", expand=True)
+        st["send"] = self._surface_btn(foot, "Send feedback", None,
+                                       font=("Segoe UI", 9, "bold"),
+                                       padx=14, pady=6, bg=bg)
+        st["send"].pack(side="right")
+        cancel = self._surface_btn(foot, "Cancel", self._close_feedback,
+                                   fg=C["subtext"], font=("Segoe UI", 9),
+                                   padx=14, pady=6, bg=bg)
+        cancel.pack(side="right", padx=(0, 8))
+
+        st["entry"].bind("<KeyRelease>", lambda _e: self._sync_feedback_send())
+        st["entry"].bind("<Escape>", lambda _e: self._close_feedback())
+        self._sync_feedback_send()
+
+        def _show():
+            cover.place(in_=self._dash_frame, x=0, y=0, relwidth=1.0,
+                        relheight=1.0)
+            cover.lift()
+        self._atomic_ui(_show)
+        try:
+            st["entry"].focus_set()
+            st["entry"].mark_set("insert", "end-1c")
+        except tk.TclError:
+            pass
+
+    def _paint_feedback_tick(self) -> None:
+        st = getattr(self, "_fb", None)
+        box = (st or {}).get("tick")
+        if box is None:
+            return
+        box.delete("all")
+        on = st["include"]
+        bg = C["surface"]
+        photo = None
+        try:
+            photo = ui_render.round_rect(box, 16, 16, 4,
+                                         C["accent"] if on else C["input_bg"],
+                                         "" if on else C["border"],
+                                         1, bg)
+        except Exception:
+            photo = None
+        if photo is not None:
+            box.create_image(0, 0, image=photo, anchor="nw")
+            st["tick_bg"] = photo
+        else:
+            _rr(box, 1, 1, 15, 15, 4, fill=C["accent"] if on else C["input_bg"],
+                outline="" if on else C["border"])
+        if on:
+            mark = ui_render.icon_glyph(box, "check", 14, C["bg"],
+                                        bg=C["accent"])
+            if mark is not None:
+                box.create_image(8, 8, image=mark, anchor="center")
+                st["tick_mark"] = mark
+
+    def _toggle_feedback_audio(self) -> None:
+        st = getattr(self, "_fb", None)
+        if not st or st["sending"]:
+            return
+        st["include"] = not st["include"]
+        self._paint_feedback_tick()
+
+    def _feedback_text(self) -> str:
+        st = getattr(self, "_fb", None)
+        try:
+            return st["entry"].get("1.0", "end-1c").strip() if st else ""
+        except tk.TclError:
+            return ""
+
+    def _sync_feedback_send(self) -> None:
+        """Send is live only once the correction differs from what was heard:
+        an unchanged box says nothing a model could learn from."""
+        st = getattr(self, "_fb", None)
+        if not st:
+            return
+        text = self._feedback_text()
+        ready = (not st["sending"] and bool(text)
+                 and text != st["heard"].strip())
+        st["send"].configure(
+            bg=C["accent"] if ready else C["border"],
+            fg=C["text"] if ready else C["subtext"],
+            cursor="hand2" if ready else "",
+            command=self._send_feedback if ready else None)
+
+    def _send_feedback(self) -> None:
+        st = getattr(self, "_fb", None)
+        if not st or st["sending"] or not self._db:
+            return
+        expected = self._feedback_text()
+        if not expected or expected == st["heard"].strip():
+            return
+        st["sending"] = True
+        self._sync_feedback_send()
+        st["status"].configure(text="Sending…", fg=C["subtext"])
+        wav = st["audio"] if st["include"] else None
+        report = self._feedback_report(st["item"], expected, wav)
+
+        def _done(ok):
+            self._ui_after(0, self._feedback_sent, st, ok)
+
+        self._db.send_feedback(report, wav_path=wav, on_done=_done)
+
+    def _feedback_sent(self, st: dict, ok: bool) -> None:
+        if getattr(self, "_fb", None) is not st:
+            return                      # closed (or reopened) while in flight
+        st["sending"] = False
+        try:
+            if ok:
+                st["status"].configure(text="Sent. Thanks.",
+                                       fg=C["success"])
+                self._root.after(1200, lambda: (
+                    self._close_feedback()
+                    if getattr(self, "_fb", None) is st else None))
+            else:
+                st["status"].configure(text="Couldn't send. Try again.",
+                                       fg=C["error"])
+                self._sync_feedback_send()
+        except tk.TclError:
+            pass
+
+    def _close_feedback(self) -> None:
+        st, self._fb = getattr(self, "_fb", None), None
+        if st and st.get("cover") is not None:
+            try:
+                st["cover"].destroy()
+            except tk.TclError:
+                pass
 
     def _on_history_motion(self, event) -> None:
         cv = self._hist_cv
@@ -6910,6 +7297,22 @@ class AppWindow:
                         cv.itemconfigure(part, outline=colour)
                     except tk.TclError:
                         return
+        # Flag warms to the accent on hover and, after a beat, says what it is.
+        on_flag = row is not None and self._on_history_flag(
+            event.x, canvas_y, index)
+        if on_flag != getattr(self, "_hist_flag_hot", False):
+            self._hist_flag_hot = on_flag
+            if row and row.get("flag") is not None:
+                photo = self._flag_photo(self._row_hover_bg(index), on_flag)
+                if photo is not None:
+                    try:
+                        cv.itemconfigure(row["flag"], image=photo)
+                    except tk.TclError:
+                        return
+            if on_flag:
+                self._schedule_flag_tip(index)
+            else:
+                self._hide_flag_tip()
         # Bin turns red when the pointer is actually on it — the delete
         # affordance the widget version had. Only repaints on a state change.
         on_bin = (index is not None
@@ -7004,6 +7407,11 @@ class AppWindow:
                     self._render_history()
                 return
         if key == self._hist_confirm_key:
+            return
+        if self._on_history_flag(event.x, canvas_y, index):
+            self._hide_flag_tip()
+            if self._feedback_available():
+                self._open_feedback(item)
             return
         if event.x >= width - 34:
             text = item.get("refined_text") or item.get("transcribed_text") or ""

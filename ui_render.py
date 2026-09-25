@@ -596,6 +596,12 @@ def _glyph_paint(d, s, name: str, size: int, color: str) -> None:
         d.rounded_rectangle([3.5 * u, 6 * u, 20.5 * u, 18 * u],
                             radius=2 * u, outline=color, width=lw)
         L((4.5, 7.5), (12, 13), (19.5, 7.5))
+    elif name == "flag":
+        # Pole + waving pennant (lucide "flag" shape) — History "Send feedback"
+        L((5.5, 21), (5.5, 4))
+        L((5.5, 4.5), (8.5, 3.5), (11.5, 4.3), (14.5, 5.6), (17.5, 5.2),
+          (19.5, 4.5), (19.5, 14), (17.5, 14.7), (14.5, 15.1), (11.5, 13.8),
+          (8.5, 13), (5.5, 14))
     elif name == "brain":
         # The Learning tab: the CRM's own brain icon, traced from its SVG.
         for path in _BRAIN:

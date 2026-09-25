@@ -22,6 +22,16 @@ _HISTORY_SELECT_SHAPES = (
 )
 _CURRENT_USER = object()
 
+# Provenance stamped on each LOCAL history record (never the remote row), so a
+# feedback report can name the engine and model that produced the text.
+_META_KEYS = ("engine", "model", "language", "app_version")
+
+# Feedback reports: rows land in echo_feedback, the opt-in recording in this
+# private bucket under the user's own folder (RLS: insert own, super admin reads).
+_FEEDBACK_TABLE = "echo_feedback"
+_FEEDBACK_BUCKET = "echo-feedback-audio"
+_FEEDBACK_AUDIO_MAX = 25 * 1024 * 1024
+
 _local_history_lock = threading.Lock()
 
 
@@ -115,10 +125,13 @@ class SupabaseLogger:
     # ------------------------------------------------------------------
 
     def log_transcription(self, text: str, app_name: str = "",
-                          app_exe: str = "", created_at: str = "") -> None:
+                          app_exe: str = "", created_at: str = "",
+                          meta: Optional[dict] = None) -> None:
         """Save a new transcription record (with the app it was injected into).
         The caller may mint created_at itself (app.py does, so the saved audio
-        clip and the history row share one identity)."""
+        clip and the history row share one identity). `meta` (engine, model,
+        language, app_version) is kept on the LOCAL record only, for feedback
+        reports; the remote transcriptions row is unchanged."""
         owner = self._history_owner()
         # One timestamp is the durable local/remote identity. Previously the two
         # calls to now() differed, forcing fuzzy timestamp matching forever.
@@ -126,7 +139,7 @@ class SupabaseLogger:
             datetime.timezone.utc).isoformat()
         record = self._append_local(
             text, app_name=app_name, app_exe=app_exe,
-            created_at=created_at, user_id=owner,
+            created_at=created_at, user_id=owner, meta=meta,
         )
         self._remember_local_record(owner, record)
         if not self._enabled:
@@ -244,6 +257,92 @@ class SupabaseLogger:
 
         threading.Thread(target=_insert, daemon=True,
                          name="supabase-error-log").start()
+
+    # ------------------------------------------------------------------
+    # Feedback reports (History → flag)
+    # ------------------------------------------------------------------
+
+    @property
+    def can_send_feedback(self) -> bool:
+        """A report needs a signed-in account: RLS only accepts your own rows."""
+        return bool(self._enabled and self._user_id
+                    and self._user_id != "local")
+
+    def local_meta(self, created_at: str) -> dict:
+        """Engine/model/language/app_version stamped on the LOCAL record with
+        this created_at, or {} for rows from before the stamp existed (or from
+        another machine). Read straight from history.json so a remote merge
+        that dropped the extra keys cannot hide them."""
+        if not created_at:
+            return {}
+        try:
+            path = _local_history_path()
+            with _local_history_lock:
+                if not os.path.exists(path):
+                    return {}
+                with open(path, "r", encoding="utf-8") as f:
+                    entries = json.load(f)
+        except Exception:
+            return {}
+        for e in entries if isinstance(entries, list) else []:
+            if isinstance(e, dict) and e.get("created_at") == created_at:
+                return {k: e[k] for k in _META_KEYS if e.get(k)}
+        return {}
+
+    def send_feedback(self, report: dict, wav_path: Optional[str] = None,
+                      on_done: Optional[Callable[[bool], None]] = None) -> None:
+        """Fire-and-forget: file a transcription feedback report.
+
+        The recording is uploaded ONLY when the caller passes wav_path, which
+        it does only when the user ticked "Include the recording" on a report
+        they chose to send; it is the one way dictation audio leaves the
+        machine. An upload failure still files the report without audio.
+        on_done(ok) is called from the worker thread with whether the ROW
+        landed."""
+        payload = {k: v for k, v in dict(report).items()
+                   if v not in (None, "")}
+        user_id = self._user_id if self.can_send_feedback else None
+
+        def _work():
+            ok = False
+            try:
+                if not user_id:
+                    raise RuntimeError("not signed in")
+                client = self._get_client()
+                payload["user_id"] = user_id
+                if wav_path:
+                    try:
+                        if os.path.getsize(wav_path) > _FEEDBACK_AUDIO_MAX:
+                            raise ValueError("recording too large")
+                        import uuid
+                        obj = f"{user_id}/{uuid.uuid4().hex}.wav"
+                        with open(wav_path, "rb") as f:
+                            data = f.read()
+                        client.storage.from_(_FEEDBACK_BUCKET).upload(
+                            obj, data, {"content-type": "audio/wav"})
+                        payload["audio_path"] = obj
+                    except Exception as e:
+                        print(f"[Feedback] audio upload failed "
+                              f"(filing without it): {e}")
+                # returning=minimal is load-bearing: the default asks PostgREST
+                # to read the new row back, which needs SELECT, and only the
+                # super admin has SELECT on this table, so every other user's
+                # report would be refused by RLS.
+                from postgrest.types import ReturnMethod
+                client.table(_FEEDBACK_TABLE).insert(
+                    payload, returning=ReturnMethod.minimal).execute()
+                ok = True
+                print("[Feedback] report sent")
+            except Exception as e:
+                print(f"[Feedback] send failed: {e}")
+            if on_done is not None:
+                try:
+                    on_done(ok)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_work, daemon=True,
+                         name="supabase-feedback").start()
 
     # ------------------------------------------------------------------
     # Custom vocabulary / snippets sync
@@ -939,7 +1038,7 @@ class SupabaseLogger:
 
     def _append_local(self, text: str, app_name: str = "",
                       app_exe: str = "", created_at: str = "",
-                      user_id=_CURRENT_USER) -> dict:
+                      user_id=_CURRENT_USER, meta: Optional[dict] = None) -> dict:
         owner = self._history_owner(user_id)
         record = {
             "transcribed_text": text,
@@ -948,6 +1047,10 @@ class SupabaseLogger:
             "app_name": app_name,
             "app_exe": app_exe,
         }
+        for k in _META_KEYS:
+            v = (meta or {}).get(k)
+            if v:
+                record[k] = str(v)
         if owner:
             record["user_id"] = owner
         try:

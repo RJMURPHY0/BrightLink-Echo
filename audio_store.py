@@ -7,8 +7,11 @@ created_at timestamp — the same value that is the durable local/remote
 identity in supabase_client, so a history row maps to its recording with
 no schema change and the link survives remote merges.
 
-Audio never leaves the machine: playback/retry work only for dictations
-made on this device. Files are pruned oldest-first past a count/size cap.
+Audio stays on the machine: playback/retry work only for dictations made on
+this device. The two exceptions are both opt-in, one clip at a time: voice
+training (when switched on) and a History feedback report sent with
+"Include the recording" left ticked (supabase_client.send_feedback).
+Files are pruned oldest-first past a count/size cap.
 """
 
 import brand
