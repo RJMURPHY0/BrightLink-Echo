@@ -33,6 +33,77 @@ def _line_count(text: str) -> int:
     return (text or "").replace("\r\n", "\n").strip().count("\n") + 1
 
 
+# A line holding any visible character. Stops short of "\r" so a CRLF
+# selection's separators stay whole ("\r\n\r\n", never a split "\r").
+_CONTENT_LINE = re.compile(r"(?m)^[^\r\n]*?\S[^\r\n]*")
+
+# An Ask that talks about layout ("remove the blank lines", "one paragraph")
+# is asking for the spacing to change, so restoring it would undo the ask.
+_LAYOUT_ASK = re.compile(
+    r"\b(?:lines?|paragraphs?|spacing|spaces?|gaps?|blank|layout|"
+    r"(?:re)?format(?:ting)?|bullets?|lists?|indent\w*)\b", re.I)
+
+
+def _split_layout(text: str):
+    """(content lines, separators): separators has one more entry than lines —
+    the whitespace before the first line, between each pair, and after the
+    last — so joining them back reproduces the text byte for byte."""
+    lines, seps, pos = [], [], 0
+    for m in _CONTENT_LINE.finditer(text):
+        seps.append(text[pos:m.start()])
+        lines.append(m.group(0))
+        pos = m.end()
+    seps.append(text[pos:])
+    return lines, seps
+
+
+def restore_spacing(original: str, result: str) -> str:
+    """Put the original's exact spacing back onto a refined result.
+
+    The model reliably keeps a text's lines but normalises the whitespace
+    between them: three blank lines come back as one, a trailing newline is
+    stripped, an indent is dropped. A prompt cannot stop that, so the layout
+    is re-imposed here. Only whitespace is ever touched, never a word:
+      - same number of content lines -> every gap, indent and edge is the
+        original's, each line's text is the model's;
+      - lines merged or split but the same number of paragraphs -> the gaps
+        BETWEEN paragraphs and the edges are the original's;
+      - anything else is a real restructure and the result is left alone.
+    Single-line text is never touched."""
+    if not original or not result or "\n" not in original:
+        return result
+    o_lines, o_seps = _split_layout(original)
+    r_lines, r_seps = _split_layout(result)
+    if not o_lines or not r_lines:
+        return result
+    if len(o_lines) == len(r_lines):
+        out = [o_seps[0]]
+        for i, (o, r) in enumerate(zip(o_lines, r_lines)):
+            indent = o[:len(o) - len(o.lstrip())]
+            out.append(indent + r.strip())
+            out.append(o_seps[i + 1])
+        return "".join(out)
+
+    def _breaks(seps):
+        # Paragraph boundaries: the inner gaps that hold a blank line.
+        return [s for s in seps[1:-1] if s.count("\n") >= 2]
+
+    o_breaks = _breaks(o_seps)
+    if len(o_breaks) != len(_breaks(r_seps)):
+        return result
+    out, k = [o_seps[0]], 0
+    for i, line in enumerate(r_lines):
+        out.append(line.strip())
+        if i + 1 < len(r_lines):
+            sep = r_seps[i + 1]
+            if sep.count("\n") >= 2:
+                sep = o_breaks[k]
+                k += 1
+            out.append(sep)
+    out.append(o_seps[-1])
+    return "".join(out)
+
+
 REFINE_PROMPTS = {
     # "Fix All" in the refine popup. A full grammar-checker pass in the Grammarly
     # mould: every mechanical error is in scope, but the writer's words and voice
@@ -260,6 +331,14 @@ class AIRefiner:
 
         prompt = custom_prompt or REFINE_PROMPTS.get(mode, REFINE_PROMPTS["punctuation"])
 
+        # The spacing the user had is put back on the result afterwards
+        # (restore_spacing), unless the Ask itself is about the layout.
+        keep_spacing = not (custom_prompt and _LAYOUT_ASK.search(custom_prompt))
+
+        def _finish(out: str) -> str:
+            out = self._apply_sender_name(out, mode, name)
+            return restore_spacing(text, out) if keep_spacing else out
+
         # _NO_FORMAT bans lists so the model never invents them. When the text
         # HANDED to it already is one (list_format laid out a spoken "first …
         # second …"), that ban would flatten the app's own output back into
@@ -311,7 +390,7 @@ class AIRefiner:
             try:
                 result = self._refine_via_openrouter(text, prompt, mode)
                 if result:
-                    result = self._apply_sender_name(result, mode, name)
+                    result = _finish(result)
                     print(f"[AIRefiner] Refined via OpenRouter ({mode}): '{result}'")
                     return result
                 # Empty result (e.g. openai not installed) — fall through to Anthropic
@@ -338,8 +417,7 @@ class AIRefiner:
                     }
                 ],
             )
-            result = message.content[0].text.strip()
-            result = self._apply_sender_name(result, mode, name)
+            result = _finish(message.content[0].text.strip())
             print(f"[AIRefiner] Refined via Anthropic ({mode}): '{result}'")
             return result
 

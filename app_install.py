@@ -52,6 +52,7 @@ UNINSTALL_KEY = _REG_UNINSTALL + "\\" + brand.UNINSTALL_KEY_NAME
 APP_PATHS_KEY = _REG_APP_PATHS + "\\" + brand.CANONICAL_EXE_NAME
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 URL_PROTOCOL_KEY = "Software\\Classes\\" + brand.URL_SCHEME
+NOTIFICATION_ID_KEY = "Software\\Classes\\AppUserModelId\\" + brand.APP_USER_MODEL_ID
 TASK_NAME = brand.TASK_NAME
 
 STATE_FILE = "install-state.json"
@@ -435,6 +436,47 @@ def _write_app_paths(exe: str, old_names: list = ()) -> None:
             _delete_key_tree(winreg.HKEY_CURRENT_USER, key)
 
 
+# ── Notification name ────────────────────────────────────────────────────────
+
+
+def notification_icon_path() -> str:
+    return os.path.join(_install_dir(), "notification-icon.png")
+
+
+def notification_identity_values(icon_path: str) -> list:
+    """(name, value) pairs for the AppUserModelId key. Windows reads the name
+    and icon a toast shows from here for an app with no packaged identity."""
+    return [("DisplayName", brand.PRODUCT_NAME), ("IconUri", icon_path)]
+
+
+def register_notification_identity() -> None:
+    """Name the process's AppUserModelID so a notification reads
+    "BrightLink Echo", not the raw id. Cheap (one registry key; the icon is
+    rendered once per install) and never raises. Rewritten every launch so a
+    future rename reaches existing installs on their next update."""
+    if sys.platform != "win32":
+        return
+    icon = notification_icon_path()
+    try:
+        if not os.path.exists(icon):
+            import logo_cache
+
+            img = logo_cache.app_icon_image(256)
+            if img is not None:
+                os.makedirs(os.path.dirname(icon), exist_ok=True)
+                img.save(icon, format="PNG")
+    except Exception as e:
+        print(f"[Install] Notification icon skipped: {e}")
+    try:
+        import winreg
+
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, NOTIFICATION_ID_KEY) as k:
+            for name, value in notification_identity_values(icon):
+                winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value)
+    except Exception as e:
+        print(f"[Install] Notification name skipped: {e}")
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 
@@ -569,7 +611,7 @@ def _remove_launchers() -> None:
 def _remove_registry_entries() -> None:
     import winreg
 
-    paths = [UNINSTALL_KEY, APP_PATHS_KEY, URL_PROTOCOL_KEY]
+    paths = [UNINSTALL_KEY, APP_PATHS_KEY, URL_PROTOCOL_KEY, NOTIFICATION_ID_KEY]
     paths += [app_paths_key(n) for n in brand.product_names()]
     for path in paths:
         _delete_key_tree(winreg.HKEY_CURRENT_USER, path)

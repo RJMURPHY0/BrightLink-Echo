@@ -66,6 +66,10 @@ RUN_VALUE_NAME = "FTC Whisper"            # HKCU Run fallback launcher
 URL_SCHEME = "ftcwhisper"                 # the CRM opens ftcwhisper://launch
 UNINSTALL_KEY_NAME = "FTCWhisper"         # HKCU ...\Uninstall\<this>
 UPDATE_ASSET = "FTC-Whisper.exe"          # what every installed updater downloads
+# Windows groups the taskbar button, pins and notifications under this id.
+# Its visible name comes from HKCU\Software\Classes\AppUserModelId\<this>
+# (app_install.register_notification_identity), so it never needs to change.
+APP_USER_MODEL_ID = "FTC.Whisper"
 # Renamed from RJMURPHY0/FTC_Whisper on 2026-09-22. Builds up to v1.6.86 still
 # ask for the old name and reach this repo through GitHub's redirect, which
 # lasts only while nothing else is ever called FTC_Whisper on this account.

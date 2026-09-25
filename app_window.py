@@ -869,6 +869,8 @@ class RangePicker(Dropdown):
     _ROW_H = 30
     _CELL = 30
     _CAL_TOP = 128          # y of the weekday header row on the custom tab
+    _FOOT_H = 38            # Clear / Apply band under the grid
+    _OTHER_MONTH = "#4a4a4a"  # neighbouring months' days: context, dimmed
 
     def __init__(self, parent, variable: tk.StringVar, values, *, bg=None,
                  font=("Segoe UI", 10, "bold"), on_period=None, on_custom=None):
@@ -914,7 +916,7 @@ class RangePicker(Dropdown):
     def _panel_height(self, tab=None) -> int:
         if (tab or self._tab) == "periods":
             return self._TAB_H + self._ROW_H * len(self._values) + 14
-        return self._CAL_TOP + 20 + self._CELL * 6 + 46
+        return self._CAL_TOP + 20 + self._CELL * 6 + self._FOOT_H
 
     # ── placement ────────────────────────────────────────────────────────────
     #
@@ -1113,7 +1115,6 @@ class RangePicker(Dropdown):
                       lambda v=val: self._choose_period(v))
 
     def _paint_custom(self) -> None:
-        import calendar as _calmod
         cv, w = self._menu_cv, self._menu_w
         # Two dd/mm/yyyy fields. Real Entries, so a span can be typed as well as
         # clicked — the calendar writes into whichever field has focus.
@@ -1137,15 +1138,22 @@ class RangePicker(Dropdown):
             cv.create_text(self._cell_x(i), wd_y, text=name, fill=C["subtext"],
                            font=("Segoe UI", 8))
 
-        first_col = _date(m.year, m.month, 1).weekday()
-        days = _calmod.monthrange(m.year, m.month)[1]
+        # All 42 cells are filled: the grid is a fixed six rows so the panel
+        # never changes height between months (a moving edge would slide the
+        # month arrows out from under the pointer), and a five-row month used
+        # to leave a whole empty row above Clear / Apply. The neighbouring
+        # months' days fill it, dimmed and still pickable, like the Day
+        # streak calendar.
+        first = _date(m.year, m.month, 1)
+        grid_start = first - timedelta(days=first.weekday())
         today = _date.today()
         a, b = self._sel_start, self._sel_end
-        for d in range(1, days + 1):
-            idx = first_col + d - 1
+        for idx in range(42):
             cx = self._cell_x(idx % 7)
             cy = wd_y + 20 + (idx // 7) * self._CELL + self._CELL // 2
-            day = _date(m.year, m.month, d)
+            day = grid_start + timedelta(days=idx)
+            d = day.day
+            other = day.month != m.month
             edge = day == a or day == b
             inside = a is not None and b is not None and a < day < b
             if edge:
@@ -1158,12 +1166,13 @@ class RangePicker(Dropdown):
                 _rr(cv, cx - 14, cy - 13, cx + 14, cy + 13, 8, fill="",
                     outline=C["accent"])
             cv.create_text(cx, cy, text=str(d),
-                           fill=C["bg"] if edge else C["text"],
+                           fill=(C["bg"] if edge else
+                                 self._OTHER_MONTH if other else C["text"]),
                            font=("Segoe UI", 9, "bold" if edge else "normal"))
             self._hit(cx - 14, cy - 13, cx + 14, cy + 13,
                       lambda dd=day: self._pick_day(dd))
 
-        fy = self._menu_h - 22
+        fy = self._menu_h - self._FOOT_H // 2
         cv.create_text(18, fy, text="Clear", anchor="w", fill=C["subtext"],
                        font=("Segoe UI", 9))
         self._hit(12, fy - 12, 74, fy + 12, self._clear_custom)
@@ -2166,7 +2175,15 @@ class AppWindow:
         # OUR icon, not the interpreter's, when running from source.
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("FTC.Whisper")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                brand.APP_USER_MODEL_ID)
+        except Exception:
+            pass
+        # Give that id a name and icon before any notification can fire, or
+        # Windows titles the toast with the raw id itself.
+        try:
+            import app_install
+            app_install.register_notification_identity()
         except Exception:
             pass
 

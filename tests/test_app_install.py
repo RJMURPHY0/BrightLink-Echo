@@ -280,6 +280,39 @@ class DeleteGuardTests(unittest.TestCase):
         self.assertIn("CREATE_NO_WINDOW", inspect.getsource(app_install))
 
 
+class NotificationIdentityTests(unittest.TestCase):
+    """A toast from an unpackaged app is titled with its AppUserModelID unless
+    that id has a DisplayName registered. Without it v1.6.89 showed
+    "FTC.Whisper" over the update notice."""
+
+    def test_the_toast_name_is_the_product_name(self):
+        values = dict(app_install.notification_identity_values(r"C:\x\icon.png"))
+        self.assertEqual(brand.PRODUCT_NAME, values["DisplayName"])
+        self.assertEqual(r"C:\x\icon.png", values["IconUri"])
+
+    def test_the_key_is_keyed_by_the_frozen_id(self):
+        self.assertEqual(
+            "Software\\Classes\\AppUserModelId\\" + brand.APP_USER_MODEL_ID,
+            app_install.NOTIFICATION_ID_KEY)
+
+    def test_the_icon_lives_in_the_install_folder(self):
+        self.assertEqual(
+            os.path.dirname(app_install.notification_icon_path()),
+            app_install._install_dir())
+
+    def test_uninstall_removes_the_key(self):
+        src = inspect.getsource(app_install._remove_registry_entries)
+        self.assertIn("NOTIFICATION_ID_KEY", src)
+
+    def test_registered_before_the_window_exists(self):
+        import app_window
+        src = inspect.getsource(app_window.AppWindow.run)
+        self.assertIn("register_notification_identity()", src)
+        self.assertLess(src.index("register_notification_identity()"),
+                        src.index("tk.Tk()"))
+        self.assertNotIn('"FTC.Whisper"', src)
+
+
 class AppWiringTests(unittest.TestCase):
     def test_app_registers_against_the_stable_exe_path(self):
         import app

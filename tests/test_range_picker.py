@@ -136,6 +136,29 @@ class PickerTests(unittest.TestCase):
                          [(datetime.date(2026, 9, 1), datetime.date(2026, 9, 9))])
         self.assertEqual(self.var.get(), "1 Sep – 9 Sep")
 
+    def test_every_grid_row_is_filled(self):
+        # A five-row month (September 2026) used to leave an empty sixth row
+        # above Clear / Apply. The neighbouring months fill it now, dimmed.
+        self.p._tab = "custom"
+        self.p._cal_month = datetime.date(2026, 9, 1)
+        self.p.open()
+        self.addCleanup(self.p.close)
+        cv = self.p._menu_cv
+        days = [cv.itemcget(i, "text") for i in cv.find_all()
+                if cv.type(i) == "text"
+                and cv.itemcget(i, "text").isdigit()]
+        self.assertEqual(len(days), 42)
+        dim = [cv.itemcget(i, "text") for i in cv.find_all()
+               if cv.type(i) == "text"
+               and cv.itemcget(i, "fill") == RangePicker._OTHER_MONTH]
+        # 31 Aug leads, 1-11 Oct trail.
+        self.assertEqual(dim, ["31"] + [str(d) for d in range(1, 12)])
+
+    def test_a_dimmed_day_is_pickable(self):
+        self.p._pick_day(datetime.date(2026, 9, 28))
+        self.p._pick_day(datetime.date(2026, 10, 2))
+        self.assertEqual(self.p._sel_end, datetime.date(2026, 10, 2))
+
     def test_apply_with_one_date_is_a_single_day(self):
         d = datetime.date(2026, 9, 4)
         self.p._pick_day(d)
