@@ -196,45 +196,57 @@ class SignUpFormTests(unittest.TestCase):
             self.ui._switch(mode)
             self.root.update_idletasks()
             need = self.ui.required_height()
-            card = self.ui._card.winfo_reqheight()
-            wanted = card + LW.LoginWindow._CHROME_H
+            wanted = self.ui.content_height()
             self.assertLessEqual(
                 wanted, cap,
                 f"{mode} does not fit this screen: wants {wanted}px, the "
                 f"monitor allows {cap}px — the form will be clipped")
             self.assertGreaterEqual(
-                need, wanted - 1,
-                f"{mode} would clip: window {need}px for a {card}px card")
+                need, wanted,
+                f"{mode} would clip: window {need}px for {wanted}px of form")
 
-    def test_create_account_is_taller_than_sign_in(self):
-        self.ui._switch("login")
-        self.root.update_idletasks()
-        login_h = self.ui.required_height()
+    def test_the_card_is_sized_to_the_form_not_the_window(self):
+        # The card used to stretch to fill the window, leaving an empty band
+        # under "Forgot password?" once the page was taller than the form.
+        for mode in ("login", "signup"):
+            self.ui._switch(mode)
+            self.root.update_idletasks()
+            card_h = int(float(self.ui._card_cv.cget("height")))
+            self.assertEqual(
+                card_h,
+                self.ui._holder.winfo_reqheight() + 2 * LW.LoginWindow._CARD_PAD,
+                f"{mode}: card is not sized to its form")
+
+    def test_sign_in_holds_the_hosts_height_and_signup_does_not_jump(self):
+        # Embedded, the page keeps the dashboard's height (2026-09-25: at its
+        # own 460px floor it read as a squashed window). Create Account fits
+        # the same height, so switching modes never resizes the window.
+        frame = __import__("tkinter").Frame(self.root)
+        heights = []
+        ui = LW.LoginWindow(_FakeAuth(), on_success=lambda *a: None)
+        ui.embed(frame, on_height_change=heights.append, base_height=lambda: 670)
+        try:
+            self.root.update_idletasks()
+            ui._switch("login")
+            login_h = ui.required_height()
+            ui._switch("signup")
+            signup_h = ui.required_height()
+            self.assertEqual(login_h, min(670, ui._max_height()))
+            if ui._max_height() >= 670:
+                self.assertEqual(signup_h, 670,
+                                 "Create Account no longer fits the dashboard height")
+        finally:
+            frame.destroy()
+
+    def test_a_status_message_grows_the_page_rather_than_clipping(self):
         self.ui._switch("signup")
         self.root.update_idletasks()
-        signup_h = self.ui.required_height()
-        self.assertGreater(signup_h, login_h)
-        # And the host is told, so the window actually follows.
-        self.assertIn(signup_h, self.heights)
-        self.assertIn(login_h, self.heights)
-
-    def test_the_chrome_constant_still_matches_the_real_layout(self):
-        # _CHROME_H is measured, so a layout change silently invalidates it.
-        # Recompute it from the live widgets: header + body pad + card inset
-        # + the segmented toggle and its padding.
-        holder = self.ui._card.master               # frame inside the canvas
-        body = self.ui._card_cv.master              # frame holding the canvas
-        container = body.master                     # what _build_ui was given
-        header = container.winfo_children()[0]      # the logo lockup, packed first
-        self.ui._switch("signup")
+        before = self.ui.content_height()
+        self.ui._set_status("Passwords do not match.", error=True)
         self.root.update_idletasks()
-        holder_extra = (holder.winfo_reqheight()
-                        - self.ui._card.winfo_reqheight())
-        measured = header.winfo_reqheight() + 24 + 36 + holder_extra
-        self.assertAlmostEqual(
-            LW.LoginWindow._CHROME_H, measured, delta=12,
-            msg=f"_CHROME_H is {LW.LoginWindow._CHROME_H} but the layout now "
-                f"needs {measured}; the sign-in page will clip or gap")
+        self.assertGreater(self.ui.content_height(), before)
+        self.assertGreaterEqual(self.ui.required_height(),
+                                min(self.ui.content_height(), self.ui._max_height()))
 
 
 if __name__ == "__main__":

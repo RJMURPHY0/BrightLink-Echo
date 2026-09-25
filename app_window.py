@@ -75,8 +75,8 @@ _GAP_DEFAULTS = {
     "line_tabs": 8,        # separation line -> tabs
     "tabs_content": 8,     # tabs -> first card
     "status_impact": 14,   # status card -> "Your impact"
-    "impact_cards": 6,     # "Your impact" -> the three cards
-    "cards_words": 8,      # the cards -> words bar
+    "impact_cards": 6,     # "Your impact" -> words bar
+    "cards_words": 8,      # words bar -> the three cards
     "footer": 8,           # footer padding, above and below
 }
 _GAP_MIN, _GAP_MAX = 0, 60
@@ -873,8 +873,12 @@ class RangePicker(Dropdown):
     _OTHER_MONTH = "#4a4a4a"  # neighbouring months' days: context, dimmed
 
     def __init__(self, parent, variable: tk.StringVar, values, *, bg=None,
-                 font=("Segoe UI", 10, "bold"), on_period=None, on_custom=None):
+                 font=("Segoe UI", 10, "bold"), on_period=None, on_custom=None,
+                 prefer_below=False):
         self._on_period = on_period
+        # A control near the TOP of its page drops down, like any menu, and
+        # rises only when the monitor has no room below for the tallest tab.
+        self._prefer_below = prefer_below
         self._on_custom = on_custom
         self._tab = "periods"
         self._hits = []                 # [(x0, y0, x1, y1, fn, hoverable)]
@@ -948,6 +952,8 @@ class RangePicker(Dropdown):
         above = (ctl_top - win_top) >= (win_bottom - ctl_bottom)
         fits_above = ctl_top - 4 - h >= mon_t + 8
         fits_below = ctl_bottom + 4 + h <= mon_b - 8
+        if getattr(self, "_prefer_below", False):
+            return not fits_below and fits_above
         if above and not fits_above and fits_below:
             return False
         if not above and not fits_below and fits_above:
@@ -963,7 +969,12 @@ class RangePicker(Dropdown):
         else:
             y = ctl_top + self.winfo_height() + 4        # top edge glued
         y = max(mon_t + 8, min(y, mon_b - h - 8))
-        x = max(mon_l + 8, min(self.winfo_rootx(), mon_r - w - 8))
+        x = self.winfo_rootx()
+        if getattr(self, "_prefer_below", False):
+            # A right-hand control drops its panel right-aligned under it,
+            # so the panel stays over the app instead of hanging off its edge.
+            x = x + self.winfo_width() - w
+        x = max(mon_l + 8, min(x, mon_r - w - 8))
         return x, y
 
     def open(self) -> None:
@@ -3488,12 +3499,14 @@ class AppWindow:
                 threading.Thread(target=self._on_sign_in, args=(auth,), daemon=True).start()
 
         self._login_ui = LoginWindow(self._auth, on_success=_on_success, on_cancel=self._do_quit)
-        # Sign In and Create Account need different heights (Create Account
-        # carries name, company and confirm-password). The login page owns the
-        # number; we only apply it, and only while the login page is the one on
-        # screen — a late callback must never resize the dashboard.
+        # The login page holds the dashboard's height (so signing in or out
+        # never changes the window's shape) and only asks for more when a
+        # mode needs it. It owns the number; we only apply it, and only while
+        # the login page is the one on screen — a late callback must never
+        # resize the dashboard.
         self._login_ui.embed(self._login_frame,
-                             on_height_change=self._resize_login_page)
+                             on_height_change=self._resize_login_page,
+                             base_height=self._natural_dash_h)
 
     def _resize_login_page(self, height: int) -> None:
         """Apply the height the login page asked for, if it is showing."""
@@ -4440,9 +4453,13 @@ class AppWindow:
         # which adds its own), so the stack itself has none.
         self._impact_stack = tk.Frame(parent, bg=C["bg"])
         self._impact_stack.pack(fill="x")
+        # Range bar FIRST: the control that scopes the cards sits above what
+        # it scopes, and its picker drops down instead of rising over the app.
+        self._build_impact_range_bar()
         row = tk.Frame(self._impact_stack, bg=C["bg"])
-        row.pack(fill="x", padx=20)
+        row.pack(fill="x", padx=20, pady=(self._gap("cards_words"), 0))
         self._impact_row = row
+        self._gap_widget("cards_words", row)
         for i in range(3):
             row.grid_columnconfigure(i, weight=1, uniform="impact")
         row.grid_rowconfigure(0, minsize=_IMPACT_CARD_H)
@@ -4504,11 +4521,12 @@ class AppWindow:
         # user's real measured average (see StatsStore.snapshot).
         self._set_impact_card("speed", "160", "wpm", "4× faster than typing")
 
-        # Today bar
-        bar = self._card(self._impact_stack, inner_pad=(14, 10),
-                         margin=(self._gap("cards_words"), 0))
+        self._refresh_impact()
+
+    def _build_impact_range_bar(self) -> None:
+        """Words-dictated count on the left, period picker on the right."""
+        bar = self._card(self._impact_stack, inner_pad=(14, 10), margin=(0, 0))
         self._impact_today_card = bar.master  # the rounded-rect Canvas host
-        self._gap_widget("cards_words", self._impact_today_card)
         brow = tk.Frame(bar, bg=C["surface"])
         brow.pack(fill="x")
         icv = tk.Canvas(brow, bg=C["surface"], highlightthickness=0, bd=0,
@@ -4574,22 +4592,24 @@ class AppWindow:
 
         # RangePicker, not Dropdown: the same list plus a From / to tab, so the
         # cards can be scoped to any span and not just the five named windows.
+        # On the right, where a period filter sits in the CRM's cards; the
+        # words count reads left to right from the icon.
         _range_menu = RangePicker(brow, self._impact_range_var,
                                   list(_RANGE_LABELS.values()), bg=C["surface"],
                                   font=("Segoe UI", 10, "bold"),
-                                  on_period=_on_period, on_custom=_on_custom)
+                                  on_period=_on_period, on_custom=_on_custom,
+                                  prefer_below=True)
         if _span:
             _range_menu.set_custom(*_span)
-        _range_menu.pack(side="left", padx=(6, 0))
+        _range_menu.pack(side="right")
         self._impact_range_menu = _range_menu
 
         self._impact_today_lbl = tk.Label(
-            brow, text="·  0 words dictated",
+            brow, text="0 words dictated",
             fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 10),
         )
-        self._impact_today_lbl.pack(side="left", padx=(6, 0))
+        self._impact_today_lbl.pack(side="left", padx=(8, 0))
 
-        self._refresh_impact()
 
     def _set_impact_card(self, key: str, value: str, unit: str, sub: str) -> None:
         card = self._impact_cards.get(key)
@@ -4768,9 +4788,9 @@ class AppWindow:
 
         def _swap():
             self._impact_detail.pack_forget()
-            self._impact_row.pack(fill="x", padx=20)
-            self._impact_today_card.pack(fill="x", padx=20,
-                                         pady=(self._gap("cards_words"), 0))
+            self._impact_today_card.pack(fill="x", padx=20)
+            self._impact_row.pack(fill="x", padx=20,
+                                  pady=(self._gap("cards_words"), 0))
             for k in self._impact_cards:
                 self._impact_cards[k]["hover"] = False
                 self._layout_impact_card(k)
@@ -5406,7 +5426,7 @@ class AppWindow:
         tw = int(words_map.get(rng, snap.get("today_words", 0)))
         if hasattr(self, "_impact_today_lbl"):
             self._impact_today_lbl.configure(
-                text=f"·  {tw:,} word{'' if tw == 1 else 's'} dictated")
+                text=f"{tw:,} word{'' if tw == 1 else 's'} dictated")
 
         # An open breakdown is showing the same numbers — keep it live.
         if getattr(self, "_impact_open", None):

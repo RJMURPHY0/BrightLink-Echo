@@ -119,14 +119,16 @@ class LoginWindow:
         self._submitting = False
         self._on_height_change = None
 
-    def embed(self, frame: tk.Frame, on_height_change=None) -> None:
+    def embed(self, frame: tk.Frame, on_height_change=None,
+              base_height=None) -> None:
         """Build login UI into an existing frame (in-window, no Toplevel).
 
-        `on_height_change(h)` lets the host resize its window when the user
-        switches between Sign In and Create Account, which need different
-        heights."""
+        `on_height_change(h)` lets the host resize its window when a mode
+        needs more than `base_height` (an int, or a callable returning one:
+        the host's own page height, so sign-in keeps the window's shape)."""
         self._embedded = True
         self._on_height_change = on_height_change
+        self._base_h = base_height
         self._root = frame.winfo_toplevel()
         self._build_ui(container=frame)
 
@@ -244,8 +246,16 @@ class LoginWindow:
     def _build_ui(self, container=None) -> None:
         c = container or self._root
 
+        # Logo + card travel as one block, centred vertically in the window.
+        # `expand` without a vertical fill is what centres it: the page keeps
+        # the dashboard's height, and the block sits in the middle of it
+        # instead of the card stretching to fill it (which left an empty band
+        # under "Forgot password?").
+        self._stack = tk.Frame(c, bg=C["bg"])
+        self._stack.pack(fill="x", expand=True)
+
         # ── Logo / header ──────────────────────────────────────────────
-        header = tk.Frame(c, bg=C["bg"], pady=18)
+        header = tk.Frame(self._stack, bg=C["bg"], pady=18)
         header.pack(fill="x")
 
         from logo_cache import get_lockup_photo
@@ -264,19 +274,24 @@ class LoginWindow:
             ).pack()
 
         # ── Rounded card holding the segmented toggle + form ───────────
-        body = tk.Frame(c, bg=C["bg"])
-        body.pack(fill="both", expand=True, padx=22, pady=(0, 24))
+        body = tk.Frame(self._stack, bg=C["bg"])
+        body.pack(fill="x", padx=22, pady=(0, 18))
 
-        self._card_cv = tk.Canvas(body, bg=C["bg"], highlightthickness=0, bd=0)
-        self._card_cv.pack(fill="both", expand=True)
+        # Height is set by _fit_card from what the form asks for, never by
+        # the window: a canvas window item does not propagate its child's
+        # size, so the card would otherwise take whatever space is left.
+        self._card_cv = tk.Canvas(body, bg=C["bg"], highlightthickness=0, bd=0,
+                                  height=1)
+        self._card_cv.pack(fill="x")
 
         holder = tk.Frame(self._card_cv, bg=C["surface"])
         holder_win = self._card_cv.create_window(0, 0, window=holder, anchor="nw")
+        self._holder = holder
 
         # Inset the (square-cornered) content frame by >= the corner radius so it
         # never pokes past the rounded arc — the canvas fill covers the straight
         # edges seamlessly (same surface colour).
-        _CARD_PAD = 18
+        _CARD_PAD = self._CARD_PAD
 
         def _draw_card(_e=None):
             w, h = self._card_cv.winfo_width(), self._card_cv.winfo_height()
@@ -543,31 +558,55 @@ class LoginWindow:
     # Mode switching
     # ------------------------------------------------------------------
 
-    # Everything above and around `self._card`: the logo lockup header, the
-    # body's bottom padding (24), the card canvas inset (2 x 18) and the
-    # segmented Sign In / Create Account toggle with its padding.
-    # MEASURED on the real widgets, not derived — pinned by
-    # tests/test_signup_payload.py, which recomputes it from the live layout
-    # so a spacing change that invalidates it fails there rather than as a
-    # clipped field in a screenshot. (It did exactly that once already: the
-    # first draft of the signup form wanted 725px on a display that allows
-    # 704, which would have cut off the Create Account button.)
-    _CHROME_H = 194
-    _MIN_H = 460
+    # Card inset: >= the card's corner radius, so the square content frame
+    # never pokes past the rounded arc.
+    _CARD_PAD = 18
+    # Extra space kept above and below the logo + card block, beyond the
+    # header's own padding and the card's bottom margin. 0 so Create Account
+    # (663px) still fits the dashboard's 670 and switching modes never
+    # resizes the window.
+    _EDGE = 0
+
+    def _base_height(self) -> int:
+        """The height the page holds when the form fits in it: the dashboard's
+        when embedded (so signing in or out never changes the window's
+        shape), WINDOW_H standalone. A host may pass a callable, since the
+        dashboard's height moves with the super admin's spacing."""
+        base = getattr(self, "_base_h", None)
+        try:
+            base = base() if callable(base) else base
+            return int(base) if base else WINDOW_H
+        except Exception:
+            return WINDOW_H
+
+    def _fit_card(self) -> None:
+        """Size the card to exactly what the form asks for, so it never
+        carries an empty band and never clips a field."""
+        try:
+            self._holder.update_idletasks()
+            h = self._holder.winfo_reqheight() + 2 * self._CARD_PAD
+            if int(float(self._card_cv.cget("height"))) != h:
+                self._card_cv.configure(height=h)
+        except (tk.TclError, AttributeError, ValueError):
+            pass
+
+    def content_height(self) -> int:
+        """Logo + card + the least edge above and below, for this mode."""
+        self._fit_card()
+        self._stack.update_idletasks()
+        return self._stack.winfo_reqheight() + 2 * self._EDGE
 
     def required_height(self) -> int:
-        """Window height this mode needs, from what the card actually asks for.
-
-        Signup carries two more fields than login (name, company) and, with
-        Google gone, login carries two fewer widgets. One fixed height cannot
-        serve both without either clipping signup or leaving login mostly
-        empty, so the page is sized per mode."""
+        """Window height for this mode: the base height, or taller if the
+        form needs it (signup, or a status message on a tall form), never
+        taller than the monitor. The block is centred in whatever is left,
+        so a short form gets even space above and below instead of a
+        squashed window."""
         try:
-            self._card.update_idletasks()
-            need = self._card.winfo_reqheight() + self._CHROME_H
+            need = self.content_height()
         except (tk.TclError, AttributeError):
             return WINDOW_H
-        return max(self._MIN_H, min(need, self._max_height()))
+        return min(max(self._base_height(), need), self._max_height())
 
     def _max_height(self) -> int:
         """Never ask for more than the monitor can show. Falls back to the Tk
@@ -594,6 +633,9 @@ class LoginWindow:
         _atomic_ui, so it is an ordinary resize on an already-healed path."""
         cb = getattr(self, "_on_height_change", None)
         h = self.required_height()
+        if h == getattr(self, "_last_h", None):
+            return
+        self._last_h = h
         if cb is not None:
             try:
                 cb(h)
@@ -735,6 +777,7 @@ class LoginWindow:
             self._pending_confirm_email = self._email_entry.get().strip()
             self._resend_link.pack_forget()
             self._resend_link.pack(anchor="center", pady=(4, 0))
+            self._sync_height()
 
         self._submit_btn.set(
             text=f"✕  {msg}",
@@ -888,3 +931,4 @@ class LoginWindow:
         self._status_lbl.configure(bg=C["surface"])
         # Show the frame (may already be visible — pack is idempotent)
         self._status_frame.pack(fill="x", pady=(0, 10), before=self._submit_btn)
+        self._sync_height()
