@@ -89,7 +89,7 @@ class _FakeRefiner(ai_refiner.AIRefiner):
         super().__init__(openrouter_api_key="test-key")
         self.reply = reply
 
-    def _refine_via_openrouter(self, text, prompt, mode):
+    def _refine_via_openrouter(self, text, prompt, mode, system=""):
         return self.reply
 
 

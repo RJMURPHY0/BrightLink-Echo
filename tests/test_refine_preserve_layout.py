@@ -23,8 +23,9 @@ class _CapturingRefiner(ai_refiner.AIRefiner):
         super().__init__(openrouter_api_key="test-key")
         self.captured = None
 
-    def _refine_via_openrouter(self, text, prompt, mode):
+    def _refine_via_openrouter(self, text, prompt, mode, system=""):
         self.captured = prompt
+        self.system = system
         return text
 
 

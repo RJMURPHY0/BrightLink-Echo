@@ -245,6 +245,77 @@ class FalsePositiveTests(unittest.TestCase):
         self.assertEqual(fmt(None), None)
 
 
+class NaturalSpeechTests(unittest.TestCase):
+    """Real dictations the app laid out as lists when they were plain speech
+    (2026-09-21 to 2026-09-25). Reconstructed from the history rows, since
+    the corpus only keeps the formatted text, so they are literals here: a
+    corpus row scrolls out of history.json, a literal never does."""
+
+    REPORTED = (
+        "None of the usage there is actually being used at all, and it would "
+        "be really good if I could get the usage for. The subscriptions I'm "
+        "genuinely paying for, that are, you know, like AI related, and still "
+        "good. I'm actually Using those consumption limits and stuff, so, "
+        "yeah.")
+    OTHERS = (
+        "I feel like even if there is an admin you can like be able to see "
+        "unassigned data, but if you're not an admin, Then you can just only "
+        "other see like other people's data. Also, check like the tasks, and "
+        "everything there. If I am selecting like Jason or like anyone else, "
+        "then it should come up.",
+        "Different applications, so this is kind of like a rule. If there is "
+        "a different web app or anything that's opening in a different tab. "
+        "That's kind of like a standalone product, but like still within the "
+        "whole operating system, and everything. Then, you know, the note "
+        "ticker, I think, should come first",
+        "it should be like the colon and then Like you know, number one, you "
+        "know, it should be able to genuinely correctly identify where. I "
+        "would, you know, the user would want it to be a list, like number "
+        "one, number two, sort of thing, so yeah, do that and then Push it as "
+        "a new install link",
+    )
+
+    def test_the_2026_09_25_reported_example_stays_prose(self):
+        self.assertEqual(fmt(self.REPORTED), self.REPORTED)
+
+    def test_the_other_corpus_false_positives_stay_prose(self):
+        for s in self.OTHERS:
+            self.assertEqual(fmt(s), s)
+
+    # Each guard alone, so removing one fails here rather than being hidden
+    # by the others.
+
+    def test_an_announcement_must_sit_next_to_the_items(self):
+        self.assertTrue(list_format._announced("Here are the three things I need"))
+        self.assertTrue(list_format._announced(
+            "So, I want to start a list for a few things that I want to do,"))
+        self.assertFalse(list_format._announced(
+            "None of the usage there is actually being used at all, and it "
+            "would be really good if I could get the usage for"))
+
+    def test_a_lead_in_cut_off_by_a_pause_is_not_an_announcement(self):
+        s = "Here are the things I need for. Milk, bread and eggs."
+        self.assertEqual(fmt(s), s)
+        self.assertIn("\n- ", fmt("Here are the things I need. Milk, bread "
+                                  "and eggs."))
+
+    def test_fillers_and_clause_fragments_are_not_items(self):
+        for s in ("Here are the three things: the subscriptions, you know, "
+                  "and the tools.",
+                  "Here are the three things: the subscriptions, that are, "
+                  "and the tools.",
+                  "Here are the three things: the plan, but like the old one, "
+                  "and everything."):
+            self.assertEqual(fmt(s), s)
+
+    def test_an_example_run_is_not_a_list(self):
+        s = ("Okay, number one, call Jason about the pipeline, number two, "
+             "sort of thing, so yeah do that.")
+        self.assertEqual(fmt(s), s)
+        self.assertIn("\n2. ", fmt("Okay, number one, call Jason about the "
+                                   "pipeline, number two, send the invoice."))
+
+
 class WiringTests(unittest.TestCase):
     """It must run ONCE, on the whole utterance, at app.py's post-processing
     point — never inside an engine, which also sees streamed chunks and live

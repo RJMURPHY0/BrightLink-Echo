@@ -128,6 +128,47 @@ _ANNOUNCE = re.compile(
 _SENTENCE_END = re.compile(r"[.!?](?:[\"'”’)\]]+)?(?=\s|$)")
 _MIN_ITEM_WORDS = 2
 
+# An announcement only counts when the list follows it: at most this many words
+# may sit between the announcing phrase and the items. "here are the three
+# things I need" is 4; "none of the usage there is actually being used at all,
+# and it would be really good if I could get the usage for" is 20, and reading
+# that "there is" as an announcement is what laid a sentence out as bullets.
+_ANNOUNCE_REACH = 8
+
+# A lead-in that stops on one of these ("…get the usage for. The
+# subscriptions…") did not finish: the full stop is a dictation pause, the
+# sentence carries on, and nothing after it is a list.
+_HANGING = frozenset((
+    "a", "an", "the", "and", "or", "but", "for", "to", "of", "with", "about",
+    "from", "in", "on", "at", "by", "into", "onto", "than", "that", "which",
+    "who", "my", "your", "our", "their", "his", "her", "its", "this", "these",
+    "those", "is", "are", "was", "were", "be", "get", "got", "have", "has",
+))
+
+
+def _announced(lead: str) -> bool:
+    """True when the sentence right before the items says a list is coming,
+    and says it close enough to the items to be introducing them."""
+    if not lead:
+        return False
+    sentence = _last_sentence(lead)
+    last = None
+    for last in _ANNOUNCE.finditer(sentence):
+        pass
+    if last is None:
+        return False
+    return len(sentence[last.end():].split()) <= _ANNOUNCE_REACH
+
+
+def _last_word(text: str) -> str:
+    words = re.findall(r"[A-Za-z']+", text)
+    return words[-1].lower() if words else ""
+
+
+_EXAMPLE_TAIL = re.compile(
+    r"(?:sort of thing|kind of thing|or something|or whatever|etc|"
+    r"and so on|and stuff)", re.IGNORECASE)
+
 
 def _num(word: str):
     return int(word) if word.isdigit() else _NUMBER_WORDS.get(word)
@@ -262,7 +303,7 @@ def _build_run(text: str, marks, bullets: bool):
         return None
 
     lead = text[:run[0]["item"]].rstrip()
-    announced = bool(_ANNOUNCE.search(_last_sentence(lead))) if lead else False
+    announced = _announced(lead)
     explicit = all(mk["kind"] in ("num", "bullet", "close") for mk in run)
     # Two ordinals is only a list when the speaker said one was coming; without
     # that it takes three before this touches anything. "Number one … number
@@ -280,6 +321,10 @@ def _build_run(text: str, marks, bullets: bool):
         end = run[i + 1]["sep"] if i + 1 < len(run) else len(text)
         bodies.append(text[mk["body"]:end].strip().strip(",;"))
     if any(len(b.split()) < _MIN_ITEM_WORDS for b in bodies):
+        return None
+    # "…like number one, number two, sort of thing": the markers were an
+    # example the speaker gave, not a list they dictated.
+    if any(_EXAMPLE_TAIL.match(b) for b in bodies):
         return None
 
     # When every item bar the last is a single sentence, the last one is too —
@@ -300,6 +345,35 @@ def _build_run(text: str, marks, bullets: bool):
 
 
 # ── Bulleted list: an announcement plus a short comma series ─────────────────
+
+# A comma series of real items. Spoken fillers and clause fragments are
+# commas too ("the subscriptions I'm paying for, that are, you know, like AI
+# related"), and none of them is ever a list item.
+_FILLER_ITEMS = frozenset((
+    "you know", "i mean", "like", "sort of", "kind of", "i guess", "i think",
+    "and stuff", "or something", "or whatever", "basically", "actually",
+    "so yeah", "yeah", "obviously", "honestly", "literally", "right", "okay",
+    "ok", "well", "so", "um", "uh", "er", "also", "then", "too", "plus",
+    "everything", "and everything", "etc", "and so on",
+))
+_FILLER_OPENERS = ("you know ", "i mean ", "like ", "sort of ", "kind of ")
+# An item opening on one of these carries on the sentence before it ("but like
+# still within the whole system", "that are").
+_CLAUSE_OPENERS = frozenset(("that", "which", "who", "whose", "whom", "but",
+                             "so", "because", "cause"))
+
+
+def _is_series_item(item: str) -> bool:
+    words = re.findall(r"[A-Za-z']+", item.lower())
+    if not words:
+        return False
+    bare = " ".join(words)
+    if bare in _FILLER_ITEMS or (bare + " ").startswith(_FILLER_OPENERS):
+        return False
+    # "that are": a relative clause hanging off the previous item, and any
+    # item that stops on a function word, are one sentence split by commas.
+    return words[0] not in _CLAUSE_OPENERS and words[-1] not in _HANGING
+
 
 _LEADING_CONJ = re.compile(r"^(?:and|or)\s+(?=\S)", re.IGNORECASE)
 _INNER_CONJ = re.compile(r"\s+(?:and|or)\s+", re.IGNORECASE)
@@ -341,7 +415,9 @@ def _bulleted(text: str):
     # that sentence.
     for m in re.finditer(r"[:.]\s+|:\s*", text):
         lead = text[:m.start()].rstrip()
-        if not lead or not _ANNOUNCE.search(_last_sentence(lead)):
+        if not _announced(lead):
+            continue
+        if text[m.start()] == "." and _last_word(lead) in _HANGING:
             continue
         rest = text[m.end():]
         stop = _SENTENCE_END.search(rest)
@@ -354,6 +430,8 @@ def _bulleted(text: str):
         if parts is None or len(parts) < 3:
             continue
         if any(len(p.split()) > _MAX_BULLET_WORDS for p in parts):
+            continue
+        if not all(_is_series_item(p) for p in parts):
             continue
         return _assemble(lead, _finish_items(parts, True), after, True)
     return None

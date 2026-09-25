@@ -22,6 +22,19 @@ _NO_FORMAT = (
     "or any markdown formatting. Output flowing sentences and paragraphs."
 )
 
+# The modes that exist to reword (formal, casual, concise, email) may change
+# HOW something is said, never WHAT was said. Ryan's rule (2026-09-25): the
+# speaker's essence survives every refine; only a mode they chose changes the
+# wording around it.
+_KEEP_ESSENCE = (
+    " The wording and tone may change; what the speaker said may not. Keep "
+    "every point, request, question, fact, name, number and date, with the "
+    "same meaning and the same level of certainty. Do not add information, "
+    "opinions, examples, promises or pleasantries the speaker did not say, "
+    "and do not drop or soften any point they made."
+)
+
+
 def _looks_like_a_list(text: str) -> bool:
     """True when the text already carries list lines the model must preserve."""
     return bool(re.search(r"^\s*(?:[-•*]|\d+[.)])\s+\S", text or "",
@@ -126,13 +139,26 @@ REFINE_PROMPTS = {
         "- Capitalisation: sentence starts, proper nouns, the pronoun 'I'\n"
         "- Grammar: subject-verb agreement, verb tense consistency, plurals, "
         "missing articles and wrong prepositions\n"
-        "- Immediate duplicated words from dictation stutters ('that that')\n\n"
-        "STRICT LIMITS - this is a correction pass, not a rewrite:\n"
-        "- Keep every word the speaker said, including casual phrasing and "
-        "fillers like 'so yeah'. Do not tighten, shorten or improve the style\n"
+        "- Immediate duplicated words from dictation stutters ('that that')\n"
+        "- False starts the speaker corrected straight away: keep only the "
+        "version they settled on ('can could you send it' -> 'could you send "
+        "it', 'on Tuesday, sorry, Wednesday' -> 'on Wednesday')\n"
+        "- Hesitation sounds with no meaning: um, uh, er, erm\n"
+        "- Filler 'like' and 'you know' used only as verbal padding ('it was, "
+        "like, really fast' -> 'it was really fast', 'we should, you know, "
+        "ship it' -> 'we should ship it'). Keep 'like' whenever it carries "
+        "meaning ('I like it', 'it looks like rain', 'tools like Slack', "
+        "'about 40, like 45') and 'you know' when it is a real question or "
+        "statement ('you know what I mean?', 'you know the answer')\n\n"
+        "STRICT LIMITS - this is a correction pass, not a rewrite. The result "
+        "must still sound like the speaker:\n"
+        "- Keep every other word the speaker said, including casual phrasing, "
+        "slang and phrases like 'so yeah' that carry their voice. Do not "
+        "tighten, shorten, formalise or improve the style\n"
         "- Do not reorder sentences, merge paragraphs, or add any new content\n"
-        "- The only words you may delete are immediate stutter duplicates; the "
-        "only words you may change are those grammar or spelling force you to\n"
+        "- The only words you may delete are the stutters, false starts, "
+        "hesitation sounds and filler words above; the only words you may "
+        "change are those grammar or spelling force you to\n"
         "- Preserve British spelling and the writer's regional usage\n"
         "- If a passage is already correct, leave it exactly as it is\n\n"
         "Return only the corrected text, nothing else." + _NO_FORMAT
@@ -148,23 +174,26 @@ REFINE_PROMPTS = {
         "off: keep it as the sign-off with its dictated phrase (for example "
         "'Cheers, Ryan'), never turn it into the greeting. Add a greeting line only "
         "if the sender addressed the recipient in the speech. "
-        "Return only the email body, nothing else." + _NO_FORMAT
+        "Return only the email body, nothing else." + _KEEP_ESSENCE + _NO_FORMAT
     ),
     "formal": (
         "Rewrite this transcribed speech in a formal, professional tone. "
-        "Fix grammar and punctuation. Return only the rewritten text, nothing else." + _NO_FORMAT
+        "Fix grammar and punctuation. Return only the rewritten text, nothing else."
+        + _KEEP_ESSENCE + _NO_FORMAT
     ),
     "casual": (
         "Rewrite this transcribed speech in a friendly, conversational tone. "
         "Keep it natural and fix any obvious transcription errors. "
-        "Return only the rewritten text, nothing else." + _NO_FORMAT
+        "Return only the rewritten text, nothing else." + _KEEP_ESSENCE
+        + _NO_FORMAT
     ),
     "concise": (
         "Rewrite this transcribed speech using short, simple sentences. "
         "Keep every point and every piece of information from the original. Do not remove anything useful. "
         "Cut filler words and repetition only. Fix punctuation. "
         "Make it easy to read and easy to understand at a glance. "
-        "Return only the rewritten text, nothing else." + _NO_FORMAT
+        "Return only the rewritten text, nothing else." + _KEEP_ESSENCE
+        + _NO_FORMAT
     ),
     "prompt_optimiser": (
         "You are a prompt optimisation specialist. "
@@ -249,6 +278,16 @@ class AIRefiner:
         "Write as a human would: natural, direct, easy to read. "
         "Return only the refined text, nothing else."
     )
+    # Fix All must not get the style prompt either: "keep sentences short" and
+    # "avoid filler words" told the model to rewrite the very phrasing the Fix
+    # All prompt says to keep, so its output drifted from the speaker's words.
+    _EDITOR_SYSTEM_PROMPT = (
+        "You are a proofreader for dictated text. You correct grammar, "
+        "spelling and punctuation and mend the sentence boundaries dictation "
+        "leaves behind. You never rephrase, restyle or change what the "
+        "speaker said: the words, the meaning and the tone stay theirs. "
+        "Return only the corrected text, nothing else."
+    )
     # context_fix must NOT get the style prompt — "keep sentences short",
     # "avoid semicolons" etc. directly contradict "change nothing but misheard
     # words" and push the model to rewrite.
@@ -265,10 +304,17 @@ class AIRefiner:
         # input; generous ceiling since output ≈ input length for our modes.
         return min(8192, max(1024, len(text.split()) * 4))
 
-    def _system_prompt_for(self, mode: str) -> str:
-        return self._CORRECTOR_SYSTEM_PROMPT if mode == "context_fix" else self._STYLE_SYSTEM_PROMPT
+    def _system_prompt_for(self, mode: str, custom: bool = False) -> str:
+        if mode == "context_fix":
+            return self._CORRECTOR_SYSTEM_PROMPT
+        # A custom Ask arrives with the default mode ("punctuation"), but it is
+        # the user's own instruction, not Fix All, so it keeps the style prompt.
+        if mode == "punctuation" and not custom:
+            return self._EDITOR_SYSTEM_PROMPT
+        return self._STYLE_SYSTEM_PROMPT
 
-    def _refine_via_openrouter(self, text: str, prompt: str, mode: str) -> str:
+    def _refine_via_openrouter(self, text: str, prompt: str, mode: str,
+                               system: str = "") -> str:
         """Call OpenRouter using the openai-compatible SDK. Lazy import so missing package doesn't crash."""
         try:
             import openai  # type: ignore
@@ -288,7 +334,7 @@ class AIRefiner:
             max_tokens=self._max_tokens_for(text),
             temperature=0,
             messages=[
-                {"role": "system", "content": self._system_prompt_for(mode)},
+                {"role": "system", "content": system or self._system_prompt_for(mode)},
                 {"role": "user", "content": f"{prompt}\n\n{text}"},
             ],
             # OpenRouter-native fallback: tries these in order if the primary
@@ -330,6 +376,15 @@ class AIRefiner:
             return text
 
         prompt = custom_prompt or REFINE_PROMPTS.get(mode, REFINE_PROMPTS["punctuation"])
+        system = self._system_prompt_for(mode, custom=bool(custom_prompt))
+        # An Ask does what it says and nothing more: "make this clearer" is not
+        # licence to change what the speaker meant.
+        if custom_prompt:
+            prompt += (
+                " Do exactly what the instruction above asks and nothing more. "
+                "Keep the speaker's meaning and every point they made unless "
+                "the instruction explicitly asks you to change them."
+            )
 
         # The spacing the user had is put back on the result afterwards
         # (restore_spacing), unless the Ask itself is about the layout.
@@ -388,7 +443,7 @@ class AIRefiner:
         # OpenRouter takes priority over Anthropic direct
         if self.openrouter_api_key:
             try:
-                result = self._refine_via_openrouter(text, prompt, mode)
+                result = self._refine_via_openrouter(text, prompt, mode, system)
                 if result:
                     result = _finish(result)
                     print(f"[AIRefiner] Refined via OpenRouter ({mode}): '{result}'")
@@ -409,7 +464,7 @@ class AIRefiner:
             message = client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=self._max_tokens_for(text),
-                system=self._system_prompt_for(mode),
+                system=system,
                 messages=[
                     {
                         "role": "user",

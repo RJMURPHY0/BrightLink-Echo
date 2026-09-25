@@ -7383,16 +7383,21 @@ class AppWindow:
         frac = min(elapsed / duration, 1.0)
         cv, bars = st.get("player"), st.get("bars") or []
         fill_to = int(frac * len(bars) + 0.5)
-        try:
-            for bar in bars[st["filled"]:fill_to]:
-                cv.itemconfigure(bar, fill=C["accent"])
-            st["filled"] = max(st["filled"], fill_to)
-            cv.itemconfigure(
-                st["time_item"],
-                text=f"{self._fmt_clock(elapsed)} / "
-                     f"{self._fmt_clock(st['duration'])}")
-        except tk.TclError:
-            return
+        # The player draws nothing until its canvas is laid out (under 60px it
+        # returns early), so the bars and clock may not exist yet. Playback
+        # must still run to its end and stop, or the dialog stays "playing".
+        if bars and "time_item" in st:
+            try:
+                filled = st.get("filled", 0)
+                for bar in bars[filled:fill_to]:
+                    cv.itemconfigure(bar, fill=C["accent"])
+                st["filled"] = max(filled, fill_to)
+                cv.itemconfigure(
+                    st["time_item"],
+                    text=f"{self._fmt_clock(elapsed)} / "
+                         f"{self._fmt_clock(st['duration'])}")
+            except tk.TclError:
+                return
         if frac >= 1.0:
             self._stop_feedback_play()
             return
