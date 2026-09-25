@@ -86,34 +86,61 @@ class SpanLabelTests(unittest.TestCase):
                          "30 Dec 25 – 2 Jan 26")
 
 
+class _Host:
+    """Stands in for AppWindow: a section (a plain frame) that the panel is
+    swapped in for, exactly like _toggle_range_panel does."""
+
+    H = 204
+
+    def __init__(self, root):
+        self.frame = tk.Frame(root, bg=C["bg"], width=384)
+        self.frame.pack(fill="x")
+        self.section = tk.Frame(self.frame, bg=C["surface"], height=self.H)
+        self.section.pack(fill="x")
+        self.bar = tk.Frame(self.section, bg=C["surface"])
+        self.bar.pack(fill="x")
+        self.panel = tk.Canvas(self.frame, bg=C["bg"], highlightthickness=0,
+                               bd=0, height=self.H, width=384)
+        self.toggles = []
+
+    def toggle(self, show, paint):
+        self.toggles.append(show)
+        if show:
+            self.section.pack_forget()
+            self.panel.pack(fill="x")
+            self.frame.update_idletasks()
+            paint()
+        else:
+            self.panel.pack_forget()
+            self.section.pack(fill="x")
+
+
+def _picker(test, **kw):
+    root = _shared_root()
+    host = _Host(root)
+    test.addCleanup(host.frame.destroy)
+    var = tk.StringVar(value="All time")
+    p = RangePicker(host.bar, var, _LABELS, bg=C["surface"],
+                    panel=host.panel, on_toggle=host.toggle, **kw)
+    p.pack()
+    root.update_idletasks()
+    test.addCleanup(p.close)
+    return root, host, var, p
+
+
 class PickerTests(unittest.TestCase):
     def setUp(self):
-        self.root = _shared_root()
-        self.host = tk.Frame(self.root, bg=C["bg"])
-        self.host.pack()
-        self.addCleanup(self.host.destroy)
-        self.var = tk.StringVar(value="All time")
         self.periods = []
         self.spans = []
-        self.p = RangePicker(self.host, self.var, _LABELS, bg=C["surface"],
-                             on_period=self.periods.append,
-                             on_custom=lambda a, b: self.spans.append((a, b)))
-        self.p.pack()
-        self.root.update_idletasks()
+        self.root, self.host, self.var, self.p = _picker(
+            self, on_period=self.periods.append,
+            on_custom=lambda a, b: self.spans.append((a, b)))
 
     def test_it_is_still_a_dropdown(self):
-        # The dismiss-anywhere binding and the lose-foreground watch are
-        # inherited, not reimplemented — forking them is how a -topmost list
-        # ends up orphaned over another app.
+        # The closed control and the dismiss-anywhere binding are inherited,
+        # not reimplemented.
         self.assertIsInstance(self.p, Dropdown)
-        self.assertTrue(hasattr(self.p, "_watch_foreground"))
         self.assertTrue(hasattr(self.p, "_on_toplevel_click"))
-
-    def test_custom_tab_is_taller_than_the_period_list(self):
-        self.p._tab = "periods"
-        short = self.p._panel_height()
-        self.p._tab = "custom"
-        self.assertGreater(self.p._panel_height(), short)
 
     def test_two_clicks_make_a_span(self):
         a = datetime.date(2026, 9, 1)
@@ -130,23 +157,21 @@ class PickerTests(unittest.TestCase):
         self.assertIsNone(self.p._sel_end)
 
     def test_apply_reports_the_span_and_labels_the_control(self):
+        self.p.open()
         self.p._pick_day(datetime.date(2026, 9, 1))
         self.p._pick_day(datetime.date(2026, 9, 9))
         self.p._apply_custom()
         self.assertEqual(self.spans,
                          [(datetime.date(2026, 9, 1), datetime.date(2026, 9, 9))])
         self.assertEqual(self.var.get(), "1 Sep – 9 Sep")
+        self.assertEqual(self.host.toggles, [True, False], "panel left open")
 
     def test_every_grid_row_is_filled(self):
         # A five-row month (September 2026) used to leave an empty sixth row
         # above Clear / Apply. The neighbouring months fill it now, dimmed.
         self.p._tab = "custom"
         self.p._cal_month = datetime.date(2026, 9, 1)
-        # The lose-foreground watch closes the panel at once when the test
-        # root is not the foreground window (the norm mid-suite).
-        self.p._watch_foreground = lambda: None
         self.p.open()
-        self.addCleanup(self.p.close)
         cv = self.p._menu_cv
         days = [cv.itemcget(i, "text") for i in cv.find_all()
                 if cv.type(i) == "text"
@@ -186,9 +211,11 @@ class PickerTests(unittest.TestCase):
         self.assertEqual(self.p._cal_month, datetime.date(2026, 1, 1))
 
     def test_period_click_reports_the_label(self):
+        self.p.open()
         self.p._choose_period("This week")
         self.assertEqual(self.periods, ["This week"])
         self.assertEqual(self.var.get(), "This week")
+        self.assertIsNone(self.p._menu)
 
     def test_set_custom_seeds_the_calendar_and_opens_on_that_tab(self):
         a = datetime.date(2026, 3, 4)
@@ -202,181 +229,125 @@ class PickerTests(unittest.TestCase):
         self.assertGreater(self.p._natural_width(), narrow)
 
 
-class _FakeWindow:
-    def __init__(self, top, height):
-        self._top, self._height = top, height
-
-    def winfo_rooty(self):
-        return self._top
-
-    def winfo_height(self):
-        return self._height
-
-
-class PlacementTests(unittest.TestCase):
-    """One way out. Reported with screenshots: Periods opened one way, From / to
-    another, and switching back to Periods left the short list floating where
-    the tall panel's top had been. The side is now chosen once per open from
-    the tallest tab, and the edge next to the control stays glued to it."""
-
-    MONITOR = (0, 0, 1280, 752)         # Ryan's laptop work area
+class InWindowTests(unittest.TestCase):
+    """Reported with screenshots (2026-09-25): the floating panel stayed open
+    over the Hotkey tab and hung past the bottom of the app over whatever sat
+    behind it. It now opens IN the section it belongs to."""
 
     def setUp(self):
-        import app_window
-        self.root = _shared_root()
-        self.host = tk.Frame(self.root, bg=C["bg"])
-        self.host.pack()
-        self.addCleanup(self.host.destroy)
-        self.var = tk.StringVar(value="All time")
-        self.p = RangePicker(self.host, self.var, _LABELS, bg=C["surface"])
-        self.p.pack()
-        self.root.update_idletasks()
-        saved = app_window._monitor_work_area
-        app_window._monitor_work_area = lambda _w: self.MONITOR
-        self.addCleanup(lambda: setattr(app_window, "_monitor_work_area", saved))
-        self.addCleanup(self.p.close)
+        self.root, self.host, self.var, self.p = _picker(self)
 
-    def place(self, ctl_top, win_top=60, win_height=658, ctl_left=120):
-        self.p.winfo_rooty = lambda: ctl_top
-        self.p.winfo_rootx = lambda: ctl_left
-        self.p.winfo_height = lambda: 28
-        self.p.winfo_toplevel = lambda: _FakeWindow(win_top, win_height)
-
-    def tall(self):
-        return max(self.p._panel_height("periods"),
-                   self.p._panel_height("custom"))
-
-    def test_a_control_low_in_the_window_opens_above(self):
-        self.place(ctl_top=560)
-        self.assertTrue(self.p._opens_above(0, 752))
-
-    def test_a_control_high_in_the_window_opens_below(self):
-        self.place(ctl_top=140)
-        self.assertFalse(self.p._opens_above(0, 752))
-
-    def test_the_open_tab_never_changes_the_side(self):
-        # Short Periods fits below this control, tall From / to does not: the
-        # old picker dropped Periods DOWN and raised From / to UP.
-        self.place(ctl_top=420, win_top=0)
-        sides = set()
-        for tab in ("periods", "custom"):
-            self.p._tab = tab
-            sides.add(self.p._opens_above(0, 752))
-        self.assertEqual(sides, {True})
-
-    def test_the_monitor_overrides_when_the_tall_tab_cannot_fit(self):
-        # Window dragged up off the top of the screen: the control is low in
-        # the window, but there is no room above it on the monitor.
-        self.place(ctl_top=200, win_top=-400, win_height=658)
-        self.assertLess(200 - 4 - self.tall(), 8)
-        self.assertFalse(self.p._opens_above(0, 752))
-
-    def test_switching_tabs_keeps_the_bottom_edge_on_the_control(self):
-        self.place(ctl_top=560)
-        self.p._menu_above = True
-        edges = set()
-        for tab in ("periods", "custom", "periods"):
-            h = self.p._panel_height(tab)
-            x, y = self.p._panel_xy(306, h)
-            edges.add((x, y + h))
-        self.assertEqual(edges, {(120, 556)})
-
-    def test_switching_tabs_keeps_the_top_edge_on_the_control(self):
-        self.place(ctl_top=140)
-        self.p._menu_above = False
-        edges = {self.p._panel_xy(306, self.p._panel_height(tab))[1]
-                 for tab in ("periods", "custom")}
-        self.assertEqual(edges, {140 + 28 + 4})
-
-    def test_open_and_tab_switches_stay_anchored(self):
-        self.place(ctl_top=560)
-        self.p._tab = "periods"
+    def test_it_is_never_a_toplevel(self):
+        import inspect
+        src = inspect.getsource(RangePicker)
+        self.assertNotIn("Toplevel(", src)
+        self.assertNotIn(".overrideredirect(", src)
+        self.assertNotIn('"-topmost"', src)
         self.p.open()
+        self.assertIs(self.p._menu_cv, self.host.panel)
+        self.assertIs(self.host.panel.winfo_toplevel(), self.root)
+
+    def test_open_swaps_the_section_for_the_panel_and_back(self):
+        self.p.open()
+        self.assertTrue(self.host.panel.winfo_ismapped()
+                        or self.host.panel.winfo_manager() == "pack")
+        self.assertEqual(self.host.section.winfo_manager(), "")
+        self.p.close()
+        self.assertEqual(self.host.panel.winfo_manager(), "")
+        self.assertEqual(self.host.section.winfo_manager(), "pack")
+
+    def test_the_panel_is_never_destroyed_by_close(self):
+        self.p.open()
+        self.p.close()
+        self.assertTrue(self.host.panel.winfo_exists())
+        self.p.open()                               # and opens again
         self.assertIsNotNone(self.p._menu)
 
-        def bottom():
-            geo = self.p._menu.geometry()          # "WxH+X+Y"
-            size, x, y = geo.split("+")
-            return int(y) + int(size.split("x")[1])
+    def _all_inside(self):
+        w, h = self.p._menu_w, self.p._menu_h
+        self.assertGreater(w, 100)
+        self.assertEqual(h, _Host.H)
+        for x0, y0, x1, y1, _fn, _hv in self.p._hits:
+            self.assertGreaterEqual(x0, 0)
+            self.assertGreaterEqual(y0, 0)
+            self.assertLessEqual(x1, w)
+            self.assertLessEqual(y1, h)
 
-        self.root.update_idletasks()
-        first = bottom()
-        self.assertEqual(first, 556)
-        self.p._set_tab("custom")
-        self.assertEqual(bottom(), first)
-        self.p._set_tab("periods")
-        self.assertEqual(bottom(), first)
-
-
-class OpenAboveLayoutTests(unittest.TestCase):
-    """Reported with screenshots (2026-09-25): opening upward, the chevron
-    still pointed down, and the tabs sat on the FAR edge, so switching tabs
-    (which changes the height) moved the tab row out from under the pointer.
-    The tabs now sit on the edge glued to the control."""
-
-    def setUp(self):
-        import app_window
-        self.root = _shared_root()
-        self.host = tk.Frame(self.root, bg=C["bg"])
-        self.host.pack()
-        self.addCleanup(self.host.destroy)
-        self.p = RangePicker(self.host, tk.StringVar(value="All time"),
-                             _LABELS, bg=C["surface"])
-        self.p.pack()
-        self.root.update_idletasks()
-        saved = app_window._monitor_work_area
-        app_window._monitor_work_area = lambda _w: (0, 0, 1280, 752)
-        self.addCleanup(lambda: setattr(app_window, "_monitor_work_area", saved))
-        self.p.winfo_rooty = lambda: 560
-        self.p.winfo_rootx = lambda: 120
-        self.p.winfo_height = lambda: 28
-        self.p.winfo_toplevel = lambda: _FakeWindow(60, 658)
-        self.p._foreground_is_ours = lambda: True
-        self.addCleanup(self.p.close)
-
-    def tab_hits(self):
-        return [h for h in self.p._hits if h[3] - h[1] == self.p._TAB_H - 4]
-
-    def test_tabs_sit_at_the_bottom_when_it_opens_above(self):
-        self.p._tab = "periods"
+    def test_both_tabs_fit_the_section(self):
         self.p.open()
-        self.assertTrue(self.p._menu_above)
-        for tab in ("periods", "custom", "periods"):
+        for tab in ("periods", "custom"):
             self.p._set_tab(tab)
-            hits = self.tab_hits()
-            self.assertEqual(len(hits), 2)
-            # Screen y of the tab band: panel top + in-panel y. Must not move.
-            geo = self.p._menu.geometry()
-            top = int(geo.split("+")[2])
-            ys = {top + h[1] for h in hits}
-            self.assertEqual(len(ys), 1)
-            if tab == "periods":
-                first = ys
-            self.assertEqual(ys, first, "tabs moved on a tab switch")
-            self.assertGreaterEqual(hits[0][1], self.p._menu_h - self.p._TAB_H)
+            self._all_inside()
+        cv = self.p._menu_cv
+        for item in cv.find_all():
+            x0, y0, x1, y1 = cv.bbox(item)
+            self.assertGreaterEqual(y0, -1)
+            self.assertLessEqual(y1, _Host.H + 1)
 
-    def test_content_never_overlaps_the_bottom_tabs(self):
+    def test_every_period_is_offered(self):
+        self.p.open()
+        cv = self.p._menu_cv
+        shown = {cv.itemcget(i, "text") for i in cv.find_all()
+                 if cv.type(i) == "text"}
+        self.assertTrue(set(_LABELS) <= shown)
+
+    def test_calendar_days_do_not_overlap(self):
         self.p._tab = "custom"
         self.p.open()
-        band = self.p._menu_h - self.p._TAB_H
-        content = [h for h in self.p._hits if h not in self.tab_hits()]
-        self.assertTrue(content)
-        self.assertTrue(all(h[3] <= band for h in content),
-                        "calendar or footer runs into the tab band")
-        self.assertTrue(all(h[1] >= 0 for h in content))
+        days = [h for h in self.p._hits if h[3] - h[1] < 30
+                and h[2] - h[0] <= 28 and h[1] > self.p._TAB_H + 40]
+        self.assertEqual(len(days), 42)
+        for a in days:
+            for b in days:
+                if a is b:
+                    continue
+                self.assertFalse(a[0] < b[2] and b[0] < a[2]
+                                 and a[1] < b[3] and b[1] < a[3],
+                                 "two day cells overlap")
 
-    def test_tabs_stay_on_top_when_it_opens_below(self):
-        self.p.winfo_rooty = lambda: 140
-        self.p._tab = "periods"
+    def test_a_click_in_a_date_field_keeps_it_open(self):
+        self.p._tab = "custom"
         self.p.open()
-        self.assertFalse(self.p._menu_above)
-        self.assertTrue(all(h[1] < self.p._TAB_H for h in self.tab_hits()))
+        ent = self.p._entries["start"]
+        self.p._on_toplevel_click(type("E", (), {"widget": ent})())
+        self.assertIsNotNone(self.p._menu)
 
-    def test_chevron_points_the_way_it_opens(self):
-        self.p.winfo_ismapped = lambda: True
-        self.assertTrue(self.p._chevron_up())
-        self.p.winfo_rooty = lambda: 140
-        self.assertFalse(self.p._chevron_up())
+    def test_a_click_elsewhere_closes_it(self):
+        self.p.open()
+        self.p._on_toplevel_click(type("E", (), {"widget": self.root})())
+        self.assertIsNone(self.p._menu)
+
+    def test_the_close_control_closes_it(self):
+        self.p.open()
+        w = self.p._menu_w
+        self.p._on_panel_click(type("E", (), {"x": w - 20,
+                                              "y": self.p._TAB_H // 2})())
+        self.assertIsNone(self.p._menu)
+
+    def test_close_all_closes_it(self):
+        # What AppWindow._switch_dash_tab calls on every page change.
+        self.p.open()
+        Dropdown.close_all()
+        self.assertIsNone(self.p._menu)
+        self.assertEqual(self.host.section.winfo_manager(), "pack")
+
+
+class TabSwitchTests(unittest.TestCase):
+    def test_switching_page_closes_every_open_list(self):
+        import inspect
+        from app_window import AppWindow
+        src = inspect.getsource(AppWindow._switch_dash_tab)
+        self.assertIn("Dropdown.close_all()", src)
+
+    def test_the_host_swaps_the_same_slot_as_the_breakdowns(self):
+        import inspect
+        from app_window import AppWindow
+        src = inspect.getsource(AppWindow._toggle_range_panel)
+        self.assertIn("_impact_stack.winfo_height()", src)
+        self.assertIn("_impact_today_card.pack_forget()", src)
+        self.assertIn("_impact_row.pack_forget()", src)
+        self.assertIn("_atomic_ui", src)
+        self.assertNotIn("_resize", src)
 
 
 class NamedWindowTests(unittest.TestCase):

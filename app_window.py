@@ -10,6 +10,7 @@ import bisect
 import json
 import threading
 import time
+import weakref
 import app_search
 import tkinter as tk
 import tkinter.font as tkfont
@@ -536,10 +537,23 @@ class Dropdown(tk.Canvas):
 
     _PAD_X = 10
     _CHEV_W = 16
+    # Every live control, so a page change can close whatever list is open
+    # (close_all). Weak, so a destroyed page's controls simply drop out.
+    _live = weakref.WeakSet()
+
+    @classmethod
+    def close_all(cls) -> None:
+        for dd in list(cls._live):
+            if dd._menu is not None:
+                try:
+                    dd.close()
+                except tk.TclError:
+                    pass
 
     def __init__(self, parent, variable: tk.StringVar, values,
                  bg=None, font=("Segoe UI", 10, "bold"), width=None,
                  on_change=None):
+        Dropdown._live.add(self)
         self._bg = bg or C["surface"]
         self._font_spec = font
         self._values = list(values)
@@ -867,29 +881,32 @@ class RangePicker(Dropdown):
     The named windows (today / this week / …) answer most questions, but not
     "how did the first week of last month go" — so the list gets a sibling tab
     with two dd/mm/yyyy fields and a month calendar, the same two-tab shape the
-    CRM's date filter uses. Subclasses Dropdown rather than reimplementing it:
-    the closed control, the dismiss-anywhere binding and the lose-foreground
-    watch are all behaviour that took releases to get right and must not fork.
+    CRM's date filter uses. Subclasses Dropdown for the closed control and the
+    dismiss-on-click-elsewhere binding.
 
-    Only open() and the panel painting are overridden. A period click reports
-    through on_period(label); an applied span through on_custom(start, end).
+    The panel opens INSIDE the window, never as a floating list (v1.6.98).
+    The floating version was an -topmost overrideredirect Toplevel; it hung
+    off the bottom of the app over whatever was behind it, and it was
+    reported still open over the Hotkey tab. Now the host hands over a canvas
+    in the section the control belongs to, and `on_toggle(show, paint)` swaps
+    that canvas in for the section (and back). Being a child of the page, the
+    panel is clipped to the window by construction and goes wherever the page
+    goes: a tab switch closes it (AppWindow._switch_dash_tab).
+
+    A period click reports through on_period(label); an applied span through
+    on_custom(start, end).
     """
 
-    _W = 306
-    _TAB_H = 36
-    _ROW_H = 30
-    _CELL = 30
-    _CAL_TOP = 128          # y of the weekday header row on the custom tab
-    _FOOT_H = 38            # Clear / Apply band under the grid
+    _TAB_H = 34
+    _LEFT_W = 128           # From / To column on the custom tab
     _OTHER_MONTH = "#4a4a4a"  # neighbouring months' days: context, dimmed
 
-    def __init__(self, parent, variable: tk.StringVar, values, *, bg=None,
-                 font=("Segoe UI", 10, "bold"), on_period=None, on_custom=None,
-                 prefer_below=False):
+    def __init__(self, parent, variable: tk.StringVar, values, *, panel,
+                 on_toggle, bg=None, font=("Segoe UI", 10, "bold"),
+                 on_period=None, on_custom=None):
+        self._panel = panel
+        self._on_toggle = on_toggle
         self._on_period = on_period
-        # A control near the TOP of its page drops down, like any menu, and
-        # rises only when the monitor has no room below for the tallest tab.
-        self._prefer_below = prefer_below
         self._on_custom = on_custom
         self._tab = "periods"
         self._hits = []                 # [(x0, y0, x1, y1, fn, hoverable)]
@@ -898,9 +915,12 @@ class RangePicker(Dropdown):
         self._cal_month = _date.today().replace(day=1)
         self._entries = {}
         self._focus_field = "start"
-        self._menu_above = False        # side chosen at open (see _opens_above)
-        self._dy = 0                    # content shift when the tabs sit at the bottom
+        self._menu_w = 0
         super().__init__(parent, variable, values, bg=bg, font=font)
+        panel.bind("<Motion>", self._on_panel_motion)
+        panel.bind("<Leave>", lambda _e: self._set_panel_hover(None))
+        panel.bind("<Button-1>", self._on_panel_click)
+        panel.bind("<Escape>", lambda _e: self.close())
 
     # ── the closed control ───────────────────────────────────────────────────
 
@@ -920,19 +940,6 @@ class RangePicker(Dropdown):
             pass
         super()._paint()
 
-    def _chevron_up(self) -> bool:
-        """Open: the side it opened on. Closed: the side it WILL open on, so
-        the arrow never points away from where the list appears."""
-        if self._menu is not None:
-            return bool(self._menu_above)
-        try:
-            if not self.winfo_ismapped():
-                return False
-            _l, mon_t, _r, mon_b = _monitor_work_area(self)
-            return bool(self._opens_above(mon_t, mon_b))
-        except Exception:
-            return False
-
     def set_custom(self, start, end) -> None:
         """Seed the calendar from a saved span (restoring config at startup)."""
         self._sel_start, self._sel_end = start, end
@@ -940,150 +947,75 @@ class RangePicker(Dropdown):
             self._cal_month = start.replace(day=1)
             self._tab = "custom"
 
-    # ── the open panel ───────────────────────────────────────────────────────
+    # ── open / close ─────────────────────────────────────────────────────────
 
-    def _panel_height(self, tab=None) -> int:
-        if (tab or self._tab) == "periods":
-            return self._TAB_H + self._ROW_H * len(self._values) + 14
-        return self._CAL_TOP + 20 + self._CELL * 6 + self._FOOT_H
-
-    # ── placement ────────────────────────────────────────────────────────────
-    #
-    # One way out, every time. The first version chose up or down from the
-    # height of whichever tab happened to be open (so Periods dropped DOWN
-    # where From / to rose UP), and a tab switch kept the panel's TOP edge
-    # where it was, so going From / to → Periods left the short list floating
-    # half a screen above the control it belongs to. Now the side is chosen
-    # once per open, from the TALLEST tab, and the edge next to the control
-    # stays glued to it through every tab switch.
-
-    def _opens_above(self, mon_t: int, mon_b: int) -> bool:
-        """Which side of the control the panel opens on.
-
-        Prefers the side with more room INSIDE the app window: this control
-        sits at the bottom of Home, so the panel rises over the app instead of
-        hanging off its bottom edge onto whatever is behind it. The monitor has
-        the last word: if the tallest tab cannot fit on that side, the other
-        side is used."""
-        h = max(self._panel_height("periods"), self._panel_height("custom"))
-        ctl_top = self.winfo_rooty()
-        ctl_bottom = ctl_top + self.winfo_height()
+    def _on_toplevel_click(self, event=None) -> None:
+        """A click anywhere else in the window closes the panel. The panel's
+        own clicks (its canvas, and the date fields embedded in it) share the
+        window's bindtag now that it lives in the page, so they are told apart
+        by ancestry, never by returning "break" from an Entry, which would
+        also stop the Entry placing its caret."""
+        if self._menu is None:
+            return
+        w = getattr(event, "widget", None)
+        while w is not None:
+            if w is self._panel:
+                return
+            w = getattr(w, "master", None)
         try:
-            win = self.winfo_toplevel()
-            win_top = win.winfo_rooty()
-            win_bottom = win_top + win.winfo_height()
+            self.close()
         except tk.TclError:
-            win_top, win_bottom = mon_t, mon_b
-        above = (ctl_top - win_top) >= (win_bottom - ctl_bottom)
-        fits_above = ctl_top - 4 - h >= mon_t + 8
-        fits_below = ctl_bottom + 4 + h <= mon_b - 8
-        if getattr(self, "_prefer_below", False):
-            return not fits_below and fits_above
-        if above and not fits_above and fits_below:
-            return False
-        if not above and not fits_below and fits_above:
-            return True
-        return above
-
-    def _panel_xy(self, w: int, h: int) -> tuple:
-        """Top-left for a w×h panel on the side chosen at open time."""
-        mon_l, mon_t, mon_r, mon_b = _monitor_work_area(self)
-        ctl_top = self.winfo_rooty()
-        if getattr(self, "_menu_above", False):
-            y = ctl_top - 4 - h                          # bottom edge glued
-        else:
-            y = ctl_top + self.winfo_height() + 4        # top edge glued
-        y = max(mon_t + 8, min(y, mon_b - h - 8))
-        x = self.winfo_rootx()
-        if getattr(self, "_prefer_below", False):
-            # A right-hand control drops its panel right-aligned under it,
-            # so the panel stays over the app instead of hanging off its edge.
-            x = x + self.winfo_width() - w
-        x = max(mon_l + 8, min(x, mon_r - w - 8))
-        return x, y
+            pass
 
     def open(self) -> None:
         if self._menu is not None:
             return
-        mon_l, mon_t, mon_r, mon_b = _monitor_work_area(self)
-        w = min(self._W, (mon_r - mon_l) - 24)
-        h = self._panel_height()
-        self._menu_above = self._opens_above(mon_t, mon_b)
-        top = tk.Toplevel(self)
-        top.overrideredirect(True)
-        top.configure(bg=C["surface"])
+        self._menu = self._panel         # Dropdown's "is open" marker
+        self._menu_cv = self._panel
+        self._menu_hover = None
+        self._on_toggle(True, self._paint_panel_sized)
         try:
-            top.attributes("-topmost", True)
+            self._panel.focus_set()      # so Escape reaches it
         except tk.TclError:
             pass
-        x, y = self._panel_xy(w, h)
-        top.geometry(f"{w}x{h}+{x}+{y}")
-        cv = tk.Canvas(top, bg=C["surface"], highlightthickness=0, bd=0,
-                       width=w, height=h)
-        cv.pack(fill="both", expand=True)
-        self._menu = top
-        self._menu_cv = cv
-        self._menu_w = w
-        self._menu_h = h
-        self._menu_hover = None
-        self._paint_panel()
-        cv.bind("<Motion>", self._on_panel_motion)
-        cv.bind("<Leave>", lambda _e: self._set_panel_hover(None))
-        cv.bind("<Button-1>", self._on_panel_click)
-        top.bind("<Escape>", lambda _e: self.close())
-        try:
-            from popup import _apply_popup_corners
-            top.update_idletasks()
-            _apply_popup_corners(top.winfo_id())
-        except Exception:
-            pass
-        self._watch_foreground()
         self._paint()
 
     def close(self) -> None:
-        self._entries = {}
-        super().close()
-
-    def _repaint_panel_window(self) -> None:
-        """Erase-repaint after a geometry change. Resizing a MAPPED
-        overrideredirect window lets Windows blit the old pixels into the new
-        position; RDW_UPDATENOW only validates Tk's update region, so the
-        after(0) twin is what actually drains the Expose queue."""
-        top = self._menu
-        if top is None:
+        if self._menu is None:
             return
+        self._menu = None
+        self._menu_cv = None
+        for e in self._entries.values():
+            try:
+                e.destroy()
+            except tk.TclError:
+                pass
+        self._entries = {}
+        self._hits = []
+        self._on_toggle(False, None)
         try:
-            u32 = _user32()
-            hwnd = u32.GetAncestor(ctypes.c_void_p(top.winfo_id()), 2)
-            if not hwnd:
-                return
-            flags = 0x0001 | 0x0004 | 0x0080 | 0x0100   # INVAL|ERASE|ALLCHILD|NOW
-            u32.RedrawWindow(ctypes.c_void_p(hwnd), None, None, flags)
-            top.after(0, lambda: u32.RedrawWindow(ctypes.c_void_p(hwnd), None,
-                                                  None, flags))
-        except Exception:
+            self._paint()
+        except tk.TclError:
             pass
+
+    def _paint_panel_sized(self) -> None:
+        """Called by the host once the panel canvas is packed and realised."""
+        cv = self._panel
+        try:
+            self._menu_w = max(cv.winfo_width(), 1)
+            self._menu_h = max(int(cv["height"]), 1)
+        except (tk.TclError, ValueError):
+            return
+        self._paint_panel()
 
     def _set_tab(self, tab: str) -> None:
         if tab == self._tab or self._menu is None:
             return
         self._tab = tab
-        h = self._panel_height()
-        top = self._menu
-        try:
-            # Re-anchored to the control, never kept at the old top-left.
-            x, y = self._panel_xy(self._menu_w, h)
-            top.geometry(f"{self._menu_w}x{h}+{x}+{y}")
-            self._menu_cv.configure(height=h)
-            self._menu_h = h
-            top.update_idletasks()
-        except tk.TclError:
-            return
-        # The panel moved under the pointer: a hover outline from the old
-        # layout would sit on the wrong thing until the mouse next moves.
+        # Same canvas, same size, so nothing moves under the pointer; only a
+        # hover outline from the old layout would sit on the wrong thing.
         self._menu_hover = None
         self._paint_panel()
-        self._repaint_panel_window()
 
     # ── painting ─────────────────────────────────────────────────────────────
 
@@ -1104,41 +1036,37 @@ class RangePicker(Dropdown):
         cv.delete("all")
         self._hits = []
         try:
-            img = ui_render.round_rect(cv, w, h, 8, C["surface"], C["border"],
-                                       1, C["surface"])
+            img = ui_render.round_rect(cv, w, h, 12, C["surface"], C["border"],
+                                       1, C["bg"])
         except Exception:
             img = None
         if img is not None:
             self._menu_img = img
             cv.create_image(0, 0, image=img, anchor="nw")
         else:
-            _rr(cv, 0, 0, w - 1, h - 1, 8, fill=C["surface"], outline=C["border"])
+            _rr(cv, 0, 0, w - 1, h - 1, 12, fill=C["surface"],
+                outline=C["border"])
 
-        # The tabs sit on the edge NEXT TO the control: the bottom when the
-        # panel rises above it. That edge is the one glued to the control, so
-        # switching tabs (which changes the panel's height) moves only the far
-        # edge and the tabs stay under the pointer. Content shifts up by the
-        # tab band via _dy.
-        bottom = bool(self._menu_above)
+        # Header: the two tabs, and a close control in the corner. The panel
+        # hides the control that opened it, so it carries its own way out.
         tb = self._TAB_H
-        ty0 = h - tb if bottom else 0
-        self._dy = -tb if bottom else 0
-        half = w // 2
+        half = (w - 40) // 2
         for i, (key, label) in enumerate((("periods", "Periods"),
                                           ("custom", "From / to"))):
-            x0 = 1 + i * (half - 1)
-            x1 = x0 + half - 2
+            x0 = 4 + i * half
+            x1 = x0 + half
             on = self._tab == key
-            cv.create_text((x0 + x1) // 2, ty0 + tb // 2 + 1, text=label,
+            cv.create_text((x0 + x1) // 2, tb // 2 + 1, text=label,
                            fill=C["text"] if on else C["subtext"],
                            font=("Segoe UI", 9, "bold" if on else "normal"))
-            ly = ty0 + 2 if bottom else tb - 2
-            cv.create_line(x0 + 10, ly, x1 - 10, ly,
-                           fill=C["accent"] if on else C["surface"], width=2)
-            self._hit(x0, ty0 + 2, x1, ty0 + tb - 2,
-                      lambda k=key: self._set_tab(k))
-        dl = ty0 if bottom else tb
-        cv.create_line(1, dl, w - 1, dl, fill=C["divider"])
+            if on:
+                cv.create_line(x0 + 14, tb - 2, x1 - 14, tb - 2,
+                               fill=C["accent"], width=2)
+            self._hit(x0, 4, x1, tb - 3, lambda k=key: self._set_tab(k))
+        cv.create_text(w - 20, tb // 2 + 1, text="✕", fill=C["subtext"],
+                       font=("Segoe UI", 9))
+        self._hit(w - 34, 6, w - 6, tb - 4, self.close)
+        cv.create_line(1, tb, w - 1, tb, fill=C["divider"])
 
         if self._tab == "periods":
             self._paint_periods()
@@ -1147,93 +1075,137 @@ class RangePicker(Dropdown):
         self._paint_hover()
 
     def _paint_periods(self) -> None:
-        cv, w = self._menu_cv, self._menu_w
+        # Two columns, read in pairs (Today / Yesterday, This week / This
+        # month …), so all seven fit the section's height without scrolling.
+        cv, w, h = self._menu_cv, self._menu_w, self._menu_h
         current = self._var.get()
+        n = len(self._values)
+        rows = (n + 1) // 2
+        top = self._TAB_H + 6
+        row_h = max(20, min(38, (h - top - 8) // max(rows, 1)))
+        col_w = (w - 16) / 2
         for i, val in enumerate(self._values):
-            y = self._TAB_H + 6 + i * self._ROW_H + self._dy
+            r, c = divmod(i, 2)
+            x0 = int(8 + c * col_w)
+            x1 = int(8 + (c + 1) * col_w)
+            y = top + r * row_h
             sel = val == current
-            cv.create_text(16, y + self._ROW_H // 2, text=val, anchor="w",
+            cv.create_text(x0 + 12, y + row_h // 2, text=val, anchor="w",
                            fill=C["accent"] if sel else C["text"],
                            font=("Segoe UI", 9, "bold" if sel else "normal"))
             if sel:
-                cv.create_text(w - 16, y + self._ROW_H // 2, text="✓",
-                               anchor="e", fill=C["accent"],
-                               font=("Segoe UI", 9, "bold"))
-            self._hit(6, y, w - 6, y + self._ROW_H,
+                cv.create_text(x1 - 12, y + row_h // 2, text="✓", anchor="e",
+                               fill=C["accent"], font=("Segoe UI", 9, "bold"))
+            self._hit(x0 + 2, y + 1, x1 - 2, y + row_h - 1,
                       lambda v=val: self._choose_period(v))
 
-    def _paint_custom(self) -> None:
-        cv, w = self._menu_cv, self._menu_w
-        # Two dd/mm/yyyy fields. Real Entries, so a span can be typed as well as
-        # clicked — the calendar writes into whichever field has focus.
-        dy = self._dy
-        fw = (w - 24 - 22) // 2
-        for i, key in enumerate(("start", "end")):
-            self._make_date_field(key, 12 + i * (fw + 22), 46 + dy, fw, 30)
-        cv.create_text(w // 2, 61 + dy, text="→", fill=C["subtext"],
-                       font=("Segoe UI", 10))
+    def _custom_columns(self):
+        """(left column x0, x1, calendar x0, x1) for the custom tab."""
+        w = self._menu_w
+        lx0 = 12
+        lx1 = lx0 + min(self._LEFT_W, int((w - 24) * 0.36))
+        return lx0, lx1, lx1 + 14, w - 10
 
+    def _paint_custom(self) -> None:
+        cv, h = self._menu_cv, self._menu_h
+        tb = self._TAB_H
+        lx0, lx1, rx0, rx1 = self._custom_columns()
+
+        # Left: two dd/mm/yyyy fields (real Entries, so a span can be typed as
+        # well as clicked; the calendar writes into whichever has focus), a
+        # line saying what is picked, then Clear / Apply.
+        for i, (key, cap) in enumerate((("start", "From"), ("end", "To"))):
+            y = tb + 8 + i * 42
+            cv.create_text(lx0 + 2, y + 5, text=cap, anchor="w",
+                           fill=C["subtext"], font=("Segoe UI", 8))
+            self._make_date_field(key, lx0, y + 13, lx1 - lx0, 26)
+
+        a, b = self._sel_start, self._sel_end
+        if a is None:
+            hint = "Pick a start date"
+        elif b is None:
+            hint = "Now pick an end date"
+        else:
+            days = (b - a).days + 1
+            hint = f"{days} day{'s' if days != 1 else ''}"
+        cv.create_text(lx0 + 2, tb + 100, text=hint, anchor="w",
+                       fill=C["subtext"], font=("Segoe UI", 8))
+
+        by1 = h - 10
+        by0 = by1 - 26
+        mid = (lx0 + lx1) // 2
+        _rr(cv, lx0, by0, mid - 4, by1, 7, fill=C["surface"],
+            outline=C["border"])
+        cv.create_text((lx0 + mid - 4) // 2, (by0 + by1) // 2, text="Clear",
+                       fill=C["subtext"], font=("Segoe UI", 9))
+        self._hit(lx0, by0, mid - 4, by1, self._clear_custom)
+        ready = a is not None
+        _rr(cv, mid + 4, by0, lx1, by1, 7,
+            fill=C["accent"] if ready else C["border"], outline="")
+        cv.create_text((mid + 4 + lx1) // 2, (by0 + by1) // 2, text="Apply",
+                       fill=C["bg"] if ready else C["subtext"],
+                       font=("Segoe UI", 9, "bold"))
+        self._hit(mid + 4, by0, lx1, by1, self._apply_custom)
+
+        # Right: the month calendar, sized to whatever height the section has.
+        cv.create_line(rx0 - 7, tb + 10, rx0 - 7, h - 10, fill=C["divider"])
         m = self._cal_month
-        cv.create_text(w // 2, 100 + dy, text=m.strftime("%B %Y"),
-                       fill=C["text"], font=("Segoe UI", 10, "bold"))
-        for dx, step, glyph in ((22, -1, "‹"), (w - 22, 1, "›")):
-            cv.create_text(dx, 100 + dy, text=glyph, fill=C["subtext"],
-                           font=("Segoe UI", 14))
-            self._hit(dx - 14, 86 + dy, dx + 14, 114 + dy,
+        my = tb + 15
+        cv.create_text((rx0 + rx1) // 2, my, text=m.strftime("%B %Y"),
+                       fill=C["text"], font=("Segoe UI", 9, "bold"))
+        for dx, step, glyph in ((rx0 + 10, -1, "‹"), (rx1 - 10, 1, "›")):
+            cv.create_text(dx, my - 1, text=glyph, fill=C["subtext"],
+                           font=("Segoe UI", 13))
+            self._hit(dx - 11, my - 11, dx + 11, my + 11,
                       lambda st=step: self._step_month(st))
 
-        wd_y = self._CAL_TOP + dy
+        wd_y = tb + 34
         for i, name in enumerate(("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su")):
             cv.create_text(self._cell_x(i), wd_y, text=name, fill=C["subtext"],
-                           font=("Segoe UI", 8))
+                           font=("Segoe UI", 7))
 
-        # All 42 cells are filled: the grid is a fixed six rows so the panel
-        # never changes height between months (a moving edge would slide the
-        # month arrows out from under the pointer), and a five-row month used
-        # to leave a whole empty row above Clear / Apply. The neighbouring
-        # months' days fill it, dimmed and still pickable, like the Day
-        # streak calendar.
+        # A fixed six rows, all filled: the neighbouring months' days fill a
+        # five-row month, dimmed and still pickable, like the Day streak
+        # calendar, so the grid never changes shape between months.
+        grid_top = wd_y + 8
+        cell_h = self._cell_h()
+        cw = (rx1 - rx0) / 7
         first = _date(m.year, m.month, 1)
         grid_start = first - timedelta(days=first.weekday())
         today = _date.today()
-        a, b = self._sel_start, self._sel_end
         for idx in range(42):
             cx = self._cell_x(idx % 7)
-            cy = wd_y + 20 + (idx // 7) * self._CELL + self._CELL // 2
+            cy = grid_top + (idx // 7) * cell_h + cell_h // 2
             day = grid_start + timedelta(days=idx)
-            d = day.day
             other = day.month != m.month
             edge = day == a or day == b
             inside = a is not None and b is not None and a < day < b
+            hx = min(14, int(cw / 2) - 1)
+            hy = cell_h // 2 - 1
             if edge:
-                _rr(cv, cx - 14, cy - 13, cx + 14, cy + 13, 8,
+                _rr(cv, cx - hx, cy - hy, cx + hx, cy + hy, 6,
                     fill=C["accent"], outline="")
             elif inside:
-                _rr(cv, cx - 14, cy - 13, cx + 14, cy + 13, 8,
+                _rr(cv, cx - hx, cy - hy, cx + hx, cy + hy, 6,
                     fill=C["accent_dim"], outline="")
             elif day == today:
-                _rr(cv, cx - 14, cy - 13, cx + 14, cy + 13, 8, fill="",
+                _rr(cv, cx - hx, cy - hy, cx + hx, cy + hy, 6, fill="",
                     outline=C["accent"])
-            cv.create_text(cx, cy, text=str(d),
+            cv.create_text(cx, cy, text=str(day.day),
                            fill=(C["bg"] if edge else
                                  self._OTHER_MONTH if other else C["text"]),
-                           font=("Segoe UI", 9, "bold" if edge else "normal"))
-            self._hit(cx - 14, cy - 13, cx + 14, cy + 13,
+                           font=("Segoe UI", 8, "bold" if edge else "normal"))
+            self._hit(cx - hx, cy - hy, cx + hx, cy + hy,
                       lambda dd=day: self._pick_day(dd))
 
-        fy = self._menu_h + dy - self._FOOT_H // 2
-        cv.create_text(18, fy, text="Clear", anchor="w", fill=C["subtext"],
-                       font=("Segoe UI", 9))
-        self._hit(12, fy - 12, 74, fy + 12, self._clear_custom)
-        ready = self._sel_start is not None
-        cv.create_text(w - 18, fy, text="Apply", anchor="e",
-                       fill=C["accent"] if ready else C["subtext"],
-                       font=("Segoe UI", 9, "bold"))
-        self._hit(w - 74, fy - 12, w - 12, fy + 12, self._apply_custom)
+    def _cell_h(self) -> int:
+        grid_top = self._TAB_H + 42
+        return max(14, min(26, (self._menu_h - 6 - grid_top) // 6))
 
     def _cell_x(self, col: int) -> int:
-        left = (self._menu_w - self._CELL * 7) // 2
-        return left + col * self._CELL + self._CELL // 2
+        _lx0, _lx1, rx0, rx1 = self._custom_columns()
+        cw = (rx1 - rx0) / 7
+        return int(rx0 + col * cw + cw / 2)
 
     def _make_date_field(self, key: str, x: int, y: int, w: int, h: int) -> None:
         cv = self._menu_cv
@@ -1250,6 +1222,7 @@ class RangePicker(Dropdown):
         ent.bind("<FocusIn>", lambda _e, k=key: self._set_focus_field(k))
         ent.bind("<KeyRelease>", lambda _e, k=key: self._typed_date(k))
         ent.bind("<Return>", lambda _e: self._apply_custom())
+        ent.bind("<Escape>", lambda _e: self.close())
         self._entries[key] = ent
 
     def _set_focus_field(self, key: str) -> None:
@@ -3434,8 +3407,11 @@ class AppWindow:
 
         # Leaving Home with a breakdown open would strand it there: come back
         # later and the cards are still replaced by a panel you have forgotten
-        # opening. Closing is a no-op when none is open.
+        # opening. Closing is a no-op when none is open. Same for any open
+        # dropdown list, the range picker's panel included: a list belongs to
+        # the page it was opened on and must never show over another one.
         self._close_impact_detail()
+        Dropdown.close_all()
 
         tab_frames = {
             "home": self._home_frame,
@@ -4636,12 +4612,17 @@ class AppWindow:
         # RangePicker, not Dropdown: the same list plus a From / to tab, so the
         # cards can be scoped to any span and not just the five named windows.
         # On the right, where a period filter sits in the CRM's cards; the
-        # words count reads left to right from the icon.
+        # words count reads left to right from the icon. Its panel opens IN
+        # this section (_toggle_range_panel), never as a floating list.
+        self._impact_range_panel = tk.Canvas(
+            self._impact_stack, bg=C["bg"], highlightthickness=0, bd=0,
+            height=_IMPACT_CARD_H)
         _range_menu = RangePicker(brow, self._impact_range_var,
                                   list(_RANGE_LABELS.values()), bg=C["surface"],
                                   font=("Segoe UI", 10, "bold"),
                                   on_period=_on_period, on_custom=_on_custom,
-                                  prefer_below=True)
+                                  panel=self._impact_range_panel,
+                                  on_toggle=self._toggle_range_panel)
         if _span:
             _range_menu.set_custom(*_span)
         _range_menu.pack(side="right")
@@ -4653,6 +4634,46 @@ class AppWindow:
         )
         self._impact_today_lbl.pack(side="left", padx=(8, 0))
 
+
+    def _toggle_range_panel(self, show: bool, paint=None) -> None:
+        """Swap the range picker's panel in for the words bar + cards, or back.
+
+        Same slot and same rule as the impact breakdowns: the panel takes the
+        exact height the bar and cards occupied, so opening it never resizes
+        the window and nothing below it moves. It lives in the page, so it can
+        never spill past the window's edge or outlive the tab it belongs to."""
+        panel = getattr(self, "_impact_range_panel", None)
+        if panel is None:
+            return
+        if show:
+            self._close_impact_detail()
+            try:
+                block_h = self._impact_stack.winfo_height()
+            except tk.TclError:
+                return
+            if block_h < 120:          # before the first layout pass
+                block_h = _IMPACT_CARD_H + 56
+
+            def _swap():
+                self._impact_today_card.pack_forget()
+                self._impact_row.pack_forget()
+                panel.configure(height=block_h)
+                panel.pack(fill="x", padx=20)
+                # Realise the width before drawing, or the first paint is at
+                # width 1 and shows an empty card for a frame.
+                try:
+                    self._root.update_idletasks()
+                except tk.TclError:
+                    pass
+                if paint is not None:
+                    paint()
+        else:
+            def _swap():
+                panel.pack_forget()
+                self._impact_today_card.pack(fill="x", padx=20)
+                self._impact_row.pack(fill="x", padx=20,
+                                      pady=(self._gap("cards_words"), 0))
+        self._atomic_ui(_swap)
 
     def _set_impact_card(self, key: str, value: str, unit: str, sub: str) -> None:
         card = self._impact_cards.get(key)
@@ -7194,6 +7215,11 @@ class AppWindow:
 
         _caption("WHAT ECHO HEARD")
         _box(heard, 3, False)
+        if audio_path:
+            # Listen right under what it heard: the recording is the evidence
+            # the correction is checked against, so it sits beside the text
+            # it contradicts rather than behind the History row.
+            self._build_feedback_player(card, st)
         _caption("WHAT IT SHOULD HAVE SAID")
         st["entry"] = _box(heard, 4, True)
 
@@ -7239,6 +7265,160 @@ class AppWindow:
             st["entry"].mark_set("insert", "end-1c")
         except tk.TclError:
             pass
+
+    # ── feedback dialog: the recording player ────────────────────────────────
+    #
+    # Same player as an expanded History row (play/stop button, peak-per-bucket
+    # waveform that fills as it plays, elapsed / total), drawn on its own
+    # canvas. Shares winsound with History, so starting one stops the other.
+
+    _FB_PLAYER_H = 34
+
+    def _build_feedback_player(self, card, st: dict) -> None:
+        bg = C["surface"]
+        cv = tk.Canvas(card, bg=bg, highlightthickness=0, bd=0,
+                       height=self._FB_PLAYER_H, cursor="hand2")
+        cv.pack(fill="x", pady=(0, 12))
+        st["player"] = cv
+        st["playing"] = False
+        st["play_job"] = None
+        try:
+            st["duration"], st["peaks"] = self._wave_info(st["audio"])
+        except Exception:
+            st["duration"], st["peaks"] = 0.0, []
+        cv.bind("<Configure>", lambda _e: self._draw_feedback_player())
+        cv.bind("<Button-1>", lambda _e: self._toggle_feedback_play())
+        self._draw_feedback_player()
+
+    def _draw_feedback_player(self) -> None:
+        st = getattr(self, "_fb", None)
+        cv = (st or {}).get("player")
+        if cv is None:
+            return
+        try:
+            w = cv.winfo_width()
+            cv.delete("all")
+        except tk.TclError:
+            return
+        if w < 60:
+            return
+        bg = C["surface"]
+        h = self._FB_PLAYER_H
+        cy = h // 2
+        playing = st["playing"]
+        duration = st["duration"]
+        photo = None
+        try:
+            photo = ui_render.icon_media(cv, "stop" if playing else "play",
+                                         30, C["accent"], "#0d0d0d", bg)
+        except Exception:
+            photo = None
+        if photo is not None:
+            cv.create_image(0, cy - 15, image=photo, anchor="nw")
+            st["media_img"] = photo
+        else:
+            cv.create_oval(0, cy - 15, 30, cy + 15, fill=C["accent"],
+                           outline="")
+        elapsed = self._feedback_elapsed()
+        st["time_item"] = cv.create_text(
+            w, cy, anchor="e", fill=C["subtext"], font=("Segoe UI", 8),
+            text=f"{self._fmt_clock(elapsed)} / {self._fmt_clock(duration)}")
+        bx0, bx1 = 42, w - 78
+        avail = max(bx1 - bx0, 40)
+        n = max(16, min(70, avail // 5))
+        step = avail / n
+        peaks = st["peaks"]
+        m = len(peaks)
+        frac = (elapsed / duration) if (playing and duration > 0) else 0.0
+        fill_to = int(frac * n + 0.5)
+        bars = []
+        for i in range(n):
+            p = peaks[int(i * m / n)] if m else 0.0
+            bh = 3 + (p ** 0.7) * 20
+            x = bx0 + i * step
+            bars.append(cv.create_rectangle(
+                x, cy - bh / 2, x + 3, cy + bh / 2, outline="",
+                fill=C["accent"] if i < fill_to else self._WAVE_GREY))
+        st["bars"] = bars
+        st["filled"] = fill_to
+
+    def _feedback_elapsed(self) -> float:
+        st = getattr(self, "_fb", None)
+        if not st or not st.get("playing"):
+            return 0.0
+        return min(time.monotonic() - st["play_started"], st["duration"])
+
+    def _toggle_feedback_play(self) -> None:
+        st = getattr(self, "_fb", None)
+        if not st or not st.get("audio"):
+            return
+        if st["playing"]:
+            self._stop_feedback_play()
+            return
+        if getattr(self, "_play_key", None) is not None:
+            self._stop_history_playback()     # one winsound: one player at a time
+        try:
+            import winsound
+            winsound.PlaySound(
+                st["audio"], winsound.SND_FILENAME | winsound.SND_ASYNC
+                | winsound.SND_NODEFAULT)
+        except Exception as e:
+            print(f"[Feedback] Playback failed: {e}")
+            return
+        st["playing"] = True
+        st["play_started"] = time.monotonic()
+        self._draw_feedback_player()
+        try:
+            st["play_job"] = self._root.after(50, self._tick_feedback_play)
+        except tk.TclError:
+            st["play_job"] = None
+
+    def _tick_feedback_play(self) -> None:
+        st = getattr(self, "_fb", None)
+        if not st or not st.get("playing"):
+            return
+        st["play_job"] = None
+        duration = max(st["duration"], 0.05)
+        elapsed = self._feedback_elapsed()
+        frac = min(elapsed / duration, 1.0)
+        cv, bars = st.get("player"), st.get("bars") or []
+        fill_to = int(frac * len(bars) + 0.5)
+        try:
+            for bar in bars[st["filled"]:fill_to]:
+                cv.itemconfigure(bar, fill=C["accent"])
+            st["filled"] = max(st["filled"], fill_to)
+            cv.itemconfigure(
+                st["time_item"],
+                text=f"{self._fmt_clock(elapsed)} / "
+                     f"{self._fmt_clock(st['duration'])}")
+        except tk.TclError:
+            return
+        if frac >= 1.0:
+            self._stop_feedback_play()
+            return
+        try:
+            st["play_job"] = self._root.after(50, self._tick_feedback_play)
+        except tk.TclError:
+            st["play_job"] = None
+
+    def _stop_feedback_play(self, st: dict = None, *, redraw: bool = True) -> None:
+        st = st or getattr(self, "_fb", None)
+        if not st or not st.get("playing"):
+            return
+        job, st["play_job"] = st.get("play_job"), None
+        if job is not None:
+            try:
+                self._root.after_cancel(job)
+            except (tk.TclError, ValueError):
+                pass
+        st["playing"] = False
+        try:
+            import winsound
+            winsound.PlaySound(None, winsound.SND_PURGE)
+        except Exception:
+            pass
+        if redraw:
+            self._draw_feedback_player()
 
     def _paint_feedback_tick(self) -> None:
         st = getattr(self, "_fb", None)
@@ -7336,6 +7516,8 @@ class AppWindow:
 
     def _close_feedback(self) -> None:
         st, self._fb = getattr(self, "_fb", None), None
+        if st:
+            self._stop_feedback_play(st, redraw=False)
         if st and st.get("cover") is not None:
             try:
                 st["cover"].destroy()
@@ -7821,6 +8003,7 @@ class AppWindow:
             self._stop_history_playback()
             return
         self._stop_history_playback()
+        self._stop_feedback_play()
         path = self._audio_path_for(entry["item"])
         if not path:
             return

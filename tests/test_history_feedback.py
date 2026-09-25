@@ -353,6 +353,66 @@ class DialogTests(unittest.TestCase):
         self.assertEqual(self.w._feedback_text(), "push it to main")
         self.assertIn("Try again", st["status"].cget("text"))
 
+    # ── listening back ───────────────────────────────────────────────────
+
+    def _fake_winsound(self):
+        calls = []
+        fake = types.SimpleNamespace(
+            SND_FILENAME=1, SND_ASYNC=2, SND_NODEFAULT=4, SND_PURGE=8,
+            PlaySound=lambda path, flags: calls.append(path))
+        p = mock.patch.dict(sys.modules, {"winsound": fake})
+        p.start()
+        self.addCleanup(p.stop)
+        return calls
+
+    def test_the_recording_can_be_played_from_the_dialog(self):
+        calls = self._fake_winsound()
+        self.w._wave_info = lambda p: (2.0, [0.2, 0.9, 0.4, 0.1])
+        self.w._open_feedback(ITEM)
+        self.root.update_idletasks()
+        st = self.w._fb
+        self.assertIn("player", st)
+        self.assertTrue(st["bars"], "no waveform drawn")
+        self.w._toggle_feedback_play()
+        self.assertTrue(st["playing"])
+        self.assertEqual(calls, [self.wav])
+        self.w._toggle_feedback_play()               # same button stops it
+        self.assertFalse(st["playing"])
+        self.assertEqual(calls[-1], None)            # SND_PURGE
+
+    def test_the_player_sits_under_what_echo_heard(self):
+        self.w._open_feedback(ITEM)
+        kids = self.w._fb["player"].master.pack_slaves()
+        i = kids.index(self.w._fb["player"])
+        self.assertIsInstance(kids[i - 1], __import__("tkinter").Text)
+        self.assertEqual(str(kids[i - 1].cget("state")), "disabled")
+
+    def test_closing_the_dialog_stops_playback(self):
+        calls = self._fake_winsound()
+        self.w._open_feedback(ITEM)
+        st = self.w._fb
+        self.w._toggle_feedback_play()
+        self.w._close_feedback()
+        self.assertFalse(st["playing"])
+        self.assertIsNone(st["play_job"])
+        self.assertEqual(calls[-1], None)
+
+    def test_playback_ends_on_its_own(self):
+        self._fake_winsound()
+        self.w._wave_info = lambda p: (0.2, [0.5] * 10)
+        self.w._open_feedback(ITEM)
+        self.root.update_idletasks()
+        st = self.w._fb
+        self.w._toggle_feedback_play()
+        st["play_started"] -= 1.0                    # past the end
+        self.w._tick_feedback_play()
+        self.assertFalse(st["playing"])
+
+    def test_no_player_without_the_recording(self):
+        self.w._audio_path_for = lambda item: None
+        self.w._open_feedback(ITEM)
+        self.assertNotIn("player", self.w._fb)
+
     def test_the_dialog_is_placed_not_a_toplevel(self):
         src = inspect.getsource(AppWindow._open_feedback)
         self.assertNotIn("Toplevel", src)
