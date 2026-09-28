@@ -133,7 +133,8 @@ class Config:
     input_device: str = "auto"  # "auto" = pick the best available mic (name-ranked, follows device changes); or a device name fragment / index. "" behaves as auto.
     inject_method: str = "clipboard"  # "clipboard" or "keystrokes"
     sound_feedback: bool = True
-    auto_start: bool = False
+    auto_start: bool = False  # Unused legacy key. Existing configs carry False here, so it must never gate anything: start_with_windows does.
+    start_with_windows: bool = True  # Launch at sign-in via the logon task. Off removes the task.
     anthropic_api_key: str = ""  # Optional — enables AI text refinement
     openrouter_api_key: str = ""  # Optional — enables AI via OpenRouter (alternative to Anthropic direct)
     openrouter_model: str = "google/gemini-2.5-flash-lite"  # OpenRouter model for refinement/context-fix

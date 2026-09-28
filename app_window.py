@@ -8588,6 +8588,10 @@ class AppWindow:
         # Packed on demand by show_update_banner; holds the Update Now button.
         self._ver_update_row = tk.Frame(ver_card, bg=C["surface"])
 
+        _toggle_card("start_with_windows", "Start with Windows",
+                     "Opens the app when you sign in to Windows.",
+                     True, icon="zap")
+
         # ── Microphone ────────────────────────────────────────────────────────
         _section("mic", "Microphone")
         mic_card = self._card(parent, margin=(0, 4))

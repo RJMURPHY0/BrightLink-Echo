@@ -63,7 +63,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 
 
 class _RECT(ctypes.Structure):
@@ -1164,6 +1164,11 @@ class WhisperFlowApp:
             self._apply_model_change(value)
         elif key == "sound_feedback":
             self.feedback.sound_enabled = bool(value)
+        elif key == "start_with_windows":
+            threading.Thread(
+                target=_sync_startup_task, args=(bool(value),),
+                daemon=True, name="startup-task",
+            ).start()
         elif key == "popup_height":
             self.popup.set_popup_height(value)
         elif key == "popup_offset":
@@ -3551,6 +3556,17 @@ def _ensure_installed_copy() -> str:
                 print(f"[App] Installed canonical copy at {target}")
             return target
         except Exception as e:
+            # Typically the installed copy is running and therefore locked (a
+            # Store install while the app is open). An intact installed copy
+            # still beats the volatile path for every registration: the
+            # updater moves it forward, a Downloads or Store temp path dies.
+            try:
+                from updater import pyi_archive_intact
+                if os.path.exists(target) and pyi_archive_intact(target):
+                    print(f"[App] Could not refresh stable exe ({e}); keeping {target}.")
+                    return target
+            except Exception:
+                pass
             print(f"[App] Could not stage stable exe copy ({e}); using current path.")
             return current
 
@@ -3736,6 +3752,76 @@ def _ensure_startup_task() -> None:
         _ensure_startup_registry_fallback()
 
     _repair_desktop_shortcut(target)
+
+
+def _remove_startup_task() -> None:
+    """Start with Windows is OFF: delete the logon task and every fallback
+    launcher, so nothing starts the app at sign-in."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["schtasks", "/delete", "/tn", TASK_NAME, "/f"],
+            capture_output=True, text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        if r.returncode == 0:
+            print("[App] Startup task removed (Start with Windows is off).")
+    except Exception as e:
+        print(f"[App] Could not remove startup task: {e}")
+    # Same cleanup as a healthy task: the Run value and Startup shortcuts.
+    _reconcile_legacy_launchers(task_ok=True)
+
+
+def _sync_startup_task(enabled: bool) -> None:
+    """Make the logon task match the Start with Windows setting."""
+    if enabled:
+        _ensure_startup_task()
+    else:
+        _remove_startup_task()
+        _repair_desktop_shortcut(_startup_target())
+
+
+def _install_requested() -> bool:
+    return any(a.lower() in ("--install", "/install") for a in sys.argv[1:])
+
+
+def _installed_start_with_windows() -> bool:
+    """Read Start with Windows from the INSTALLED copy's config, without
+    Config.load(): that bootstraps a config.json beside the running exe, and
+    the installer runs from wherever the Store downloaded it. Default on."""
+    import json
+    path = os.path.join(_app_data_dir(), "config.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return bool(json.load(f).get("start_with_windows", True))
+    except Exception:
+        return True
+
+
+def _run_silent_install() -> int:
+    """`BrightLink-Echo.exe --install /S`: install and exit, no window.
+
+    The Microsoft Store runs the installer silently (policy 10.2.9), so this
+    must never show UI, open the mic or register hotkeys. It puts the
+    canonical copy in place, registers the Start-menu entry, Installed apps
+    entry, URL protocol and (if enabled) the logon task, then exits. Returns 0
+    when an intact installed copy exists afterwards: if the app is already
+    installed and running, the locked exe cannot be replaced, but the install
+    is still good and the in-app updater moves it forward."""
+    if not getattr(sys, "frozen", False):
+        print("[App] --install only applies to the packaged exe.")
+        return 2
+    from updater import pyi_archive_intact
+    _ensure_installed_copy()
+    target = _stable_exe_path()
+    if not (os.path.exists(target) and pyi_archive_intact(target)):
+        _log_startup_error(RuntimeError(f"install failed: no intact copy at {target}"))
+        return 1
+    _register_application()
+    _register_url_protocol()
+    _sync_startup_task(_installed_start_with_windows())
+    print(f"[App] Installed at {target}")
+    return 0
 
 
 def _repair_desktop_shortcut(target: str) -> None:
@@ -4010,6 +4096,7 @@ def _selftest(args: list) -> int:
 
 
 def _main() -> None:
+    config = None
     if len(sys.argv) >= 3 and sys.argv[1] == "--selftest":
         os._exit(_selftest(sys.argv[2:]))
     if sys.platform == "win32":
@@ -4020,14 +4107,21 @@ def _main() -> None:
         if _uninstall_requested():
             from app_install import run_uninstall
             os._exit(run_uninstall(silent=_uninstall_silent()))
+        # Same place and same reason: the Store's silent install may run while
+        # the app is open, and must neither hand off nor show anything.
+        if _install_requested():
+            os._exit(_run_silent_install())
         # BEFORE the mutex: an old copy that defers to the installed version
         # must not be holding the single-instance mutex when the new exe starts.
         _handoff_to_canonical_if_newer()
         _ensure_single_instance()
+        config = Config.load()
         # Run in background — schtasks can be slow on first launch and there's
         # no reason to block the UI thread waiting for a Task Scheduler write.
         threading.Thread(
-            target=_ensure_startup_task, daemon=True, name="startup-task"
+            target=_sync_startup_task,
+            args=(bool(getattr(config, "start_with_windows", True)),),
+            daemon=True, name="startup-task",
         ).start()
         threading.Thread(target=_register_url_protocol, daemon=True, name="url-protocol").start()
         threading.Thread(
@@ -4046,7 +4140,8 @@ def _main() -> None:
         except Exception:
             pass
 
-    config = Config.load()
+    if config is None:
+        config = Config.load()
     auth = AuthManager(config.supabase_url, config.supabase_key)
 
     auth_enabled = bool(config.supabase_url and config.supabase_key)
