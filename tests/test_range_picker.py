@@ -166,27 +166,42 @@ class PickerTests(unittest.TestCase):
         self.assertEqual(self.var.get(), "1 Sep – 9 Sep")
         self.assertEqual(self.host.toggles, [True, False], "panel left open")
 
-    def test_every_grid_row_is_filled(self):
-        # A five-row month (September 2026) used to leave an empty sixth row
-        # above Clear / Apply. The neighbouring months fill it now, dimmed.
+    def _day_items(self, cv):
+        return [i for i in cv.find_all() if cv.type(i) == "text"
+                and cv.itemcget(i, "text").isdigit()]
+
+    def test_only_this_months_days_are_drawn(self):
+        # Ryan (2026-09-28): no 31 Aug / 1-11 Oct filler round September.
         self.p._tab = "custom"
         self.p._cal_month = datetime.date(2026, 9, 1)
         self.p.open()
         cv = self.p._menu_cv
-        days = [cv.itemcget(i, "text") for i in cv.find_all()
-                if cv.type(i) == "text"
-                and cv.itemcget(i, "text").isdigit()]
-        self.assertEqual(len(days), 42)
-        dim = [cv.itemcget(i, "text") for i in cv.find_all()
-               if cv.type(i) == "text"
-               and cv.itemcget(i, "fill") == RangePicker._OTHER_MONTH]
-        # 31 Aug leads, 1-11 Oct trail.
-        self.assertEqual(dim, ["31"] + [str(d) for d in range(1, 12)])
+        days = [cv.itemcget(i, "text") for i in self._day_items(cv)]
+        self.assertEqual(days, [str(d) for d in range(1, 31)])
 
-    def test_a_dimmed_day_is_pickable(self):
-        self.p._pick_day(datetime.date(2026, 9, 28))
-        self.p._pick_day(datetime.date(2026, 10, 2))
-        self.assertEqual(self.p._sel_end, datetime.date(2026, 10, 2))
+    def test_grid_rows_follow_the_month(self):
+        self.assertEqual(RangePicker._grid_rows(datetime.date(2026, 9, 1)), 5)
+        self.assertEqual(RangePicker._grid_rows(datetime.date(2027, 2, 1)), 4)
+        self.assertEqual(RangePicker._grid_rows(datetime.date(2026, 3, 1)), 6)
+
+    def test_calendar_left_fields_right(self):
+        self.p._tab = "custom"
+        self.p.open()
+        cv = self.p._menu_cv
+        day_x = max(cv.coords(i)[0] for i in self._day_items(cv))
+        ent_x = min(cv.coords(i)[0] for i in cv.find_all()
+                    if cv.type(i) == "window")
+        self.assertLess(day_x, ent_x)
+
+    def test_calendar_fits_the_panel(self):
+        self.p._tab = "custom"
+        for m in (datetime.date(2026, 3, 1), datetime.date(2027, 2, 1)):
+            self.p._cal_month = m
+            self.p.open()
+            cv = self.p._menu_cv
+            bottom = max(cv.coords(i)[1] for i in self._day_items(cv))
+            self.assertLess(bottom, self.p._menu_h - 8)
+            self.p.close()
 
     def test_apply_with_one_date_is_a_single_day(self):
         d = datetime.date(2026, 9, 4)
@@ -293,10 +308,11 @@ class InWindowTests(unittest.TestCase):
 
     def test_calendar_days_do_not_overlap(self):
         self.p._tab = "custom"
+        self.p._cal_month = datetime.date(2026, 3, 1)   # a six-week month
         self.p.open()
         days = [h for h in self.p._hits if h[3] - h[1] < 30
                 and h[2] - h[0] <= 28 and h[1] > self.p._TAB_H + 40]
-        self.assertEqual(len(days), 42)
+        self.assertEqual(len(days), 31)
         for a in days:
             for b in days:
                 if a is b:

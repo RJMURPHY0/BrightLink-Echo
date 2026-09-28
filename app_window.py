@@ -898,8 +898,7 @@ class RangePicker(Dropdown):
     """
 
     _TAB_H = 34
-    _LEFT_W = 128           # From / To column on the custom tab
-    _OTHER_MONTH = "#4a4a4a"  # neighbouring months' days: context, dimmed
+    _FIELD_W = 128          # From / To column on the custom tab (right side)
 
     def __init__(self, parent, variable: tk.StringVar, values, *, panel,
                  on_toggle, bg=None, font=("Segoe UI", 10, "bold"),
@@ -1100,18 +1099,20 @@ class RangePicker(Dropdown):
                       lambda v=val: self._choose_period(v))
 
     def _custom_columns(self):
-        """(left column x0, x1, calendar x0, x1) for the custom tab."""
+        """(field column x0, x1, calendar x0, x1) for the custom tab. The
+        calendar leads on the left; From / To and Clear / Apply sit on the
+        right."""
         w = self._menu_w
-        lx0 = 12
-        lx1 = lx0 + min(self._LEFT_W, int((w - 24) * 0.36))
-        return lx0, lx1, lx1 + 14, w - 10
+        fx1 = w - 12
+        fx0 = fx1 - min(self._FIELD_W, int((w - 24) * 0.36))
+        return fx0, fx1, 10, fx0 - 14
 
     def _paint_custom(self) -> None:
         cv, h = self._menu_cv, self._menu_h
         tb = self._TAB_H
         lx0, lx1, rx0, rx1 = self._custom_columns()
 
-        # Left: two dd/mm/yyyy fields (real Entries, so a span can be typed as
+        # Right: two dd/mm/yyyy fields (real Entries, so a span can be typed as
         # well as clicked; the calendar writes into whichever has focus), a
         # line saying what is picked, then Clear / Apply.
         for i, (key, cap) in enumerate((("start", "From"), ("end", "To"))):
@@ -1147,8 +1148,8 @@ class RangePicker(Dropdown):
                        font=("Segoe UI", 9, "bold"))
         self._hit(mid + 4, by0, lx1, by1, self._apply_custom)
 
-        # Right: the month calendar, sized to whatever height the section has.
-        cv.create_line(rx0 - 7, tb + 10, rx0 - 7, h - 10, fill=C["divider"])
+        # Left: the month calendar, sized to whatever height the section has.
+        cv.create_line(rx1 + 7, tb + 10, rx1 + 7, h - 10, fill=C["divider"])
         m = self._cal_month
         my = tb + 15
         cv.create_text((rx0 + rx1) // 2, my, text=m.strftime("%B %Y"),
@@ -1164,24 +1165,24 @@ class RangePicker(Dropdown):
             cv.create_text(self._cell_x(i), wd_y, text=name, fill=C["subtext"],
                            font=("Segoe UI", 7))
 
-        # A fixed six rows, all filled: the neighbouring months' days fill a
-        # five-row month, dimmed and still pickable, like the Day streak
-        # calendar, so the grid never changes shape between months.
+        # This month's days only, no neighbouring-month filler. The grid has
+        # just the weeks the month spans (4-6) and they share the section's
+        # height, so a short month gets roomier cells instead of a row of
+        # another month's dates.
         grid_top = wd_y + 8
-        cell_h = self._cell_h()
+        cell_h = self._cell_h(self._grid_rows(m))
         cw = (rx1 - rx0) / 7
-        first = _date(m.year, m.month, 1)
-        grid_start = first - timedelta(days=first.weekday())
+        lead = m.weekday()
         today = _date.today()
-        for idx in range(42):
+        for d in range(1, self._days_in_month(m) + 1):
+            idx = lead + d - 1
             cx = self._cell_x(idx % 7)
             cy = grid_top + (idx // 7) * cell_h + cell_h // 2
-            day = grid_start + timedelta(days=idx)
-            other = day.month != m.month
+            day = _date(m.year, m.month, d)
             edge = day == a or day == b
             inside = a is not None and b is not None and a < day < b
             hx = min(14, int(cw / 2) - 1)
-            hy = cell_h // 2 - 1
+            hy = min(12, cell_h // 2 - 1)
             if edge:
                 _rr(cv, cx - hx, cy - hy, cx + hx, cy + hy, 6,
                     fill=C["accent"], outline="")
@@ -1191,16 +1192,25 @@ class RangePicker(Dropdown):
             elif day == today:
                 _rr(cv, cx - hx, cy - hy, cx + hx, cy + hy, 6, fill="",
                     outline=C["accent"])
-            cv.create_text(cx, cy, text=str(day.day),
-                           fill=(C["bg"] if edge else
-                                 self._OTHER_MONTH if other else C["text"]),
+            cv.create_text(cx, cy, text=str(d),
+                           fill=C["bg"] if edge else C["text"],
                            font=("Segoe UI", 8, "bold" if edge else "normal"))
             self._hit(cx - hx, cy - hy, cx + hx, cy + hy,
                       lambda dd=day: self._pick_day(dd))
 
-    def _cell_h(self) -> int:
+    @staticmethod
+    def _days_in_month(m) -> int:
+        nxt = _date(m.year + (m.month == 12), m.month % 12 + 1, 1)
+        return (nxt - timedelta(days=1)).day
+
+    @classmethod
+    def _grid_rows(cls, m) -> int:
+        """Weeks the month spans in a Monday-start grid (4 to 6)."""
+        return -(-(m.weekday() + cls._days_in_month(m)) // 7)
+
+    def _cell_h(self, rows: int = 6) -> int:
         grid_top = self._TAB_H + 42
-        return max(14, min(26, (self._menu_h - 6 - grid_top) // 6))
+        return max(14, min(28, (self._menu_h - 6 - grid_top) // max(rows, 1)))
 
     def _cell_x(self, col: int) -> int:
         _lx0, _lx1, rx0, rx1 = self._custom_columns()
