@@ -51,6 +51,7 @@ from config import Config
 from spoken_commands import apply_spoken_commands
 from disfluency import destutter
 import homophones
+import cloud_sync  # noqa: F401  (top-level so PyInstaller always bundles it)
 from list_format import format_lists
 from email_format import format_email, format_signoff, is_email_app
 import sentence_end
@@ -194,6 +195,9 @@ class WhisperFlowApp:
             or AIRefiner.DEFAULT_OPENROUTER_MODEL,
         )
         self.db = SupabaseLogger(url=config.supabase_url, key=config.supabase_key)
+        # Cloud Sync is opt-in per PC (off by default): the logger uploads and
+        # pulls nothing of the user's until this is on.
+        self.db.set_sync_enabled(bool(getattr(config, "cloud_sync", False)))
         self.stats = StatsStore(db=self.db)
 
         # Opt-in voice training for BrightLink Notetaker. Constructed always, sends
@@ -231,6 +235,18 @@ class WhisperFlowApp:
         # The vocab editor's "Suggest mishearings" button uses the refiner (same
         # object throughout, so live key changes are picked up without re-setting).
         self.app_window.set_ai_refiner(self.ai_refiner)
+        # Cloud Sync (Settings > Account). Built always, does nothing until the
+        # user turns it on; start() runs once an account is signed in.
+        from cloud_sync import CloudSync
+        self.cloud_sync = CloudSync(
+            self.db, self.stats, config,
+            phrase_store=self._phrases,
+            apply_setting=self._apply_synced_setting,
+            sync_libraries=self._sync_user_libraries,
+            on_status=lambda text, kind: self.app_window.set_cloud_sync_status(
+                text, kind),
+        )
+        self.app_window.set_cloud_sync(self.cloud_sync)
         # The Phrases page reads and edits the SAME store the dictation path
         # writes to. A provider rather than the object, because the store is
         # rebuilt when the signed-in account changes and a handed-over
@@ -682,10 +698,10 @@ class WhisperFlowApp:
             threading.Thread(
                 target=self._load_sender_name, daemon=True, name="sender-name"
             ).start()
-            # Custom vocabulary / snippets from the user's other machines.
-            threading.Thread(
-                target=self._sync_user_libraries, daemon=True, name="library-sync"
-            ).start()
+        # Cloud Sync, if the user turned it on for this PC: history,
+        # recordings, vocabulary, snippets, phrases, impact and preferences
+        # from their other PCs (libraries included, so no separate sync here).
+        self.cloud_sync.start()
 
         # Voice-training consent, so a change made in BrightLink Notetaker shows up
         # here. Fetched rather than assumed: this app never decides on its own
@@ -991,6 +1007,12 @@ class WhisperFlowApp:
 
             def _report(event_type: str, detail: dict) -> None:
                 try:
+                    # Diagnostics never carry what the user said unless they
+                    # chose Cloud Sync (PRIVACY.md): the quality guards attach
+                    # a text sample, which is dropped here otherwise.
+                    if not self.db.sync_enabled and isinstance(detail, dict):
+                        detail = {k: v for k, v in detail.items()
+                                  if k not in ("sample", "text", "excerpt")}
                     self._log_error_event(event_type, detail)
                 except Exception:
                     pass
@@ -1186,7 +1208,19 @@ class WhisperFlowApp:
         """Called when the user saves a setting in the Settings panel."""
         print(f"[App] Setting changed: {key} = {value!r}")
         setattr(self.config, key, value)
+        # Cloud Sync: remember when a synced preference changed here, so the
+        # newer change wins on the user's other PCs.
+        from cloud_sync import SYNCED_SETTINGS, now_iso
+        if key in SYNCED_SETTINGS:
+            stamps = dict(getattr(self.config, "sync_stamps", None) or {})
+            stamps[key] = now_iso()
+            self.config.sync_stamps = stamps
         self.config.save_async()
+        if key == "cloud_sync":
+            self.cloud_sync.set_enabled(bool(value))
+            return
+        if key in SYNCED_SETTINGS:
+            self.cloud_sync.push_settings_soon()
         if self._core_ready.is_set():
             self._apply_runtime_setting(key, value)
         else:
@@ -1197,6 +1231,20 @@ class WhisperFlowApp:
                                 self._apply_runtime_setting(key, value)),
                 daemon=True, name="deferred-setting",
             ).start()
+
+    def _apply_synced_setting(self, key: str, value) -> None:
+        """Adopt a preference Cloud Sync brought from another PC. Same effect
+        as the user changing it here, minus the new timestamp (the change was
+        made there, at the time it carries)."""
+        print(f"[Sync] Setting from another PC: {key} = {value!r}")
+        setattr(self.config, key, value)
+        self.config.save_async()
+        if self._core_ready.is_set():
+            self._apply_runtime_setting(key, value)
+        try:
+            self.app_window.reflect_setting(key, value)
+        except Exception as e:
+            print(f"[Sync] could not update settings UI for {key}: {e}")
 
     def _apply_runtime_setting(self, key: str, value) -> None:
         if key == "anthropic_api_key":
@@ -2007,6 +2055,13 @@ class WhisperFlowApp:
                         "meta": _meta},
                 daemon=True,
             ).start()
+            # Cloud Sync: this dictation's recording to the user's other PCs.
+            # No-op unless they turned Cloud Sync on.
+            if audio_writer is not None:
+                try:
+                    self.cloud_sync.upload_clip(_created_at)
+                except Exception as e:
+                    print(f"[Sync] clip upload failed (non-fatal): {e}")
 
             # ── Fleet error log ──────────────────────────────────────────────
             if not result and transcribed_text:
@@ -3345,6 +3400,8 @@ class WhisperFlowApp:
             threading.Thread(
                 target=self._fetch_remote_api_keys, daemon=True, name="api-key-fetch"
             ).start()
+        self._adopt_user_libraries(auth.user_email or "")
+        self.cloud_sync.start()
 
     def _sign_out(self) -> None:
         print("[App] Signing out...")
@@ -3352,6 +3409,8 @@ class WhisperFlowApp:
         self._auth.sign_in_offline()   # back to offline state immediately
         self.db.set_user(None)
         self.stats.set_user(None)
+        self.cloud_sync.stop()
+        self.cloud_sync.refresh_status()
         if self.tray:
             self.tray.set_user_email("")
         if self.app_window._root:

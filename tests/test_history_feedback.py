@@ -193,6 +193,7 @@ class LocalMetaTests(unittest.TestCase):
 
     def test_remote_payload_is_unchanged(self):
         log = SupabaseLogger("https://x.supabase.co", "anon")
+        log.set_sync_enabled(True)   # the remote payload exists only with Cloud Sync on
         sent = []
         log._run = sent.append
         log.log_transcription("hello", created_at="T2",

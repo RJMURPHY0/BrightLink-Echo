@@ -567,6 +567,10 @@ class StatsStore:
     def _client_or_none(self):
         db = self._db
         try:
+            # Deliberately NOT behind Cloud Sync (decided 2026-09-29): these
+            # are counts only (words, seconds spoken, refines), never what was
+            # said, and BrightLink's Home dashboards read them from
+            # user_daily_stats for every signed-in user.
             if db is None or not db.is_enabled:
                 return None
             return db._get_client()
