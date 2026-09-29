@@ -164,9 +164,22 @@ def reg_value(path: str, name: str = ""):
         return None
 
 
+def _inno_app_id() -> str:
+    """Our installer's AppId from installer/echo.iss, as Inno names its key."""
+    with open(os.path.join(ROOT, "installer", "echo.iss"), encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("AppId={{"):
+                return line.strip()[len("AppId={"):]
+    return ""
+
+
 def uninstall_entries() -> list:
-    """Every HKCU uninstall entry that is ours by name or by Inno's suffix."""
+    """Every HKCU uninstall entry that is ours: our own key, our installer's
+    Inno key (it must never register one), or one showing a product name.
+    Not every "_is1" key: CI installs Inno Setup itself per-user, and that
+    entry belongs to the build tool."""
     import winreg
+    inno_key = (_inno_app_id() + "_is1").lower() if _inno_app_id() else ""
     base = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
     found = []
     try:
@@ -179,7 +192,7 @@ def uninstall_entries() -> list:
                     break
                 i += 1
                 name = reg_value(base + "\\" + sub, "DisplayName") or ""
-                if sub == brand.UNINSTALL_KEY_NAME or sub.lower().endswith("_is1") \
+                if sub == brand.UNINSTALL_KEY_NAME or (inno_key and sub.lower() == inno_key) \
                         or name in brand.product_names():
                     found.append(sub)
     except OSError:
@@ -222,11 +235,24 @@ def main(argv=None) -> int:
     ping = wait_ping(180)
     rep.check("onefile app answers /ping", ping >= 0)
     rep.measure("onefile_seconds_to_ping", round(ping, 1))
-    deadline = time.time() + 60
-    while time.time() < deadline and not (os.path.exists(exe) and uninstall_entries()):
+    deadline = time.time() + 120
+    while time.time() < deadline and not (os.path.exists(exe)
+                                          and brand.UNINSTALL_KEY_NAME in uninstall_entries()):
         time.sleep(1)
     rep.check("onefile app installed itself at the canonical path",
               os.path.exists(exe) and not install_layout.is_installed_layout_exe(exe))
+
+    # 2b. What an existing user actually runs: the canonical copy (every
+    # launcher points there). The first launch above keeps running from where
+    # it was started, so its config.json is not in the install folder.
+    stop_all()
+    subprocess.Popen([exe], cwd=root)
+    ping = wait_ping(180)
+    rep.check("installed onefile copy answers /ping", ping >= 0)
+    deadline = time.time() + 60
+    while time.time() < deadline and not os.path.exists(os.path.join(root, "config.json")):
+        time.sleep(1)
+    time.sleep(5)
 
     # 3. A setting that must survive the migration.
     cfg_path = os.path.join(root, "config.json")
@@ -246,12 +272,16 @@ def main(argv=None) -> int:
                         "/NORESTART", f"/LOG={os.path.join(rep.out, 'setup.log')}"],
                        timeout=900)
     rep.measure("install_seconds", round(time.time() - t0, 1))
-    rep.check("installer exits 0", p.returncode == 0, p.returncode)
     for name in ("update.log",):
         try:
             shutil.copy(os.path.join(root, name), os.path.join(rep.out, name))
         except OSError:
             pass
+    if p.returncode != 0:
+        # GitHub keeps only 10 error annotations per step: the logs go first.
+        annotate("selftest log: update.log", log_tail(os.path.join(rep.out, "update.log"), 40))
+        annotate("selftest log: setup.log", log_tail(os.path.join(rep.out, "setup.log"), 40))
+    rep.check("installer exits 0", p.returncode == 0, p.returncode)
     rep.check("canonical exe is the installed layout", install_layout.is_installed_layout_exe(exe))
     manifest = install_layout.load_manifest(os.path.join(
         root, install_layout.exe_contents_dir(exe), install_layout.MANIFEST_NAME))
