@@ -482,12 +482,12 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
         except Exception:
             continue
         if codes and codes[0]:
-            # How many function words the name itself carries, which a span
-            # may match but not exceed. None for a hand-typed term: the
-            # function-word rule is a managed-tier gate.
-            term_fw = (sum(w in _FUNCTION_WORDS for w in _WORD_RE.findall(low))
-                       if managed else None)
-            terms.append((term, low, codes, strict, term_fw))
+            # How many function words the term carries. For a managed name it
+            # is also a ceiling on the span (None for a hand-typed term: that
+            # side of the rule is a managed-tier gate).
+            fw_count = sum(w in _FUNCTION_WORDS for w in _WORD_RE.findall(low))
+            term_fw = fw_count if managed else None
+            terms.append((term, low, codes, strict, term_fw, fw_count))
     if not terms:
         return text
 
@@ -498,7 +498,7 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
     # The costly part is Double Metaphone, so pay it once per word and prefilter
     # cheaply. Every term's primary phoneme starts with one of these characters;
     # a window whose first word does not can never match, so it skips the encode.
-    term_first = {c[0] for _t, _l, codes, _s, _f in terms for c in codes if c}
+    term_first = {c[0] for _t, _l, codes, _s, _f, _n in terms for c in codes if c}
     word_dm = []
     for t in tokens:
         try:
@@ -552,10 +552,19 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
             span_fw = sum(word_fw[i:i + size])
             best = None
             best_jw = 0.0
-            for term, low, codes, strict, term_fw in terms:
+            for term, low, codes, strict, term_fw, term_fw_n in terms:
                 if cand_low == low:          # already correct — leave casing to others
                     best = None
                     break
+                # No term, hand-typed or managed, may put a function word into
+                # the text that the span did not already hold. Metaphone cannot
+                # hear them ("it" adds only T), so a term that carries one
+                # reaches a single ordinary word: a user entry "Push it" turned
+                # every "pushed" into "Push it", and "I pushed it to main" into
+                # "I Push it it to main" (2026-09-29). A correction may fix how
+                # a word was heard; it may never add a word nobody said.
+                if term_fw_n > span_fw:
+                    continue
                 # A managed name may not absorb function words it does not
                 # carry, and a span at least half made of them is never a name.
                 # The metaphone gate cannot see them (see _FUNCTION_WORDS).

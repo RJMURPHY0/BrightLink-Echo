@@ -307,6 +307,24 @@ class FuzzyVocabularyTests(unittest.TestCase):
         self.assertEqual("hi", self.fuzzy("hi", None))
         self.assertEqual("hi", self.fuzzy("hi", [None, "x", {}]))
 
+    def test_a_term_never_adds_a_word_nobody_said(self):
+        # Reported 2026-09-29: a user entry "Push it" turned every "pushed" into
+        # "Push it" and "I pushed it to main" into "I Push it it to main".
+        entries = [vocab("Push it")]
+        for text in ("Make sure everything's pushed as a new install.",
+                     "I pushed it to main yesterday.",
+                     "Pushed."):
+            self.assertEqual(text, self.fuzzy(text, entries), text)
+
+    def test_a_term_with_a_function_word_still_fixes_a_span_that_has_one(self):
+        # The rule only stops a word being ADDED: a mishearing that already
+        # holds the function word may still be corrected to the term.
+        entries = [vocab("Bank of Ireland")]
+        self.assertEqual("Pay Bank of Ireland now.",
+                         self.fuzzy("Pay bank of irland now.", entries))
+        self.assertEqual("Ask the Head of Sales.",
+                         self.fuzzy("Ask the hed of sails.", [vocab("Head of Sales")]))
+
     def test_no_cascade_single_pass(self):
         # A span is replaced once; the inserted term is not re-scanned.
         entries = [vocab("Vercel"), vocab("Marcel")]
