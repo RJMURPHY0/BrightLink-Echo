@@ -86,6 +86,16 @@ class ForeignRuntimeTests(unittest.TestCase):
     def test_a_relaunch_never_loops(self):
         self.assertFalse(self.check("", environ=dict(CHILD_ENV, **{R.GUARD_VAR: "1"})))
 
+    def test_the_installed_onedir_layout_is_never_foreign(self):
+        # Measured on PyInstaller 6.22.3 (2026-09-29): a onedir exe runs Python
+        # in its own process and sets only these two, never
+        # _PYI_APPLICATION_HOME_DIR. Started by explorer, the logon task or
+        # activate.ps1 (any parent at all) it must never relaunch itself.
+        onedir_env = {"_PYI_ARCHIVE_FILE": EXE, "_PYI_PARENT_PROCESS_LEVEL": "1"}
+        for parent in ("", r"C:\Windows\explorer.exe",
+                       r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"):
+            self.assertFalse(self.check(parent, environ=onedir_env), parent)
+
 
 class LaunchSiteTests(unittest.TestCase):
     """Every place the app starts its own exe must use the clean environment."""

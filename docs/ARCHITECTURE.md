@@ -1,10 +1,12 @@
 # BrightLink Echo (formerly FTC Whisper): Architecture
 
 Windows push-to-talk dictation. Hold a hotkey, speak, release — the transcribed text
-appears in whatever app has focus. Python + tkinter, shipped as a single exe,
-published twice per release: `BrightLink-Echo.exe` for downloads and
-`FTC-Whisper.exe`, the frozen name every installed auto-updater fetches.
-Display names live in `brand.py`; folders, keys and that asset name never change.
+appears in whatever app has focus. Python + tkinter, installed per-user by a
+signed installer into `%LOCALAPPDATA%\FTC Whisper` (v1.8.0; a PyInstaller onedir
+build whose files live in `app-<version>\`). Each release also carries
+`FTC-Whisper.exe`, a whole onefile build under the frozen name every pre-1.8
+auto-updater fetches, which moves those machines to the installed layout.
+Display names live in `brand.py`; folders, keys and asset names never change.
 
 The whole design serves one goal: **stop-latency stays flat no matter how long you
 talk**. Press, speak, release, text. Everything below exists to protect that.
@@ -218,28 +220,37 @@ flowchart TD
 
 ## Update flow
 
-Fully automatic, because users never checked manually.
+Fully automatic, because users never checked manually. The check starts once the
+core has loaded, signed in or not, and repeats every 6 hours.
 
 ```mermaid
 flowchart TD
-    CHK[6-hourly check<br/>GitHub releases/latest] --> A{Asset named<br/>exactly FTC-Whisper.exe?}
-    A -- no --> STOP([No update])
-    A -- yes --> N{is_newer<br/>tuple compare}
-    N -- no --> STOP
-    N -- yes --> DL[Download to LOCALAPPDATA<br/>3 attempts, backoff]
-    DL --> V[verify_exe<br/>MZ header + ≥5MB + Content-Length]
-    V --> IDLE{_safe_to_restart<br/>IDLE, >120s since dictation<br/>6 x 5s polls}
-    IDLE -- no --> IDLE
-    IDLE -- yes --> SWAP[Hidden PowerShell swap script<br/>CREATE_NO_WINDOW]
-    SWAP --> DONE([Restarted on new version])
+    CHK[Check GitHub releases/latest] --> R{update_route}
+    R -- installed layout --> DLS[Download FTC-Whisper-Setup.exe<br/>size + SHA-256 required + our signer]
+    R -- onefile bridge, rollout says go --> DLS
+    R -- onefile, no rollout / 3 failures --> DLO[Download FTC-Whisper.exe<br/>pre-1.8 onefile swap]
+    DLS --> STAGE[Installer /STAGEONLY<br/>writes pending-ver only<br/>app keeps working]
+    STAGE --> MAN[Every staged file vs manifest.json]
+    MAN --> IDLE{_safe_to_restart<br/>IDLE, >120s since dictation<br/>6 x 5s polls}
+    IDLE -- yes --> ACT[New version's activate.ps1<br/>move app-ver in, File.Replace exe]
+    ACT --> H{health.json<br/>before it exits?}
+    H -- yes --> DONE([Running the new version])
+    H -- no --> RB([Previous exe + folder restored<br/>version marked bad])
+    DLO --> SWAP[Hidden PowerShell swap script]
+    SWAP --> DONE
 
     classDef warn fill:#f59e0b,stroke:#78350f,color:#fff
-    class SWAP warn
+    class ACT,SWAP warn
 ```
 
-> The swap script must spawn with `CREATE_NO_WINDOW` and **never** `DETACHED_PROCESS`
-> — the two conflict, powershell exits 0 without running, and every in-app update
-> silently breaks. This shipped as a real bug through v1.6.3.
+Layout on disk: `FTC Whisper.exe` (onedir bootloader) + `app-<version>\` beside it,
+with `models\`, `config.json` and the marker files where they always were. A version
+never writes into another version's folder, which is what makes the switch
+all-or-nothing. Full design: `docs/decisions/release-updater.md`, 2026-09-29.
+
+> Every script or exe we launch spawns with `CREATE_NO_WINDOW` and **never**
+> `DETACHED_PROCESS` — the two conflict, powershell exits 0 without running, and every
+> in-app update silently breaks. This shipped as a real bug through v1.6.3.
 
 ---
 
@@ -257,9 +268,12 @@ flowchart TD
 | `injector.py` | Three-strategy text injection |
 | `hotkey_manager.py` | Win32 `RegisterHotKey` + `keyboard` fallback |
 | `ai_refiner.py` | OpenRouter → Anthropic refine |
-| `updater.py` | Download, verify, idle-wait, swap |
+| `updater.py` | Download, verify, stage, idle-wait, hand over (installer or onefile swap) |
+| `install_layout.py` | The installed layout: manifest, health, rollout, clean-up |
+| `installer/activate.ps1` | Switches versions all or nothing, with rollback |
+| `installer/echo.iss` | The Inno Setup installer (built by `tools/build_installer.py`) |
 | `config.py` | `Config` dataclass → `config.json` |
-| `ftc_whisper.spec` | PyInstaller build (keys sanitised at build time) |
+| `ftc_whisper.spec` | PyInstaller build: onefile bridge + onedir installed layout (keys sanitised at build time) |
 
 ---
 

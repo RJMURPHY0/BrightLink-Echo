@@ -1,8 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec for FTC Whisper.
-Bundles Python + all dependencies into a single Windows exe.
-The Whisper model is NOT bundled — it downloads once on first use (~150 MB).
+PyInstaller spec for FTC Whisper (BrightLink Echo).
+
+One Analysis, two outputs (v1.8.0):
+
+  dist\\FTC Whisper.exe    ONEFILE, exactly as every release before. Published as
+                          UPDATE_ASSET, the "bridge" every pre-1.8 updater can
+                          still install; it runs as today, then migrates the
+                          machine to the installed layout.
+  dist\\FTC Whisper\\       ONEDIR, the installed layout: FTC Whisper.exe plus
+                          app-<APP_VERSION>\\ (contents_directory), with
+                          activate.ps1 and manifest.json. The installer
+                          (installer\\echo.iss) ships this folder.
+
+ECHO_BUILD=onefile or ECHO_BUILD=onedir builds one of them (local dev only;
+CI always builds both). The speech model is NOT bundled: the app downloads it
+once, into %LOCALAPPDATA%\\FTC Whisper\\models.
 """
 
 import os
@@ -179,7 +192,20 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
+import re as _re
+with open(os.path.join(APP_DIR, 'app.py'), 'r', encoding='utf-8') as _f:
+    _APP_VERSION = _re.search(r'^APP_VERSION = "(.+?)"', _f.read(), _re.M).group(1)
+_BUILD = os.environ.get('ECHO_BUILD', 'both').lower()
+if _BUILD not in ('both', 'onefile', 'onedir'):
+    raise SystemExit(f"[spec] ECHO_BUILD must be both, onefile or onedir, not {_BUILD!r}")
+
+# ── Onefile: the bridge. Keep every setting as it was: every pre-1.8 client
+# installs this file with its own old swap script, and the v1.6.78/79 clients
+# start it with a leaked bootloader environment (docs/decisions/release-updater.md,
+# 2026-09-14). Nothing may be added to it that sorts before anthropic/ and is
+# needed at startup.
+if _BUILD in ('both', 'onefile'):
+  exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
@@ -212,4 +238,47 @@ exe = EXE(
     # and the title bar all match. Both files come from logo_cache.write_icon.
     icon=os.path.join(APP_DIR, 'exe_icon.ico'),
     version=_version_file,
-)
+  )
+
+# ── Onedir: the installed layout. Nothing is unpacked at launch: the exe loads
+# its files from app-<version>\ beside it, a folder no other version ever
+# writes into, so an update can lay the next one out in full before switching.
+# Same exe name, icon, version resource and upx=False as the onefile build.
+if _BUILD in ('both', 'onedir'):
+    _contents = _brand.CONTENTS_DIR_PREFIX + _APP_VERSION
+    onedir_exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        # A subfolder of the work path, so the two EXEs never share a PKG
+        # file; COLLECT names the result after the basename.
+        name=os.path.join('onedir', _brand.EXE_BASENAME),
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=False,
+        disable_windowed_traceback=False,
+        icon=os.path.join(APP_DIR, 'exe_icon.ico'),
+        version=_version_file,
+        contents_directory=_contents,
+    )
+    coll = COLLECT(
+        onedir_exe,
+        a.binaries,
+        a.zipfiles,
+        # activate.ps1 ships INSIDE each version: the new version installs
+        # itself (the onefile updater had the OLD version install the new).
+        a.datas + [('activate.ps1', os.path.join(APP_DIR, 'installer', 'activate.ps1'), 'DATA')],
+        strip=False,
+        upx=False,
+        name=_brand.EXE_BASENAME,
+    )
+    # Every file of this version, hashed. CI rewrites it after signing (the
+    # signature changes the exe's hash); a local build gets one too, so the
+    # layout it produces is whole by the same rule an update is judged by.
+    import install_layout as _layout
+    _root = os.path.join(DISTPATH, _brand.EXE_BASENAME)
+    print(f"[spec] Installed layout {_contents}: manifest "
+          f"{_layout.write_manifest(_root, _APP_VERSION)}")

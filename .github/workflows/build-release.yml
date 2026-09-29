@@ -7,8 +7,19 @@ name: Build and publish Windows installer
 #      main" shipped code the auto-updater never saw (it checks GitHub Releases,
 #      not commits), so the app kept reporting the old version as "up to date".
 # A manual run (Run workflow) is a DRY RUN unless "publish" is ticked: it
-# builds, signs and verifies, then keeps the exe as a 3-day workflow artifact.
-# That is how signing gets tested without touching the live release.
+# builds, signs, installs and self-tests, then keeps the release files as a
+# 3-day workflow artifact. That is how a release gets tested without touching
+# the live one.
+#
+# Every release (v1.8.0 on) carries four files from ONE build:
+#   FTC-Whisper.exe           UPDATE_ASSET: the onefile "bridge". Every pre-1.8
+#                             updater installs exactly this name. Frozen forever.
+#   FTC-Whisper-Setup.exe     SETUP_UPDATE_ASSET: the installer, as installed
+#                             copies' updaters fetch it. Frozen.
+#   BrightLink-Echo.exe       DOWNLOAD_ASSET: the same installer, under the name
+#                             every existing download link already uses.
+#   FTC-Whisper-rollout.json  ROLLOUT_ASSET: how much of the fleet the bridge may
+#                             migrate (rollout.json in the repo).
 on:
   push:
     branches:
@@ -18,13 +29,19 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "Publish a GitHub release (unticked = dry run: build, sign, verify, keep the exe as an artifact)"
+        description: "Publish a GitHub release (unticked = dry run: build, sign, install, self-test, keep the files as an artifact)"
         type: boolean
         default: false
 
 permissions:
   contents: write
   id-token: write   # GitHub OIDC login to Azure for signing; no stored secret
+
+# Two releases building at once could publish out of order, and the updater
+# compares tags strictly. One at a time, never cancelled half-way.
+concurrency:
+  group: build-release
+  cancel-in-progress: false
 
 jobs:
   # Cheap gate (seconds on Linux) so an ordinary main push with no version bump
@@ -76,6 +93,11 @@ jobs:
     # is in scope for the whole job. Step-level, it silently skipped forever.
     env:
       VT_API_KEY: ${{ secrets.VT_API_KEY }}
+      # Inno Setup, pinned by version AND hash (GitHub's own digest of the
+      # jrsoftware/issrc release asset, read 2026-09-29).
+      INNO_VERSION: "6.7.3"
+      INNO_URL: https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe
+      INNO_SHA256: 9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732
 
     steps:
       - name: Checkout
@@ -106,18 +128,35 @@ jobs:
         shell: pwsh
         run: Copy-Item "config_default.json" "config.json" -Force
 
-      # Names come from brand.py. DIST_EXE and UPDATE_ASSET are frozen;
-      # PRODUCT_NAME and DOWNLOAD_ASSET follow the product name.
+      # Names come from brand.py. DIST_EXE, UPDATE_ASSET and SETUP_ASSET are
+      # frozen; PRODUCT_NAME and DOWNLOAD_ASSET follow the product name.
       - name: Read version and product names
         id: version
         shell: pwsh
         run: |
           $v = python -c "import re; print(re.search(r'APP_VERSION = \x22(.+?)\x22', open('app.py').read()).group(1))"
           echo "VERSION=$v" >> $env:GITHUB_OUTPUT
-          python -c "import brand; print('PRODUCT_NAME=' + brand.PRODUCT_NAME); print('DIST_EXE=' + brand.EXE_BASENAME + '.exe'); print('DOWNLOAD_ASSET=' + brand.DOWNLOAD_ASSET); print('UPDATE_ASSET=' + brand.UPDATE_ASSET)" >> $env:GITHUB_OUTPUT
+          python -c "import brand; print('PRODUCT_NAME=' + brand.PRODUCT_NAME); print('DIST_EXE=' + brand.EXE_BASENAME + '.exe'); print('DIST_DIR=' + brand.EXE_BASENAME); print('DOWNLOAD_ASSET=' + brand.DOWNLOAD_ASSET); print('UPDATE_ASSET=' + brand.UPDATE_ASSET); print('SETUP_ASSET=' + brand.SETUP_UPDATE_ASSET); print('ROLLOUT_ASSET=' + brand.ROLLOUT_ASSET); print('SIGNER=' + brand.SIGNER_SUBJECT)" >> $env:GITHUB_OUTPUT
 
+      # One Analysis, two outputs: dist\FTC Whisper.exe (onefile bridge) and
+      # dist\FTC Whisper\ (the installed layout, app-<version>\ inside).
       - name: Build executable
         run: pyinstaller --noconfirm --clean "ftc_whisper.spec"
+
+      - name: Install Inno Setup (pinned)
+        id: inno
+        shell: pwsh
+        run: |
+          $setup = Join-Path $env:RUNNER_TEMP "innosetup-$env:INNO_VERSION.exe"
+          Invoke-WebRequest -Uri $env:INNO_URL -OutFile $setup
+          $got = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:INNO_SHA256) { throw "Inno Setup download hash $got does not match the pinned $env:INNO_SHA256" }
+          $dir = Join-Path $env:RUNNER_TEMP "InnoSetup"
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/CURRENTUSER',"/DIR=`"$dir`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Inno Setup install failed: $($p.ExitCode)" }
+          $iscc = Join-Path $dir "ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe missing after install" }
+          echo "ISCC=$iscc" >> $env:GITHUB_OUTPUT
 
       # ── Code signing via Azure Artifact Signing ───────────────────────────
       # Configured by five repo variables (docs/CODE_SIGNING.md); none is a
@@ -164,9 +203,11 @@ jobs:
           # on a subscription, and signing needs no subscription context.
           allow-no-subscriptions: true
 
-      # Signs dist\FTC Whisper.exe in place. The action uses the Azure CLI
-      # session from the login step above (exclude-azure-cli-credential
-      # defaults to false), so no client secret exists anywhere.
+      # Signs dist\FTC Whisper.exe (the onefile bridge) in place. The action
+      # is NOT recursive, which is why the installed layout's exe and the
+      # installer each get a step of their own below. The action uses the
+      # Azure CLI session from the login step above, so no client secret
+      # exists anywhere.
       - name: Sign executable (Azure Artifact Signing)
         if: ${{ steps.signing.outputs.ENABLED == 'true' }}
         uses: azure/artifact-signing-action@v2.0.0
@@ -181,41 +222,119 @@ jobs:
           timestamp-digest: SHA256
           description: ${{ steps.version.outputs.PRODUCT_NAME }}
 
-      # Two names, one signed build (a copy keeps the embedded signature):
-      #   UPDATE_ASSET    what every installed updater, and the CRM's download
-      #                   button, fetch. Frozen: never rename it.
-      #   DOWNLOAD_ASSET  what people download; follows the product name.
+      # dist\FTC Whisper\FTC Whisper.exe only: its folder holds nothing else
+      # at the top level (the bundled third-party DLLs are in app-<version>\
+      # and are deliberately NOT signed with our certificate; see
+      # docs/decisions/release-updater.md, 2026-09-29).
+      - name: Sign installed-layout executable
+        if: ${{ steps.signing.outputs.ENABLED == 'true' }}
+        uses: azure/artifact-signing-action@v2.0.0
+        with:
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\dist\${{ steps.version.outputs.DIST_DIR }}
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: ${{ steps.version.outputs.PRODUCT_NAME }}
+
+      # Signing changed the exe's bytes; the manifest must describe the exe
+      # that ships, because activate.ps1 refuses anything else.
+      - name: Write the installed-layout manifest
+        run: python tools/make_manifest.py "dist\${{ steps.version.outputs.DIST_DIR }}"
+
+      - name: Build installer
+        run: python tools/build_installer.py --dist "dist\${{ steps.version.outputs.DIST_DIR }}" --out "dist\installer" --iscc "${{ steps.inno.outputs.ISCC }}"
+
+      - name: Sign installer
+        if: ${{ steps.signing.outputs.ENABLED == 'true' }}
+        uses: azure/artifact-signing-action@v2.0.0
+        with:
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\dist\installer
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: ${{ steps.version.outputs.PRODUCT_NAME }}
+
+      # Four names, one signed build (a copy keeps the embedded signature):
+      #   UPDATE_ASSET    the onefile bridge every pre-1.8 updater fetches. Frozen.
+      #   SETUP_ASSET     the installer, for installed copies' updaters. Frozen.
+      #   DOWNLOAD_ASSET  the same installer, for people and every existing link.
+      #   ROLLOUT_ASSET   rollout.json: the bridge's migration switch.
       - name: Name the release assets
         shell: pwsh
         env:
           DIST_EXE: ${{ steps.version.outputs.DIST_EXE }}
           UPDATE_ASSET: ${{ steps.version.outputs.UPDATE_ASSET }}
+          SETUP_ASSET: ${{ steps.version.outputs.SETUP_ASSET }}
           DOWNLOAD_ASSET: ${{ steps.version.outputs.DOWNLOAD_ASSET }}
+          ROLLOUT_ASSET: ${{ steps.version.outputs.ROLLOUT_ASSET }}
         run: |
           Copy-Item "dist\$env:DIST_EXE" "dist\$env:UPDATE_ASSET" -Force
-          if ($env:DOWNLOAD_ASSET -ne $env:UPDATE_ASSET) {
-            Copy-Item "dist\$env:DIST_EXE" "dist\$env:DOWNLOAD_ASSET" -Force
+          Copy-Item "dist\installer\$env:SETUP_ASSET" "dist\$env:SETUP_ASSET" -Force
+          Copy-Item "dist\installer\$env:SETUP_ASSET" "dist\$env:DOWNLOAD_ASSET" -Force
+          $r = Get-Content "rollout.json" -Raw | ConvertFrom-Json
+          if ($null -eq $r.migrate_percent) { throw "rollout.json has no migrate_percent" }
+          Copy-Item "rollout.json" "dist\$env:ROLLOUT_ASSET" -Force
+          foreach ($n in @($env:UPDATE_ASSET, $env:SETUP_ASSET, $env:DOWNLOAD_ASSET, $env:ROLLOUT_ASSET)) {
+            $f = Get-Item "dist\$n"
+            Write-Host "$n  $($f.Length) bytes  $((Get-FileHash $f.FullName).Hash)"
           }
-          Get-ChildItem dist\*.exe | ForEach-Object { Write-Host "$($_.Name)  $((Get-FileHash $_.FullName).Hash)" }
 
+      # Every exe we ship, and the same certificate subject on each: SmartScreen
+      # reputation is bound to it.
       - name: Verify signature
         if: ${{ steps.signing.outputs.ENABLED == 'true' }}
         shell: pwsh
         env:
           UPDATE_ASSET: ${{ steps.version.outputs.UPDATE_ASSET }}
+          SETUP_ASSET: ${{ steps.version.outputs.SETUP_ASSET }}
           DOWNLOAD_ASSET: ${{ steps.version.outputs.DOWNLOAD_ASSET }}
+          DIST_DIR: ${{ steps.version.outputs.DIST_DIR }}
+          DIST_EXE: ${{ steps.version.outputs.DIST_EXE }}
+          SIGNER: ${{ steps.version.outputs.SIGNER }}
         run: |
-          foreach ($f in @("dist\$env:UPDATE_ASSET", "dist\$env:DOWNLOAD_ASSET")) {
+          foreach ($f in @("dist\$env:UPDATE_ASSET", "dist\$env:SETUP_ASSET", "dist\$env:DOWNLOAD_ASSET", "dist\$env:DIST_DIR\$env:DIST_EXE")) {
             $sig = Get-AuthenticodeSignature $f
             Write-Host "$f  status: $($sig.Status)  signer: $($sig.SignerCertificate.Subject)"
             if ($sig.Status -ne 'Valid') { throw "Signature invalid on ${f}: $($sig.Status)" }
+            if ($sig.SignerCertificate.Subject -ne $env:SIGNER) { throw "Signer on ${f} is '$($sig.SignerCertificate.Subject)', not '$env:SIGNER'" }
           }
 
+      # ── Prove the packaged app works, installed where users install it ────
+      # The runner is a throwaway VM, so this is a real per-user install: the
+      # installer, activate.ps1, --install /S registration, then the INSTALLED
+      # exe's --selftest (real model, real onnxruntime from the bundle, one
+      # transcription). The onefile bridge is self-tested too. A failure here
+      # blocks the release. This is what would have caught v1.6.79.
+      - name: Cache the speech model
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\FTC Whisper\models
+          key: parakeet-${{ hashFiles('asr_engine.py') }}
+
+      - name: Install and self-test
+        shell: pwsh
+        env:
+          SETUP_ASSET: ${{ steps.version.outputs.SETUP_ASSET }}
+          DIST_EXE: ${{ steps.version.outputs.DIST_EXE }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          python -c "import sys, asr_engine; sys.exit(0 if asr_engine.download_model() else 1)"
+          if ($LASTEXITCODE -ne 0) { throw "speech model download failed" }
+          python tools/selftest_install.py --setup "dist\$env:SETUP_ASSET" --onefile "dist\$env:DIST_EXE" --report "dist\selftest"
+
       # ── VirusTotal scan ───────────────────────────────────────────────────
-      # Uploads the release exe to VirusTotal and prints the analysis URL so you
-      # can see the AV detection rate on every build BEFORE users do. Gated on a
-      # free VT_API_KEY repo secret; skipped if absent. Purely informational —
-      # never fails the build.
+      # Uploads what people and updaters run to VirusTotal and prints the
+      # analysis URLs, so the AV detection rate is visible on every build
+      # BEFORE users see it. Gated on a free VT_API_KEY repo secret; skipped if
+      # absent. Purely informational — never fails the build.
       - name: Scan with VirusTotal
         if: ${{ env.VT_API_KEY != '' }}
         continue-on-error: true
@@ -223,15 +342,33 @@ jobs:
         with:
           vt_api_key: ${{ secrets.VT_API_KEY }}
           files: |
-            dist/${{ steps.version.outputs.DOWNLOAD_ASSET }}
+            dist/${{ steps.version.outputs.SETUP_ASSET }}
+            dist/${{ steps.version.outputs.UPDATE_ASSET }}
+            dist/${{ steps.version.outputs.DIST_DIR }}/${{ steps.version.outputs.DIST_EXE }}
 
       - name: Keep the build for inspection (dry run)
         if: ${{ github.event_name == 'workflow_dispatch' && !inputs.publish }}
         uses: actions/upload-artifact@v4
         with:
           name: dry-run-v${{ steps.version.outputs.VERSION }}
-          path: dist/${{ steps.version.outputs.DOWNLOAD_ASSET }}
+          path: |
+            dist/${{ steps.version.outputs.UPDATE_ASSET }}
+            dist/${{ steps.version.outputs.SETUP_ASSET }}
+            dist/${{ steps.version.outputs.DOWNLOAD_ASSET }}
+            dist/${{ steps.version.outputs.ROLLOUT_ASSET }}
+            dist/selftest/
           retention-days: 3
+
+      # Never publish a release an installed copy cannot update from, or that a
+      # pre-1.8 copy cannot reach.
+      - name: Check the release has every asset
+        shell: pwsh
+        env:
+          FILES: "${{ steps.version.outputs.UPDATE_ASSET }}|${{ steps.version.outputs.SETUP_ASSET }}|${{ steps.version.outputs.DOWNLOAD_ASSET }}|${{ steps.version.outputs.ROLLOUT_ASSET }}"
+        run: |
+          foreach ($n in $env:FILES.Split('|')) {
+            if (-not (Test-Path "dist\$n")) { throw "missing release asset $n" }
+          }
 
       - name: Publish versioned release
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
@@ -243,6 +380,8 @@ jobs:
           make_latest: true
           files: |
             dist/${{ steps.version.outputs.UPDATE_ASSET }}
+            dist/${{ steps.version.outputs.SETUP_ASSET }}
             dist/${{ steps.version.outputs.DOWNLOAD_ASSET }}
+            dist/${{ steps.version.outputs.ROLLOUT_ASSET }}
           overwrite_files: true
           generate_release_notes: true

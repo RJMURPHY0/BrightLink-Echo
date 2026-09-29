@@ -317,14 +317,18 @@ def _write_shortcuts(paths: list, exe: str) -> bool:
 
 
 def _dir_size_kb(path: str) -> int:
-    """Size of the install folder in KB, skipping the transient onefile unpack
-    dir. Windows shows this in Installed apps; a missing size reads as a
-    half-registered app."""
+    """Size of the install folder in KB, skipping what is transient: the
+    onefile unpack dir, an update staged in pending-*, and the exe backup an
+    update keeps until the new version reports healthy. Windows shows this in
+    Installed apps; a missing size reads as a half-registered app."""
     total = 0
     try:
         for root, dirs, files in os.walk(path):
-            dirs[:] = [d for d in dirs if d.lower() != "runtime"]
+            dirs[:] = [d for d in dirs if d.lower() != "runtime"
+                       and not d.lower().startswith(brand.PENDING_DIR_PREFIX)]
             for name in files:
+                if name.lower().endswith(".previous"):
+                    continue
                 try:
                     total += os.path.getsize(os.path.join(root, name))
                 except OSError:

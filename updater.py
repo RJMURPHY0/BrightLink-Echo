@@ -7,6 +7,7 @@ should never crash or block the main application.
 
 import json
 import brand
+import install_layout
 import os
 import subprocess
 import sys
@@ -42,7 +43,17 @@ _run_active = False
 _apply_now = threading.Event()
 
 _DOWNLOAD_PREFIX = "FTC-Whisper-new"
+_SETUP_PREFIX = "FTC-Whisper-Setup-new"
 _STALE_DOWNLOAD_SECS = 3600
+
+# The installer is an Inno Setup exe, not a PyInstaller one: no archive marker
+# to check, so its integrity rests on GitHub's SHA-256 (required, not optional,
+# on this path) and our Authenticode signature.
+_MIN_SETUP_BYTES = 1024 * 1024
+_STAGE_TIMEOUT_SECS = 15 * 60
+# The bridge falls back to the onefile swap after this many failed installer
+# attempts on one version, so a machine that blocks installers still updates.
+_MIGRATION_ATTEMPTS = 3
 
 
 def _app_data_dir() -> str:
@@ -174,28 +185,82 @@ def get_latest_release() -> Optional[dict]:
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode())
 
-        tag = data.get("tag_name", "")
-        assets = data.get("assets", [])
-        asset = next(
-            (a for a in assets if a.get("name") == _DOWNLOAD_FILENAME),
-            None,
-        )
-        if tag and asset:
-            digest = str(asset.get("digest") or "")
-            _cached_release = {
-                "version": tag,
-                "download_url": asset["browser_download_url"],
-                # Exact asset size lets the download/verify path detect
-                # truncation even when a proxy strips Content-Length.
-                "size": int(asset.get("size") or 0),
-                # GitHub's own SHA-256 of the asset, when the API gives one:
-                # proves the download is the file CI published, byte for byte.
-                "sha256": digest[7:].lower() if digest.startswith("sha256:") else "",
-            }
+        info = parse_release(data)
+        if info:
+            _cached_release = info
             return _cached_release
     except Exception:
         pass
     return None
+
+
+def _asset(assets: list, name: str) -> dict:
+    """{"url", "size", "sha256"} for the asset called exactly *name*, or {}."""
+    a = next((a for a in assets if a.get("name") == name), None)
+    if not a or not a.get("browser_download_url"):
+        return {}
+    digest = str(a.get("digest") or "")
+    return {
+        "url": a["browser_download_url"],
+        # Exact asset size lets the download/verify path detect truncation
+        # even when a proxy strips Content-Length.
+        "size": int(a.get("size") or 0),
+        # GitHub's own SHA-256 of the asset, when the API gives one: proves the
+        # download is the file CI published, byte for byte.
+        "sha256": digest[7:].lower() if digest.startswith("sha256:") else "",
+    }
+
+
+def parse_release(data: dict) -> Optional[dict]:
+    """The fields the updater needs from one GitHub release, or None when it
+    has no onefile asset (every release has one: pre-1.8 updaters need it).
+
+    "download_url"/"size"/"sha256" describe UPDATE_ASSET, the onefile bridge,
+    exactly as before v1.8.0. "setup" describes the installer and "rollout"
+    the migration switch; each is {} when the release does not carry it."""
+    tag = data.get("tag_name", "")
+    assets = data.get("assets", []) or []
+    onefile = _asset(assets, _DOWNLOAD_FILENAME)
+    if not (tag and onefile):
+        return None
+    return {
+        "version": tag,
+        "download_url": onefile["url"],
+        "size": onefile["size"],
+        "sha256": onefile["sha256"],
+        "setup": _asset(assets, brand.SETUP_UPDATE_ASSET),
+        "rollout": _asset(assets, brand.ROLLOUT_ASSET),
+    }
+
+
+def fetch_rollout(rollout: dict) -> Optional[dict]:
+    """Download and parse the release's rollout file. None on any problem,
+    which the gate reads as "do not migrate"."""
+    if not rollout or not rollout.get("url"):
+        return None
+    try:
+        import hashlib
+        req = urllib.request.Request(rollout["url"],
+                                     headers={"User-Agent": brand.UPDATER_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read(64 * 1024 + 1)
+        if len(body) > 64 * 1024:
+            return None
+        want = rollout.get("sha256") or ""
+        if want and hashlib.sha256(body).hexdigest() != want:
+            return None
+        data = json.loads(body.decode("utf-8-sig"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def is_known_bad(version: str, root: str = "") -> bool:
+    """True for the version activate.ps1 last rolled back because it died at
+    start. It is skipped until a strictly newer release appears, instead of
+    being downloaded, switched in and rolled back every six hours."""
+    bad = install_layout.read_bad_version(root)
+    return bool(bad) and bad == version.lstrip("vV")
 
 
 def check_for_update(current_version: str, callback: Callable[[str, str], None]) -> None:
@@ -208,7 +273,8 @@ def check_for_update(current_version: str, callback: Callable[[str, str], None])
 
     def _worker():
         info = get_latest_release()
-        if info and is_newer(info["version"], current_version):
+        if info and is_newer(info["version"], current_version) \
+                and not is_known_bad(info["version"]):
             callback(info["version"], info["download_url"])
 
     threading.Thread(target=_worker, daemon=True, name="update-check").start()
@@ -307,6 +373,129 @@ def file_sha256(path: str) -> str:
         for block in iter(lambda: f.read(1 << 20), b""):
             h.update(block)
     return h.hexdigest()
+
+
+def authenticode_signer(path: str) -> tuple:
+    """(status, subject) of *path*'s Authenticode signature, as Windows sees
+    it. ("", "") when it cannot be read."""
+    p = path.replace("'", "''")
+    ps = (f"$s = Get-AuthenticodeSignature -LiteralPath '{p}'; "
+          "Write-Output ([string]$s.Status); "
+          "Write-Output ([string]$s.SignerCertificate.Subject)")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, text=True, timeout=60,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        lines = (r.stdout or "").strip().splitlines()
+        return (lines[0].strip() if lines else "",
+                lines[1].strip() if len(lines) > 1 else "")
+    except Exception:
+        return ("", "")
+
+
+def verify_installer(path: str, expected_bytes: int, sha256: str,
+                     signer=authenticode_signer) -> None:
+    """The installer may run only when it is byte for byte the file CI
+    published (GitHub's SHA-256, REQUIRED here) and is signed by our
+    certificate. Raises IOError otherwise."""
+    size = os.path.getsize(path)
+    if size < _MIN_SETUP_BYTES:
+        raise IOError(f"Installer too small ({size} bytes)")
+    if expected_bytes and size != expected_bytes:
+        raise IOError(f"Installer is {size} bytes but the release asset is {expected_bytes}")
+    with open(path, "rb") as f:
+        if f.read(2) != b"MZ":
+            raise IOError("Installer is not a Windows executable (no MZ header)")
+    if not sha256:
+        raise IOError("The release gives no SHA-256 for the installer: not running it")
+    if file_sha256(path) != sha256.lower():
+        raise IOError("Installer does not match the release checksum")
+    status, subject = signer(path)
+    if status != "Valid" or subject != brand.SIGNER_SUBJECT:
+        raise IOError(f"Installer signature is {status or 'unreadable'} ({subject or 'no signer'})")
+
+
+def _launch_flags() -> int:
+    """The swap script's launch contract: CREATE_NO_WINDOW and a new process
+    group, NEVER DETACHED_PROCESS (see spawn_swap_script)."""
+    return subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+
+
+def stage_installer(setup: str, version: str, timeout: float = _STAGE_TIMEOUT_SECS,
+                    root: str = "") -> str:
+    """Run the verified installer in stage-only mode while the app keeps
+    working: it writes pending-<version>\\ and nothing else. Returns that folder
+    once its files match the version's manifest. Raises on any failure."""
+    import pyi_runtime
+    root = root or install_layout.install_dir()
+    log = os.path.join(root, f"setup-{version.lstrip('vV')}.log")
+    cmd = [setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/STAGEONLY",
+           f"/LOG={log}"]
+    proc = subprocess.Popen(cmd, creationflags=_launch_flags(),
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, env=pyi_runtime.clean_launch_env())
+    try:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise IOError("Installer did not finish staging in time")
+    if code != 0:
+        raise IOError(f"Installer exited with code {code} (log: {log})")
+    return verify_pending(version, root)
+
+
+def verify_pending(version: str, root: str = "", full_hash: bool = True) -> str:
+    """pending-<version>\\ as the manifest describes it, or IOError."""
+    root = root or install_layout.install_dir()
+    pending = os.path.join(root, install_layout.pending_dir_name(version))
+    manifest = install_layout.load_manifest(os.path.join(
+        pending, install_layout.contents_dir_name(version), install_layout.MANIFEST_NAME))
+    if not manifest or manifest.get("version") != version.lstrip("vV"):
+        raise IOError(f"No manifest for {version} in {pending}")
+    problems = install_layout.verify_tree(pending, manifest, full_hash=full_hash)
+    if problems:
+        raise IOError("Staged update is incomplete: " + "; ".join(problems[:5]))
+    return pending
+
+
+def spawn_activation(version: str, pid: int, root: str = "",
+                     launch: bool = True) -> str:
+    """Start the NEW version's activate.ps1 (copied out of the folder it will
+    move) to switch versions once *pid* has exited. Returns the script path."""
+    import shutil
+    import pyi_runtime
+    root = root or install_layout.install_dir()
+    v = version.lstrip("vV")
+    src = os.path.join(root, install_layout.pending_dir_name(v),
+                       install_layout.contents_dir_name(v), "activate.ps1")
+    script = os.path.join(root, f"activate-{v}.ps1")
+    shutil.copyfile(src, script)
+    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+           "-WindowStyle", "Hidden", "-File", script,
+           "-InstallDir", root, "-Version", v, "-Mode", "Update",
+           "-WaitPid", str(pid)]
+    if launch:
+        cmd.append("-Relaunch")
+    std = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+               stderr=subprocess.DEVNULL, env=pyi_runtime.clean_launch_env())
+    try:
+        subprocess.Popen(cmd, creationflags=_launch_flags()
+                         | subprocess.CREATE_BREAKAWAY_FROM_JOB, **std)
+    except OSError:
+        subprocess.Popen(cmd, creationflags=_launch_flags(), **std)
+    return script
+
+
+def apply_installed_update(version: str, root: str = "") -> None:
+    """Hand over to activate.ps1 and exit, so nothing of ours holds the files
+    it swaps. Guarded like apply_update: only the first caller acts."""
+    global _apply_started
+    with _APPLY_LOCK:
+        if _apply_started:
+            return
+        _apply_started = True
+    spawn_activation(version, os.getpid(), root)
+    os._exit(0)
 
 
 def apply_update(new_exe: str, current_exe: str,
@@ -539,7 +728,8 @@ def _sweep_stale_downloads(keep: str = "") -> None:
         return
     now = time.time()
     for name in names:
-        if not (name.startswith(_DOWNLOAD_PREFIX) and name.lower().endswith(".exe")):
+        if not (name.startswith((_DOWNLOAD_PREFIX, _SETUP_PREFIX))
+                and name.lower().endswith(".exe")):
             continue
         path = os.path.join(d, name)
         if keep and os.path.normcase(path) == os.path.normcase(keep):
@@ -562,6 +752,10 @@ def run_auto_update(
     idle_samples: int = 6,
     on_event: Optional[Callable[[str, object, str], None]] = None,
     apply_now: bool = False,
+    layout: Optional[str] = None,
+    activate_fn: Optional[Callable[..., None]] = None,
+    stage_fn: Optional[Callable[..., str]] = None,
+    signer: Optional[Callable[[str], tuple]] = None,
 ) -> bool:
     """
     Fully automatic update: download → verify → wait for the app to be idle →
@@ -595,6 +789,19 @@ def run_auto_update(
             return True
         _run_active = True
     try:
+        route = update_route(version, layout, root=_app_data_dir())
+        if route == "none":
+            on_status("")
+            _emit(on_event, "download_fail", False, "release has no installer")
+            return False
+        if route == "installer":
+            ok = _run_installer_update(version, is_idle, on_status, poll_interval,
+                                       idle_samples, on_event, activate_fn,
+                                       stage_fn, signer)
+            if not ok and (layout or install_layout.running_layout()) == "onefile":
+                n = install_layout.record_migration_failure(version, root=_app_data_dir())
+                install_layout.log(f"Migration to {version} failed ({n}/{_MIGRATION_ATTEMPTS}).", _app_data_dir())
+            return ok
         return _run_auto_update_once(version, url, current_exe, is_idle,
                                      on_status, apply_fn, poll_interval,
                                      idle_samples, on_event)
@@ -602,6 +809,144 @@ def run_auto_update(
         with _RUN_LOCK:
             _run_active = False
             _apply_now.clear()
+
+
+def update_route(version: str, layout: Optional[str] = None,
+                 rollout_fetch: Callable[[dict], Optional[dict]] = None,
+                 root: str = "") -> str:
+    """How this process installs *version*:
+
+    "installer"  the installed (onedir) layout always; the onefile bridge only
+                 when the release's rollout file lets this machine migrate and
+                 fewer than _MIGRATION_ATTEMPTS tries have failed
+    "onefile"    the pre-1.8 swap of UPDATE_ASSET (onefile builds only)
+    "none"       an installed copy facing a release without an installer: a
+                 onefile exe over a onedir install would work, but it is a
+                 mistake in the release and is not papered over
+    """
+    layout = layout or install_layout.running_layout()
+    rel = cached_release() or {}
+    if str(rel.get("version", "")).lstrip("vV") != version.lstrip("vV"):
+        rel = {}
+    setup = rel.get("setup") or {}
+    usable = bool(setup.get("url") and setup.get("sha256"))
+    if layout == "onedir":
+        return "installer" if usable else "none"
+    if not usable:
+        return "onefile"
+    if install_layout.migration_failures(version, root) >= _MIGRATION_ATTEMPTS:
+        return "onefile"
+    rollout = (rollout_fetch or fetch_rollout)(rel.get("rollout") or {})
+    return "installer" if install_layout.rollout_allows(rollout) else "onefile"
+
+
+def migration_due(current_version: str, layout: Optional[str] = None,
+                  rollout_fetch: Callable[[dict], Optional[dict]] = None,
+                  root: str = "") -> bool:
+    """True when this onefile bridge should move to the installed layout now,
+    although the latest release is its OWN version (a newer one takes the
+    normal update path, which migrates by itself). Needs the release checked
+    first (cached_release)."""
+    layout = layout or install_layout.running_layout()
+    if layout != "onefile":
+        return False
+    rel = cached_release() or {}
+    if str(rel.get("version", "")).lstrip("vV") != current_version.lstrip("vV"):
+        return False
+    return update_route(current_version, layout, rollout_fetch,
+                        root or _app_data_dir()) == "installer"
+
+
+def _pending_exe_ok(version: str, root: str) -> bool:
+    v = version.lstrip("vV")
+    pending = os.path.join(root, install_layout.pending_dir_name(v))
+    manifest = install_layout.load_manifest(os.path.join(
+        pending, install_layout.contents_dir_name(v), install_layout.MANIFEST_NAME))
+    try:
+        exe = os.path.join(pending, brand.CANONICAL_EXE_NAME)
+        return bool(manifest) and file_sha256(exe) == manifest["exe"]["sha256"]
+    except Exception:
+        return False
+
+
+def _run_installer_update(version, is_idle, on_status, poll_interval, idle_samples,
+                          on_event, activate_fn, stage_fn, signer) -> bool:
+    """download the installer -> verify (size, SHA-256, signer) -> stage it
+    while the app keeps working -> check every staged file -> wait for idle ->
+    hand over to the new version's activate.ps1. Returns False on failure; on
+    success the process exits."""
+    root = _app_data_dir()
+    v = version.lstrip("vV")
+    setup = (cached_release() or {}).get("setup") or {}
+    dest = _fresh_download_path(os.path.join(
+        root, f"{_SETUP_PREFIX}-{os.getpid()}-{int(time.time())}.exe"))
+    _sweep_stale_downloads(keep=dest)
+    _emit(on_event, "download_start", None, f"v{v} installer")
+
+    last_exc = None
+    for attempt, backoff in enumerate((0, 20, 60), start=1):
+        if backoff:
+            time.sleep(backoff)
+        try:
+            on_status(f"Downloading update v{v}…")
+            download_update(setup["url"], dest, lambda *_: None,
+                            expected_bytes=int(setup.get("size") or 0))
+            verify_installer(dest, int(setup.get("size") or 0), setup.get("sha256", ""),
+                             signer=signer or authenticode_signer)
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            print(f"[Updater] Installer download attempt {attempt} failed: {exc}")
+    if last_exc is not None:
+        on_status("")
+        _emit(on_event, "download_fail", False, f"installer: {last_exc}"[:300])
+        install_layout.log(f"Installer for {v} refused: {last_exc}", root)
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        return False
+    _emit(on_event, "download_ok", True, f"installer {os.path.getsize(dest)} bytes")
+
+    on_status(f"Preparing update v{v}…")
+    try:
+        (stage_fn or stage_installer)(dest, v, root=root)
+    except Exception as exc:
+        on_status("")
+        _emit(on_event, "stage_fail", False, str(exc)[:300])
+        install_layout.log(f"Staging {v} failed: {exc}", root)
+        return False
+    finally:
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+    _emit(on_event, "stage_ok", True, f"v{v}")
+    install_layout.log(f"Staged {v}; waiting for idle.", root)
+
+    on_status("Update ready — installing when idle…")
+    consecutive = 0
+    while consecutive < idle_samples and not _apply_now.is_set():
+        _apply_now.wait(poll_interval)
+        consecutive = consecutive + 1 if is_idle() else 0
+
+    # Staged files can be quarantined or deleted while we waited.
+    try:
+        verify_pending(v, root, full_hash=False)
+        if not _pending_exe_ok(v, root):
+            raise IOError("the staged exe changed before install")
+    except Exception as exc:
+        on_status("")
+        _emit(on_event, "stage_fail", False, f"pre-install check: {exc}"[:300])
+        install_layout.log(f"Not installing {v}: {exc}", root)
+        return False
+
+    on_status(f"Installing v{v} — restarting…")
+    _emit(on_event, "swap_started", True, f"v{v} installer")
+    install_layout.log(f"Handing over to activate.ps1 for {v}.", root)
+    (activate_fn or apply_installed_update)(v, root)
+    return False
 
 
 def _run_auto_update_once(version, url, current_exe, is_idle, on_status,

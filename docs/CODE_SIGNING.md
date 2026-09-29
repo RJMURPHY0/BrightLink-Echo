@@ -159,19 +159,33 @@ The `release` environment is created automatically on the first run. If you ever
 
 ## How the build behaves
 
-- **All five variables set:** the build logs in to Azure with GitHub OIDC (no client secret exists anywhere), signs `dist\FTC Whisper.exe`, and copies it to both release assets. A copy keeps the signature. Both copies are then verified.
+- **All five variables set:** the build logs in to Azure with GitHub OIDC (no client secret exists anywhere). Because the action is not recursive, it signs in three steps:
+  1. `dist\FTC Whisper.exe` (the onefile bridge);
+  2. `dist\FTC Whisper\FTC Whisper.exe` (the installed layout's exe; `tools/make_manifest.py` then records its signed hash);
+  3. `dist\installer\FTC-Whisper-Setup.exe` (the installer, built by `tools/build_installer.py` from the signed files).
+
+  Each is copied to its release assets (a copy keeps the signature). Every shipped exe is then verified `Valid` with exactly `brand.SIGNER_SUBJECT`. The bundled third-party DLLs are deliberately not re-signed (`docs/decisions/release-updater.md`, 2026-09-29).
 - **None set:** the build is unsigned and the run shows an "Unsigned build" warning. With `REQUIRE_SIGNING=true` it fails instead.
 - **Some set:** the build fails and names the missing variables.
 - **Run workflow** is a dry run unless **publish** is ticked, so testing signing never touches the live release. To re-cut a failed version, push a tag or tick **publish**.
 
 ## Release assets
 
-| Asset | For | Name |
-|---|---|---|
-| `BrightLink-Echo.exe` | New downloads: the README link and the CRM's download button | Follows the product name in `brand.py` |
-| `FTC-Whisper.exe` | Every installed copy's auto-updater | **Frozen: never rename** |
+| Asset | What it is | For | Name |
+|---|---|---|---|
+| `BrightLink-Echo.exe` | The installer | New downloads: the README link and the CRM's download button | Follows the product name in `brand.py` |
+| `FTC-Whisper-Setup.exe` | The installer (same bytes) | Installed (v1.8.0+) copies' auto-updater, the Store | **Frozen: never rename** |
+| `FTC-Whisper.exe` | The onefile app (the bridge) | Every pre-1.8 copy's auto-updater | **Frozen: never rename, never make it anything but a whole onefile app** |
+| `FTC-Whisper-rollout.json` | `rollout.json` | How much of the fleet the bridge may migrate | Frozen |
 
-Both come from the one signed build and have identical hashes.
+All come from one signed build. The two installer names have identical hashes.
+Ryan's PCs can be migrated first by adding their machine id (the first 12 hex
+digits of the SHA-256 of `MachineGuid`, lower-cased) to `rollout.json`:
+
+```powershell
+$g = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography').MachineGuid.ToLower()
+-join ([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($g)) | ForEach-Object { $_.ToString('x2') })[0..11]
+```
 
 ## Verifying a signed exe
 

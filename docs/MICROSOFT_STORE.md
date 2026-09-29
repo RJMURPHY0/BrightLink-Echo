@@ -25,11 +25,31 @@ From the live policy (updated 2026-09-15):
 | Consent to start at sign-in | 10.2.8 | Settings > Start with Windows (default on). Off removes the logon task. New key `start_with_windows`; the old `auto_start` key is ignored because every existing config holds `false` there |
 | Privacy policy URL | 10.5.1 | `PRIVACY.md` in the repo |
 
+## From v1.8.0: the signed Inno Setup installer
+
+From v1.8.0 the Store package is the **installer**, `FTC-Whisper-Setup.exe`
+(the `BrightLink-Echo.exe` download is the same bytes). It installs per-user
+into `%LOCALAPPDATA%\FTC Whisper` with no admin prompt. The files land in a
+staging folder, are checked against the build's manifest and switched in, and
+the app then registers itself exactly as `--install /S` did. The installer
+adds no uninstall entry of its own: the app's entry is the only one.
+
+`--install /S` still works on the app exe itself, but the Store runs the
+installer, whose silent switch is Inno's.
+
+| Store field | Value |
+|---|---|
+| Silent switch | `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` |
+| Start at sign-in | The installer's "Start BrightLink Echo when I sign in" tick is the 10.2.8 consent. Silent installs take its default (on); Settings > Start with Windows turns it off |
+| Return codes | 0 success · 1 setup failed to initialise · 2 cancelled before install · 3 fatal error preparing the next phase · 4 fatal error during install · 5 cancelled during install · 6 terminated · 7 preparing to install failed · 8 restart needed · **10 files installed but switching versions failed (the previous version is left in place; details in `%LOCALAPPDATA%\FTC Whisper\update.log`)** |
+| Model | Still downloaded by the app on first launch, not by the installer |
+
 ## Partner Center values
 
 - **App type**: EXE or MSI app
-- **Package URL**: `https://github.com/RJMURPHY0/BrightLink-Echo/releases/download/v1.7.3/BrightLink-Echo.exe`
-- **Installer parameters / silent switch**: `--install /S`
+- **Package URL** (v1.8.0 on): `https://github.com/RJMURPHY0/BrightLink-Echo/releases/download/v<version>/FTC-Whisper-Setup.exe`
+- **Installer parameters / silent switch** (v1.8.0 on): `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`
+- Before v1.8.0 (the onefile exe): `.../v1.7.3/BrightLink-Echo.exe` with `--install /S`
 - **Architecture**: x64. **Language**: English (United Kingdom)
 - **Category**: Productivity
 - **Privacy policy URL**: `https://github.com/RJMURPHY0/BrightLink-Echo/blob/main/PRIVACY.md`
@@ -86,6 +106,10 @@ Alt+R on selected text opens the AI Refine panel.
   the SmartScreen prompt.
 
 ## Open questions (verify, not assumed)
+
+- That Partner Center accepts the Inno installer's exit code 10 as a failure
+  code, and detects the install by the app's own Installed apps entry
+  (`FTCWhisper`), since the installer registers none of its own.
 
 - That a Store install shows no SmartScreen prompt. Microsoft does not
   document it for EXE apps; check on the first live install.

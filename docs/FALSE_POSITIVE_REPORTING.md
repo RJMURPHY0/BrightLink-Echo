@@ -14,7 +14,9 @@ but they still block users. This is how to clear them.
 
 Every CI release now runs a **VirusTotal scan** (see the "Scan with VirusTotal"
 step in the workflow) if the `VT_API_KEY` secret is set. The workflow log prints
-an analysis URL — open it to see which engines flag `BrightLink-Echo.exe`.
+an analysis URL — open it to see which engines flag the installer
+(`FTC-Whisper-Setup.exe`, the same bytes as the `BrightLink-Echo.exe`
+download), the onefile bridge (`FTC-Whisper.exe`) and the installed exe.
 
 To enable it: get a free API key at <https://www.virustotal.com/gui/my-apikey>
 and add it as a repo secret named `VT_API_KEY` (Settings → Secrets and variables
@@ -48,23 +50,34 @@ Attach the release exe and note it's a legitimate open-source dictation tool.
 
 ---
 
-## 3. What the build already does (v1.6.29)
+## 3. What the build already does (v1.6.29, installed layout v1.8.0)
 
 Don't undo these — each one exists to keep the detection rate down:
 
-- **No UPX / no packer** (`upx=False`). Packed exes trigger *more* heuristics.
-- **Unpacks outside `%TEMP%`** (`runtime_tmpdir` in `ftc_whisper.spec`). A
-  onefile exe unpacks its DLLs before running them; doing that in
-  `%TEMP%\_MEIxxxxxx` looks exactly like malware staging, and several products
-  block the DLL loads *even after the user allows the exe* — the app is
-  permitted but still won't run. It now unpacks to
-  `%LOCALAPPDATA%\FTC Whisper\runtime\`, which is both less suspicious and a
-  **stable path**: an admin can add one permanent exclusion, which is
-  impossible with a random `_MEIxxxxxx` name.
-  `app._clean_stale_runtime_dirs()` sweeps folders left behind by a crash.
+- **Installed, not self-extracting (v1.8.0).** Installed copies run a
+  PyInstaller *onedir* build from `%LOCALAPPDATA%\FTC Whisper\app-<version>\`,
+  laid down once by a signed Inno Setup installer. Nothing is unpacked at
+  launch: measured on 2026-09-29, 0 files written per start, against 5,278
+  files / 305 MB for the onefile build. See
+  `docs/decisions/release-updater.md`, 2026-09-29.
+- **The onefile build still exists** as `FTC-Whisper.exe`, the bridge that
+  pre-1.8 clients install before migrating. It keeps the measures below.
+- **No UPX / no packer** (`upx=False`) on every build. Packed exes trigger
+  *more* heuristics.
+- **The onefile bridge unpacks outside `%TEMP%`** (`runtime_tmpdir` in
+  `ftc_whisper.spec`). Unpacking DLLs into `%TEMP%\_MEIxxxxxx` looks exactly
+  like malware staging, and several products block the DLL loads *even after
+  the user allows the exe*. It unpacks to `%LOCALAPPDATA%\FTC Whisper\runtime\`,
+  a **stable path** an admin can exclude once. The installed layout empties
+  that folder once it is healthy.
+- **Signed:** the bridge, the installed exe and the installer, all by
+  BRIGHTLINK (OS) LTD. Bundled third-party DLLs are not re-signed (see the
+  2026-09-29 decision).
 - **Full version metadata** (`version_info.txt`, including Comments and
-  LegalTrademarks). Sparse or blank metadata scores against you.
-- **Runs as `asInvoker`** — the app never requests admin.
+  LegalTrademarks) on the app and the installer. Sparse or blank metadata
+  scores against you.
+- **Runs as `asInvoker`**, and the installer is per-user (`PrivilegesRequired=lowest`).
+  Nothing ever requests admin.
 
 ### If a user is still blocked
 
@@ -85,13 +98,15 @@ That single folder covers the exe, the unpack folder and the model.
 
 ---
 
-## 5. Bigger free lever (needs its own planned session)
+## 5. Onedir + an installer: done in v1.8.0
 
-Switching the build from **onefile → onedir + an Inno Setup installer** removes
-the self-extraction step entirely, which is the strongest remaining heuristic
-after signing. `runtime_tmpdir` (above) softens that trigger but does not remove
-it. onedir changes the distribution shape from a single exe to an installed
-folder, which **breaks the current auto-update swap logic** (`updater.py` copies
-a single exe over itself) and the `FTC-Whisper.exe` release-asset contract. Not
-a drop-in change — it needs a planned refactor of the updater. Track as a future
-task; do not attempt it piecemeal.
+Switching from **onefile to onedir + an Inno Setup installer** removed the
+self-extraction step, the strongest heuristic left after signing. The updater
+was redesigned for it (versioned `app-<version>` folders, `activate.ps1`, a
+staged and verified switch, rollback), and `FTC-Whisper.exe` stays a onefile
+bridge, so every older client still reaches the new layout. The design, the
+per-version transition and the measurements are in
+`docs/decisions/release-updater.md` (2026-09-29). CI's VirusTotal step scans
+the installer, the bridge and the installed exe on every build; compare those
+counts with the last onefile release's `BrightLink-Echo.exe` when judging
+whether a flag is new.

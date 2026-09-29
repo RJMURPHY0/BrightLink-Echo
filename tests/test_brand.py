@@ -46,6 +46,23 @@ class FrozenIdentityTests(unittest.TestCase):
         # from RJMURPHY0/FTC_Whisper, so that name must never be reused.
         self.assertEqual("RJMURPHY0/BrightLink-Echo", brand.GITHUB_REPO)
         self.assertEqual("FTC Whisper", brand.UNRECORDED_PRODUCT_NAME)
+        # The installed-layout names (v1.8.0): every installed copy finds its
+        # next version, its own files and its pending update by these.
+        self.assertEqual("FTC-Whisper-Setup.exe", brand.SETUP_UPDATE_ASSET)
+        self.assertEqual("FTC-Whisper-rollout.json", brand.ROLLOUT_ASSET)
+        self.assertEqual("app-", brand.CONTENTS_DIR_PREFIX)
+        self.assertEqual("pending-", brand.PENDING_DIR_PREFIX)
+        # SmartScreen reputation is bound to this exact subject.
+        self.assertEqual("CN=BRIGHTLINK (OS) LTD, O=BRIGHTLINK (OS) LTD, L=Syston, "
+                         "S=Leicester, C=GB", brand.SIGNER_SUBJECT)
+
+    def test_update_channels_never_collide(self):
+        # The bridge, the installer, the rollout switch and the download are
+        # four different files; two sharing a name would make a pre-1.8
+        # updater install the installer as if it were the app.
+        names = {brand.UPDATE_ASSET, brand.SETUP_UPDATE_ASSET, brand.ROLLOUT_ASSET}
+        self.assertEqual(3, len(names))
+        self.assertNotIn(brand.DOWNLOAD_ASSET, (brand.UPDATE_ASSET, brand.ROLLOUT_ASSET))
 
     def test_the_first_name_stays_on_the_legacy_list(self):
         # Shortcut renames, launcher clean-up and history icons all look up
@@ -280,6 +297,44 @@ class VersionResourceTests(unittest.TestCase):
         self.assertIn("_brand.DATA_DIR_NAME + '\\\\runtime'", spec)
         self.assertIn("'brand',", spec)                        # hidden import
 
+    def test_spec_builds_the_bridge_and_the_installed_layout(self):
+        spec = open(os.path.join(ROOT, "ftc_whisper.spec"), encoding="utf-8").read()
+        # The installed layout's contents folder is named after the version.
+        self.assertIn("_contents = _brand.CONTENTS_DIR_PREFIX + _APP_VERSION", spec)
+        self.assertIn("contents_directory=_contents", spec)
+        self.assertIn("COLLECT(", spec)
+        self.assertIn("name=_brand.EXE_BASENAME,", spec.split("COLLECT(", 1)[1])
+        # activate.ps1 ships inside each version, and only in the onedir build.
+        self.assertIn("'installer', 'activate.ps1'", spec.split("COLLECT(", 1)[1])
+        onefile_block = spec.split("if _BUILD in ('both', 'onefile'):", 1)[1] \
+                            .split("if _BUILD in ('both', 'onedir'):", 1)[0]
+        self.assertNotIn("activate.ps1", onefile_block)
+        self.assertIn("write_manifest(", spec)
+        # Neither build is ever packed: both EXEs and the COLLECT say so.
+        self.assertNotIn("upx=True", spec)
+        self.assertGreaterEqual(spec.count("upx=False,"), 3)
+
+    def test_the_installer_leaves_one_installed_apps_entry_and_no_admin(self):
+        iss = open(os.path.join(ROOT, "installer", "echo.iss"), encoding="utf-8").read()
+        for line in ("PrivilegesRequired=lowest", "Uninstallable=no", "CreateUninstallRegKey=no",
+                     "CloseApplications=no", "DefaultDirName={localappdata}\\{#DataDir}"):
+            self.assertIn(line, iss)
+        # Staging runs while the app is open, so no AppMutex directive.
+        self.assertNotIn("\nAppMutex=", iss)
+        self.assertIn("VersionInfoOriginalFileName={#OutputBase}.exe", iss)
+        self.assertIn("/STAGEONLY", iss)
+        self.assertIn("-Mode Install -KillCopiesElsewhere", iss)
+        self.assertTrue(all(ord(c) < 128 for c in iss))
+        import tools.build_installer as bi
+        d = bi.defines("dist", "out", "w.png", "s.png", "1.8.0")
+        self.assertEqual("FTC-Whisper-Setup", d["OutputBase"])
+        self.assertNotEqual(d["OutputBase"] + ".exe", brand.CANONICAL_EXE_NAME)
+        self.assertEqual("app-1.8.0", d["ContentsDir"])
+        self.assertEqual("pending-1.8.0", d["PendingDir"])
+        self.assertEqual(brand.PRODUCT_NAME, d["AppName"])
+        self.assertEqual(brand.DATA_DIR_NAME, d["DataDir"])
+        self.assertEqual("1.8.0.0", d["FileVersion"])
+
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
@@ -323,6 +378,65 @@ class WorkflowTests(unittest.TestCase):
         run = self.steps["Decide whether to sign"]["run"]
         self.assertIn("only partly configured", run)
         self.assertIn("REQUIRE_SIGNING", run)
+
+    # ── The installed layout (v1.8.0) ─────────────────────────────────────
+
+    def _order(self):
+        return [s.get("name") for s in self.wf["jobs"]["build-windows"]["steps"]]
+
+    def test_every_release_carries_all_four_assets(self):
+        files = self.steps["Publish versioned release"]["with"]["files"]
+        for out in ("UPDATE_ASSET", "SETUP_ASSET", "DOWNLOAD_ASSET", "ROLLOUT_ASSET"):
+            self.assertIn(f"steps.version.outputs.{out}", files)
+        read = self.steps["Read version and product names"]["run"]
+        for name in ("brand.SETUP_UPDATE_ASSET", "brand.ROLLOUT_ASSET", "brand.SIGNER_SUBJECT"):
+            self.assertIn(name, read)
+        copy = self.steps["Name the release assets"]["run"]
+        # The download people get is the installer, under the name every
+        # existing link already uses.
+        self.assertIn('"dist\\installer\\$env:SETUP_ASSET" "dist\\$env:DOWNLOAD_ASSET"', copy)
+
+    def test_every_shipped_exe_is_signed_and_checked_for_our_signer(self):
+        order = self._order()
+        for step in ("Sign executable (Azure Artifact Signing)",
+                     "Sign installed-layout executable", "Sign installer"):
+            self.assertTrue(self.steps[step]["uses"].startswith("azure/artifact-signing-action@"))
+        # The onedir exe is signed before the manifest describes it and before
+        # the installer packs it; the installer after it is built.
+        self.assertLess(order.index("Sign installed-layout executable"),
+                        order.index("Write the installed-layout manifest"))
+        self.assertLess(order.index("Write the installed-layout manifest"), order.index("Build installer"))
+        self.assertLess(order.index("Build installer"), order.index("Sign installer"))
+        verify = self.steps["Verify signature"]["run"]
+        for f in ("$env:UPDATE_ASSET", "$env:SETUP_ASSET", "$env:DOWNLOAD_ASSET", "$env:DIST_DIR\\$env:DIST_EXE"):
+            self.assertIn(f, verify)
+        self.assertIn("$env:SIGNER", verify)
+
+    def test_inno_setup_is_pinned_by_version_and_hash(self):
+        env = self.wf["jobs"]["build-windows"]["env"]
+        self.assertRegex(env["INNO_VERSION"], r"^\d+\.\d+\.\d+$")
+        self.assertIn(env["INNO_VERSION"], env["INNO_URL"])
+        self.assertRegex(env["INNO_SHA256"], r"^[0-9a-f]{64}$")
+        self.assertIn("$env:INNO_SHA256", self.steps["Install Inno Setup (pinned)"]["run"])
+
+    def test_the_installed_build_is_proven_before_anything_is_published(self):
+        order = self._order()
+        self.assertIn("tools/selftest_install.py", self.steps["Install and self-test"]["run"])
+        self.assertNotIn("continue-on-error", self.steps["Install and self-test"])
+        for later in ("Check the release has every asset", "Publish versioned release"):
+            self.assertLess(order.index("Install and self-test"), order.index(later))
+        self.assertLess(order.index("Check the release has every asset"),
+                        order.index("Publish versioned release"))
+
+    def test_releases_never_build_concurrently(self):
+        self.assertIs(False, self.wf["concurrency"]["cancel-in-progress"])
+
+    def test_the_rollout_file_starts_closed(self):
+        with open(os.path.join(ROOT, "rollout.json"), encoding="utf-8") as f:
+            import json
+            rollout = json.load(f)
+        self.assertIn("migrate_percent", rollout)
+        self.assertIsInstance(rollout["migrate_percent"], int)
 
 
 class UpdateAnnouncementTests(unittest.TestCase):

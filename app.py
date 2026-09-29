@@ -42,6 +42,7 @@ if getattr(sys, "frozen", False) and sys.platform == "win32":
         brand.DATA_DIR_NAME, "startup-error.log"))
 
 import brand
+import install_layout
 from config import Config
 # Recorder / Transcriber / asr_engine / StreamingSession / Injector / TrayApp
 # are deliberately NOT imported here: between them they pull in numpy,
@@ -64,7 +65,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.7.3"
+APP_VERSION = "1.8.0"
 
 
 class _RECT(ctypes.Structure):
@@ -172,6 +173,9 @@ class WhisperFlowApp:
         self.config = config
         self._started = False
         self._restart_for_reauth = False
+        # _start_update_check runs from _init_core and from sign-in; once.
+        self._update_check_lock = threading.Lock()
+        self._update_check_started = False
 
         # ── Core pipeline — built by _init_core on a background thread ──
         # These stay None until _core_ready is set. Anything that can run
@@ -449,6 +453,11 @@ class WhisperFlowApp:
             threading.Thread(
                 target=self._init_parakeet, daemon=True, name="parakeet-preload"
             ).start()
+            # The native-heavy imports above are what a broken build fails
+            # on. activate.ps1 rolls a new version back only if it exits
+            # before this, whether or not anyone is signed in.
+            _report_healthy()
+            self._start_update_check()
         finally:
             self._core_ready.set()
 
@@ -757,7 +766,17 @@ class WhisperFlowApp:
             print(f"[App] Remote API key fetch failed: {e}")
 
     def _start_update_check(self) -> None:
-        from updater import check_for_update
+        """Check GitHub at launch and every 6 h. Starts ONCE per process, as
+        soon as the core has loaded, signed in or not: until v1.7.x it
+        started only after sign-in, so a machine whose session had expired
+        never updated at all (and could never be migrated). Updating needs no
+        account."""
+        with self._update_check_lock:
+            if self._update_check_started:
+                return
+            self._update_check_started = True
+        from updater import (get_latest_release, is_known_bad, is_newer,
+                             migration_due)
 
         def _on_update_found(version: str, url: str) -> None:
             print(f"[App] Update available: {version}")
@@ -773,7 +792,20 @@ class WhisperFlowApp:
         # until they happen to restart. show_update_banner is idempotent.
         def _check_loop():
             while True:
-                check_for_update(APP_VERSION, _on_update_found)
+                try:
+                    info = get_latest_release()
+                    if info and is_newer(info["version"], APP_VERSION) \
+                            and not is_known_bad(info["version"]):
+                        _on_update_found(info["version"], info["download_url"])
+                    elif info and migration_due(APP_VERSION):
+                        # The onefile bridge, at the latest version already:
+                        # move this machine to the installed layout. Silent,
+                        # like any update, and only when the release's
+                        # rollout file includes this machine.
+                        print(f"[App] Moving to the installed layout ({info['version']}).")
+                        self._start_auto_update(info["version"], info["download_url"])
+                except Exception as e:
+                    print(f"[App] Update check failed: {e}")
                 time.sleep(6 * 3600)
 
         threading.Thread(
@@ -3518,6 +3550,11 @@ def _ensure_single_instance() -> None:
             )
         except Exception:
             pass
+        # Reaching the mutex means this build imports and runs. Without this a
+        # launch that merely found another instance (another Windows user's,
+        # say: the mutex is Global) would look like a crash to activate.ps1,
+        # and a good update would be rolled back.
+        _report_healthy(cleanup=False)
         # os._exit, not sys.exit: a duplicate instance owns nothing and must die
         # immediately. sys.exit only raises SystemExit, which a non-daemon thread
         # or a wedged DLL-init (e.g. an OOM during model preload) can swallow,
@@ -3556,6 +3593,8 @@ def _clean_stale_runtime_dirs() -> None:
     over a day old; a folder still in use simply fails to delete and is left."""
     if not getattr(sys, "frozen", False):
         return
+    if install_layout.running_layout() == "onedir":
+        return   # _report_healthy cleans up the installed layout
     try:
         import shutil
         runtime_dir = os.path.join(_app_data_dir(), "runtime")
@@ -3578,6 +3617,35 @@ def _clean_stale_runtime_dirs() -> None:
                 pass              # locked = in use, leave it
     except Exception as e:
         print(f"[App] Runtime cleanup skipped (non-fatal): {e}")
+
+
+def _report_healthy(cleanup: bool = True) -> None:
+    """Tell activate.ps1 this version started, then (installed layout only)
+    remove what earlier versions left: their app-* folders, pending-* folders
+    and every onefile unpack folder under runtime\\ it can.
+
+    Cleaning waits for health on purpose: until then the previous version's
+    folder is the rollback. Never raises; nothing here is on the dictation
+    path."""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        install_layout.write_health(APP_VERSION)
+    except Exception:
+        pass
+    if not cleanup or install_layout.running_layout() != "onedir":
+        return
+
+    def _clean():
+        import shutil
+        root = os.path.dirname(os.path.abspath(sys.executable))
+        own = os.path.basename(getattr(sys, "_MEIPASS", ""))
+        for path in install_layout.stale_paths(root, own):
+            shutil.rmtree(path, ignore_errors=True)
+            if not os.path.exists(path):
+                print(f"[App] Removed {path}")
+
+    threading.Thread(target=_clean, daemon=True, name="layout-cleanup").start()
 
 
 def _startup_log_path() -> str:
@@ -3615,11 +3683,30 @@ def _ensure_installed_copy() -> str:
             if os.path.normcase(os.path.abspath(current)) == os.path.normcase(target):
                 return target  # already running from the stable copy
             from updater import pyi_archive_intact
+            if install_layout.running_layout() == "onedir":
+                # NEVER copy a onedir exe: without its app-<version> folder it
+                # cannot start, and every launcher points at the copy. Only
+                # the installer and activate.ps1 put the installed layout in
+                # place. A dev build or a pending copy registers the install
+                # if there is a whole one, else itself.
+                if (os.path.exists(target) and pyi_archive_intact(target)
+                        and install_layout.layout_ok(target)):
+                    return target
+                return current
+            if (install_layout.is_installed_layout_exe(target)
+                    and pyi_archive_intact(target) and install_layout.layout_ok(target)):
+                # A onefile copy (Downloads, the Store's temp download) never
+                # overwrites a whole installed layout: the installed copy
+                # updates itself, and a onefile exe over it would undo the
+                # migration.
+                return target
             # A cut-off canonical exe (header intact, app archive missing)
             # cannot start at all; any whole copy that runs repairs it,
             # whatever the timestamps say.
             needs_copy = (not os.path.exists(target)) or (
                 not pyi_archive_intact(target)) or (
+                # An installed-layout exe whose folder is gone cannot start.
+                not install_layout.layout_ok(target)) or (
                 os.path.getmtime(current) > os.path.getmtime(target)
             )
             if needs_copy:
@@ -3698,16 +3785,22 @@ def _handoff_to_canonical_if_newer() -> None:
         return
     cur_v = _file_version_tuple(current)
     tgt_v = _file_version_tuple(target)
-    # Only defer to a strictly newer install: when we're same-or-newer the
-    # normal path runs (and _ensure_installed_copy refreshes the canonical
-    # copy from us). Strict comparison also makes handoff ping-pong impossible.
-    if tgt_v <= cur_v or tgt_v == (0, 0, 0, 0):
+    # Defer to a strictly newer install: when we're newer the normal path runs
+    # (and _ensure_installed_copy refreshes a onefile canonical copy from us).
+    # A onefile copy also defers to the installed layout at the SAME version:
+    # that is the copy that updates itself. Never the other way round, so
+    # handoff ping-pong stays impossible.
+    installed = install_layout.is_installed_layout_exe(target)
+    same_but_installed = (tgt_v == cur_v and installed
+                          and install_layout.running_layout() == "onefile")
+    if tgt_v == (0, 0, 0, 0) or (tgt_v <= cur_v and not same_but_installed):
         return
     # The version resource sits in the first few KB, so a canonical exe cut
     # off mid-update still reports the new version. Never hand off to one:
     # carry on here, and _ensure_installed_copy repairs it from this copy.
+    # An installed-layout exe also needs its whole app-<version> folder.
     from updater import pyi_archive_intact
-    if not pyi_archive_intact(target):
+    if not pyi_archive_intact(target) or not install_layout.layout_ok(target):
         print(f"[App] Installed exe at {target} is incomplete — not handing off.")
         return
     try:
@@ -3887,16 +3980,79 @@ def _run_silent_install() -> int:
         print("[App] --install only applies to the packaged exe.")
         return 2
     from updater import pyi_archive_intact
+    # Installed layout: the installer (activate.ps1) already put the files in
+    # place and runs this from the canonical exe, so it only registers.
     _ensure_installed_copy()
     target = _stable_exe_path()
-    if not (os.path.exists(target) and pyi_archive_intact(target)):
+    if not (os.path.exists(target) and pyi_archive_intact(target)
+            and install_layout.layout_ok(target)):
         _log_startup_error(RuntimeError(f"install failed: no intact copy at {target}"))
         return 1
+    _apply_installer_choices()
     _register_application()
     _register_url_protocol()
     _sync_startup_task(_installed_start_with_windows())
     print(f"[App] Installed at {target}")
     return 0
+
+
+def _install_option(name: str):
+    """The value of --<name>=<value> on the command line, "" for a bare
+    --<name>, None when absent."""
+    flag = "--" + name
+    for a in sys.argv[1:]:
+        low = a.lower()
+        if low == flag:
+            return ""
+        if low.startswith(flag + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
+def _apply_installer_choices() -> None:
+    """The installer's two ticks, passed through activate.ps1:
+
+    --no-desktop-shortcut      latch the desktop shortcut as already handled,
+                               so registration never creates one
+    --start-with-windows=0|1   the Store's consent to start at sign-in
+                               (policy 10.2.8), written to the installed
+                               config before the logon task is synced
+
+    Written straight into the installed files, never through Config.load():
+    that bootstraps a config beside the RUNNING exe."""
+    import json
+    root = _app_data_dir()
+    if _install_option("no-desktop-shortcut") is not None:
+        try:
+            import app_install
+            state = app_install.load_state(root)
+            state["desktop_shortcut"] = True
+            app_install.save_state(root, state)
+        except Exception as e:
+            print(f"[App] Could not record the desktop shortcut choice: {e}")
+    value = _install_option("start-with-windows")
+    if value not in ("0", "1"):
+        return
+    path = os.path.join(root, "config.json")
+    try:
+        if not os.path.exists(path):
+            # First install: start from the shipped defaults, exactly as the
+            # app's own first run would, so no default is lost.
+            bundled = os.path.join(getattr(sys, "_MEIPASS", ""), "config.json")
+            data = {}
+            if os.path.exists(bundled):
+                with open(bundled, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+        else:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        data["start_with_windows"] = value == "1"
+        tmp = path + ".install"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except Exception as e:
+        print(f"[App] Could not record Start with Windows ({e}); keeping the default.")
 
 
 def _repair_desktop_shortcut(target: str) -> None:
@@ -4138,7 +4294,9 @@ def _selftest(args: list) -> int:
     import json
     report: dict = {"version": APP_VERSION,
                     "meipass": getattr(sys, "_MEIPASS", ""),
-                    "frozen": bool(getattr(sys, "frozen", False))}
+                    "frozen": bool(getattr(sys, "frozen", False)),
+                    "layout": install_layout.running_layout(),
+                    "exe": sys.executable}
     code = 1
     out = args[1] if len(args) > 1 else ""
     try:

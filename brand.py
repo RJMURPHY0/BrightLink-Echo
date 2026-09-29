@@ -66,6 +66,21 @@ RUN_VALUE_NAME = "FTC Whisper"            # HKCU Run fallback launcher
 URL_SCHEME = "ftcwhisper"                 # the CRM opens ftcwhisper://launch
 UNINSTALL_KEY_NAME = "FTCWhisper"         # HKCU ...\Uninstall\<this>
 UPDATE_ASSET = "FTC-Whisper.exe"          # what every installed updater downloads
+# From v1.8.0 UPDATE_ASSET is the "bridge": a whole onefile app that every
+# pre-1.8 updater can still install, and that then moves the machine to the
+# installed (onedir) layout. Installed copies update through the installer.
+SETUP_UPDATE_ASSET = "FTC-Whisper-Setup.exe"   # the installer, as updaters fetch it
+ROLLOUT_ASSET = "FTC-Whisper-rollout.json"     # how much of the fleet the bridge may migrate
+# The installed layout: <DATA_DIR>\FTC Whisper.exe runs on <DATA_DIR>\app-<version>\
+# (PyInstaller contents_directory). An update is laid out in pending-<version>\
+# first and only then moved into place.
+CONTENTS_DIR_PREFIX = "app-"
+PENDING_DIR_PREFIX = "pending-"
+# Every exe we ship is signed by exactly this certificate subject. SmartScreen
+# reputation is bound to it, and the updater refuses an installer signed by
+# anything else.
+SIGNER_SUBJECT = ("CN=BRIGHTLINK (OS) LTD, O=BRIGHTLINK (OS) LTD, L=Syston, "
+                  "S=Leicester, C=GB")
 # Windows groups the taskbar button, pins and notifications under this id.
 # Its visible name comes from HKCU\Software\Classes\AppUserModelId\<this>
 # (app_install.register_notification_identity), so it never needs to change.

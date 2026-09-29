@@ -15,7 +15,7 @@ Windows desktop push-to-talk dictation app: hold a hotkey, speak, and the transc
 
 ## C · Stack
 
-- **Language/UI** — Python 3.11, tkinter (custom-drawn widgets), packaged with PyInstaller (`ftc_whisper.spec`, one-file, `console=False`, UPX disabled).
+- **Language/UI** — Python 3.11, tkinter (custom-drawn widgets), packaged with PyInstaller (`ftc_whisper.spec`: a onedir installed layout plus the onefile bridge, `console=False`, UPX disabled), installed per-user by Inno Setup (`installer/echo.iss`).
 - **ASR** — **Parakeet** (`asr_engine.py`): NVIDIA Parakeet TDT 0.6b v2 int8 ONNX via `onnx-asr`; primary for English, ~20x realtime on CPU, punctuation/caps built in. **faster-whisper** (`transcriber.py`) is the fallback for non-English, model-not-yet-downloaded, or load failure.
 - **Model storage** — ~660 MB downloaded once to `%LOCALAPPDATA%\FTC Whisper\models` over plain HTTPS, deliberately **not** the hf_hub cache (its symlink layout raises WinError 1314 on stock Windows).
 - **AI refine** — `ai_refiner.py`: OpenRouter first (`google/gemini-2.5-flash-lite` + in-request `models` fallback array), Anthropic Claude Haiku direct as fallback. 20s timeout, 1 retry.
@@ -56,7 +56,7 @@ Record a new decision as a dated entry at the bottom of the matching `docs/decis
 
 **Release / naming invariants (rename breaks live clients):**
 
-- The updater fetches `https://api.github.com/repos/<brand.GITHUB_REPO>/releases/latest` and looks for an asset named **exactly `FTC-Whisper.exe`**. The repo was renamed `FTC_Whisper` → `BrightLink-Echo` on 2026-09-22: every build up to v1.6.86 still asks for the old name and gets there only through GitHub's redirect, so **never create another repo called `FTC_Whisper` on this account** (it kills the redirect and strands every older install). Renaming the repo or the asset without a transitional release **silently breaks auto-update on every installed client — this has already happened once.** Any rename needs a transitional release under the old name/repo that hands clients over first. Since 2026-09-17 it is published next to `BrightLink-Echo.exe` from the same build: never drop it and never rename it.
+- The updater fetches `https://api.github.com/repos/<brand.GITHUB_REPO>/releases/latest` and looks for an asset named **exactly `FTC-Whisper.exe`**. The repo was renamed `FTC_Whisper` → `BrightLink-Echo` on 2026-09-22: every build up to v1.6.86 still asks for the old name and gets there only through GitHub's redirect, so **never create another repo called `FTC_Whisper` on this account** (it kills the redirect and strands every older install). Renaming the repo or the asset without a transitional release **silently breaks auto-update on every installed client — this has already happened once.** Any rename needs a transitional release under the old name/repo that hands clients over first. Never drop it and never rename it. From v1.8.0 `FTC-Whisper.exe` is the **onefile bridge** (a whole working app every pre-1.8 swap script can install, which then migrates the machine), published with `FTC-Whisper-Setup.exe` (the installer, what installed copies update from), `BrightLink-Echo.exe` (the same installer, for downloads) and `FTC-Whisper-rollout.json` (how much of the fleet may migrate). See `docs/decisions/release-updater.md`, 2026-09-29.
 - `%LOCALAPPDATA%\FTC Whisper\` holds the ~660 MB model, the canonical exe, `last-version.txt` and `startup-error.log`. Any rename must shim this path or every client re-downloads the model and loses its handoff anchor. `%APPDATA%\FTC Whisper\` holds the encrypted session and history tombstones. A product rename does NOT move these folders.
 - **Names a person sees come only from `brand.py`; its frozen block never changes.** `tests/test_brand.py` fails on a hard-coded product name in any runtime module (str, bytes or f-string) and pins every frozen value. To rename the product: change `PRODUCT_NAME`, append the old name to the END of `LEGACY_PRODUCT_NAMES`, and nothing else. Never build a path, a registry key or an exe name from `PRODUCT_NAME`.
 - **Never build locally and upload by hand for public releases** — signing only runs in CI, so a hand-built exe ships unsigned. The local PyInstaller command is for development only.
@@ -80,7 +80,7 @@ Record a new decision as a dated entry at the bottom of the matching `docs/decis
 ## F · References
 
 - **Repo** — https://github.com/RJMURPHY0/BrightLink-Echo (branch `main`; was `FTC_Whisper` until 2026-09-22, the old URL redirects)
-- **Releases / update source** — https://github.com/RJMURPHY0/BrightLink-Echo/releases/latest (asset `FTC-Whisper.exe` for updaters, `BrightLink-Echo.exe` for downloads)
+- **Releases / update source** — https://github.com/RJMURPHY0/BrightLink-Echo/releases/latest (`FTC-Whisper.exe` for pre-1.8 updaters, `FTC-Whisper-Setup.exe` for installed copies, `BrightLink-Echo.exe` for downloads)
 - **Supabase** — project ref `ijeeghdxokfvlfarojlm`, shared with the rest of the estate
 - **Docs** — `docs/CODE_SIGNING.md` (Azure Trusted Signing setup, six secrets), `docs/FALSE_POSITIVE_REPORTING.md` (AV false-positive process), `README.md`
 - **Azure Trusted Signing** and **VirusTotal** (optional `VT_API_KEY`) dashboards — accessed via the repo's Actions logs; no standalone dashboard URL recorded.

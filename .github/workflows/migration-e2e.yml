@@ -1,0 +1,138 @@
+name: Installer migration scenarios
+
+# Proves the onefile -> installed-layout migration on clean Windows machines,
+# with the REAL signed files of a "Build and publish Windows installer" dry
+# run (Run workflow, publish unticked). Each job is a fresh VM: it installs
+# old releases from GitHub, points api.github.com/github.com at a local fake
+# (tools/fake_release_server.py) serving the dry run, and lets each version's
+# own updater do the work. Nothing is ever published, and no live client can
+# see any of it.
+#
+# Inputs are run ids: the number at the end of the dry run's URL
+# (.../actions/runs/<id>). next_run_id is a second dry run built at a HIGHER
+# version (from a throwaway branch), for the onedir -> onedir update; leave it
+# empty to skip that job.
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: "Run id of the dry run to test"
+        required: true
+      next_run_id:
+        description: "Run id of a dry run at a higher version (optional)"
+        required: false
+        default: ""
+      from_versions:
+        description: "Old releases to upgrade from (JSON list)"
+        required: false
+        default: '["1.7.2", "1.6.86", "1.6.79"]'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  upgrade:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        from: ${{ fromJSON(inputs.from_versions) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # old releases' updater code comes from their tags
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: constraints.txt
+      - run: uv pip install --system -r requirements.txt -c constraints.txt
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+          path: dist
+          merge-multiple: true
+      # The model is fetched once, like the app does, so the scenario can
+      # prove an update never re-downloads it.
+      - uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\FTC Whisper\models
+          key: parakeet-${{ hashFiles('asr_engine.py') }}
+      - run: python -c "import sys, asr_engine; sys.exit(0 if asr_engine.download_model() else 1)"
+      - run: python tools/e2e_upgrade.py upgrade --from ${{ matrix.from }} --assets dist --report report
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-upgrade-from-${{ matrix.from }}
+          path: report/
+
+  faults:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: constraints.txt
+      - run: uv pip install --system -r requirements.txt -c constraints.txt
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+          path: dist
+          merge-multiple: true
+      - uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\FTC Whisper\models
+          key: parakeet-${{ hashFiles('asr_engine.py') }}
+      - run: python -c "import sys, asr_engine; sys.exit(0 if asr_engine.download_model() else 1)"
+      - run: python tools/e2e_upgrade.py faults --assets dist --report report
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-faults
+          path: report/
+
+  next:
+    if: ${{ inputs.next_run_id != '' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: constraints.txt
+      - run: uv pip install --system -r requirements.txt -c constraints.txt
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.next_run_id }}
+          github-token: ${{ github.token }}
+          path: dist-next
+          merge-multiple: true
+      - uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\FTC Whisper\models
+          key: parakeet-${{ hashFiles('asr_engine.py') }}
+      - run: python -c "import sys, asr_engine; sys.exit(0 if asr_engine.download_model() else 1)"
+      - run: python tools/e2e_upgrade.py next --assets dist --next-assets dist-next --report report
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-next
+          path: report/
