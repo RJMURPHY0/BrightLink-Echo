@@ -382,4 +382,11 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:
+        import traceback
+        tb = traceback.format_exc()
+        print(tb)
+        annotate("selftest crashed", tb)
+        sys.exit(1)
