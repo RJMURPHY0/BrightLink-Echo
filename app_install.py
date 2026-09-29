@@ -699,7 +699,7 @@ def _spawn_cleanup(dirs: list) -> None:
     try:
         subprocess.Popen(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-             "-WindowStyle", "Hidden", "-File", script_path],
+             "-File", script_path],
             creationflags=flags,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,

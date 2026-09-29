@@ -78,6 +78,35 @@ Don't undo these — each one exists to keep the detection rate down:
   scores against you.
 - **Runs as `asInvoker`**, and the installer is per-user (`PrivilegesRequired=lowest`).
   Nothing ever requests admin.
+- **No `-WindowStyle Hidden` on any PowerShell start (v1.8.0).** The installer's
+  `activate.ps1`, the update swap and the uninstall cleanup are already
+  windowless (`CREATE_NO_WINDOW` / `SW_HIDE`), so the flag did nothing except
+  match the "hidden PowerShell" pattern behaviour shields score. Pinned in
+  `tests/test_av_hardening.py`.
+- **`activate.ps1` is Authenticode-signed** with the same certificate (v1.8.0,
+  best effort: the "Report the activation script's signature" step warns if it
+  was not), so AMSI and AV engines see a publisher-vouched script.
+
+### After every release that changes the installer or the bundle
+
+1. Open the VirusTotal links in the release run's log (the installer, the
+   bridge and the installed exe).
+2. For each engine that flags a file, submit it on that vendor's form (section
+   2). For **Avast/AVG** submit `BrightLink-Echo.exe` *and* the installed
+   `%LOCALAPPDATA%\FTC Whisper\FTC Whisper.exe`: their detections are per file
+   hash, so every release's new bytes start fresh.
+3. Submit the installer to Microsoft (section 2) even when nothing flags it:
+   it builds SmartScreen reputation for the new file faster.
+
+### Not done yet, on purpose
+
+- **Compiling PyInstaller's bootloader from source.** The stock prebuilt
+  bootloader is shared with a lot of malware, so some engines (Avast among
+  them) flag it on sight; a bootloader built in CI has bytes of its own. It
+  also changes the bridge every pre-1.8 client installs, whose exact 6.22.3
+  bootloader is what recovers v1.6.79 installs (`tests/test_pyi_runtime.py`).
+  Do it only with a dry run proven by `migration-e2e.yml` (the v1.6.79 job)
+  before it is published.
 
 ### If a user is still blocked
 

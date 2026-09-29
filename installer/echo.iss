@@ -132,7 +132,9 @@ begin
   end
   else
   begin
-    Params := '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + Script +
+    // No -WindowStyle Hidden: SW_HIDE below already hides the console, and
+    // that flag is one AV behaviour rules score on.
+    Params := '-NoProfile -ExecutionPolicy Bypass -File "' + Script +
               '" -InstallDir "' + ExpandConstant('{app}') + '" -Version {#AppVersion}' +
               ' -Mode Install -KillCopiesElsewhere';
     if not WizardIsTaskSelected('desktopicon') then

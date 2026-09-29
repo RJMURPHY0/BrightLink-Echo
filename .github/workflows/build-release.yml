@@ -240,6 +240,27 @@ jobs:
           timestamp-digest: SHA256
           description: ${{ steps.version.outputs.PRODUCT_NAME }}
 
+      # activate.ps1 is the script the installer and every update run through
+      # PowerShell. Authenticode-signed with the same certificate, AV engines
+      # and AMSI see a script vouched for by the publisher instead of an
+      # anonymous one. Best effort: an unsigned script still works exactly as
+      # before, so a signer that refuses .ps1 must not block a release. Before
+      # the manifest, which then records the signed bytes.
+      - name: Sign activation script
+        if: ${{ steps.signing.outputs.ENABLED == 'true' }}
+        continue-on-error: true
+        uses: azure/artifact-signing-action@v2.0.0
+        with:
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\dist\${{ steps.version.outputs.DIST_DIR }}\app-${{ steps.version.outputs.VERSION }}
+          files-folder-filter: ps1
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: ${{ steps.version.outputs.PRODUCT_NAME }}
+
       # Signing changed the exe's bytes; the manifest must describe the exe
       # that ships, because activate.ps1 refuses anything else.
       - name: Write the installed-layout manifest
@@ -305,6 +326,20 @@ jobs:
             Write-Host "$f  status: $($sig.Status)  signer: $($sig.SignerCertificate.Subject)"
             if ($sig.Status -ne 'Valid') { throw "Signature invalid on ${f}: $($sig.Status)" }
             if ($sig.SignerCertificate.Subject -ne $env:SIGNER) { throw "Signer on ${f} is '$($sig.SignerCertificate.Subject)', not '$env:SIGNER'" }
+          }
+
+      - name: Report the activation script's signature
+        if: ${{ steps.signing.outputs.ENABLED == 'true' }}
+        shell: pwsh
+        env:
+          DIST_DIR: ${{ steps.version.outputs.DIST_DIR }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          SIGNER: ${{ steps.version.outputs.SIGNER }}
+        run: |
+          $sig = Get-AuthenticodeSignature "dist\$env:DIST_DIR\app-$env:VERSION\activate.ps1"
+          Write-Host "activate.ps1  status: $($sig.Status)  signer: $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -ne $env:SIGNER) {
+            Write-Host "::warning title=activate.ps1 unsigned::The activation script is not signed ($($sig.Status)). It still works; AV engines just see an unsigned script."
           }
 
       # ── Prove the packaged app works, installed where users install it ────

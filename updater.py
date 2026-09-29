@@ -471,7 +471,7 @@ def spawn_activation(version: str, pid: int, root: str = "",
     script = os.path.join(root, f"activate-{v}.ps1")
     shutil.copyfile(src, script)
     cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-           "-WindowStyle", "Hidden", "-File", script,
+           "-File", script,
            "-InstallDir", root, "-Version", v, "-Mode", "Update",
            "-WaitPid", str(pid)]
     if launch:
@@ -643,7 +643,6 @@ Log "Done."
         "powershell",
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
-        "-WindowStyle", "Hidden",
         "-File", ps_file,
     ]
     # NEVER combine DETACHED_PROCESS with CREATE_NO_WINDOW: they are conflicting
