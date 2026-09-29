@@ -68,7 +68,7 @@ speak, and your words land where your cursor is: email, chat, documents, the
 browser.
 
 Speech recognition runs on your own computer, so it is fast, works offline
-and your voice never leaves your machine.
+and your voice stays on your machine unless you choose otherwise.
 
 - Punctuation, paragraphs and spoken lists laid out for you
 - Custom vocabulary for names and terms the app should always get right
@@ -76,8 +76,9 @@ and your voice never leaves your machine.
 - Refine: tidy, shorten or rewrite selected text with one key (Alt+R)
 - History of every dictation, with playback
 
-Signing in is optional. With a BrightLink account your history, vocabulary
-and snippets follow you between computers.
+Signing in is optional. Turn on Cloud Sync (off by default) and your
+history, recordings, vocabulary, snippets and preferences follow you between
+computers; turn it off and delete what is stored at any time.
 
 ### Notes for certification
 

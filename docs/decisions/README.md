@@ -15,6 +15,7 @@ Record a new decision as a dated entry at the bottom of the matching area file. 
 - [`audio-capture-hotkeys.md`](audio-capture-hotkeys.md): Warm mic, mic selection, start cue, hotkey capture and fallback.
 - [`injection-clipboard.md`](injection-clipboard.md): Focus capture, clipboard restore, Live Typing, line breaks.
 - [`reliability-telemetry.md`](reliability-telemetry.md): Fleet telemetry, memory guard, dead audio stack, hot-path costs.
+- [`cloud-sync.md`](cloud-sync.md): Opt-in Cloud Sync (off by default): what syncs, merge rules, delete-my-data, what stays outside it.
 - [`invariants.md`](invariants.md): the key invariants list, verbatim. Each item encodes a shipped bug.
 - [`architecture-notes.md`](architecture-notes.md): threading, Parakeet path, Live Typing, injection, popup, hotkeys, update flow, config.
 - [`claude-md-archive.md`](claude-md-archive.md): lines of the old CLAUDE.md that were rewritten, kept verbatim.

@@ -49,6 +49,7 @@ Decisions history lives in `docs/decisions/` (index: `docs/decisions/README.md`)
 - `audio-capture-hotkeys`: Warm mic, mic selection, start cue, hotkey capture and fallback.
 - `injection-clipboard`: Focus capture, clipboard restore, Live Typing, line breaks.
 - `reliability-telemetry`: Fleet telemetry, memory guard, dead audio stack, hot-path costs.
+- `cloud-sync`: Opt-in Cloud Sync (off by default): what syncs, merge rules, delete-my-data, what stays outside it.
 - `invariants`: every invariant encodes a shipped bug. Never trim the list.
 - `architecture-notes`: threading, Parakeet path, Live Typing, injection, popup, hotkeys, update flow, config.
 

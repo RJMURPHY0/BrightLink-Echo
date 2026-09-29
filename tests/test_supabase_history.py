@@ -127,6 +127,7 @@ class SupabaseHistoryTests(unittest.TestCase):
 
     def test_log_uses_one_timestamp_for_local_and_remote(self):
         logger = supabase_client.SupabaseLogger("https://example.test", "key")
+        logger.set_sync_enabled(True)  # pins the Cloud Sync (opt-in) path
         logger.set_user("user-a")
         payloads = []
         logger._run = lambda payload: payloads.append(dict(payload))
@@ -143,6 +144,7 @@ class SupabaseHistoryTests(unittest.TestCase):
 
     def test_refinement_payload_accepts_app_metadata(self):
         logger = supabase_client.SupabaseLogger("https://example.test", "key")
+        logger.set_sync_enabled(True)  # pins the Cloud Sync (opt-in) path
         logger.set_user("user-a")
         payloads = []
         logger._run = lambda payload: payloads.append(dict(payload))
@@ -160,6 +162,7 @@ class SupabaseHistoryTests(unittest.TestCase):
         client = _FakeClient()
         client.insert_errors.append(RuntimeError("temporary network timeout"))
         logger = supabase_client.SupabaseLogger("https://example.test", "key")
+        logger.set_sync_enabled(True)  # pins the Cloud Sync (opt-in) path
         logger.set_client(client)
         payload = {
             "transcribed_text": "hello",
@@ -178,6 +181,7 @@ class SupabaseHistoryTests(unittest.TestCase):
     def test_confirmed_legacy_insert_retries_without_app_metadata(self):
         client = _FakeClient(reject_app_inserts=True)
         logger = supabase_client.SupabaseLogger("https://example.test", "key")
+        logger.set_sync_enabled(True)  # pins the Cloud Sync (opt-in) path
         logger.set_client(client)
 
         logger._insert({
@@ -195,6 +199,7 @@ class SupabaseHistoryTests(unittest.TestCase):
         client = _FakeClient()
         client.select_errors.append(RuntimeError("temporary gateway failure"))
         logger = supabase_client.SupabaseLogger("https://example.test", "key")
+        logger.set_sync_enabled(True)  # pins the Cloud Sync (opt-in) path
         logger.set_client(client)
         logger.set_user("user-a")
 
@@ -252,6 +257,7 @@ class SupabaseHistoryTests(unittest.TestCase):
             },
         ])
         logger = supabase_client.SupabaseLogger("https://example.test", "key")
+        logger.set_sync_enabled(True)  # pins the Cloud Sync (opt-in) path
         logger.set_client(client)
         logger.set_user("user-a")
         refreshed = []
@@ -282,6 +288,7 @@ class SupabaseHistoryTests(unittest.TestCase):
     def test_successful_legacy_select_shape_is_reused(self):
         client = _FakeClient(reject_app_selects=True)
         logger = supabase_client.SupabaseLogger("https://example.test", "key")
+        logger.set_sync_enabled(True)  # pins the Cloud Sync (opt-in) path
         logger.set_client(client)
         logger.set_user("user-a")
 
@@ -358,6 +365,7 @@ class SupabaseHistoryTests(unittest.TestCase):
             "app_exe": "claude.exe",
         }])
         logger = supabase_client.SupabaseLogger("https://example.test", "key")
+        logger.set_sync_enabled(True)  # pins the Cloud Sync (opt-in) path
         logger.set_client(client)
         logger.set_user("user-a")
         snapshots = []

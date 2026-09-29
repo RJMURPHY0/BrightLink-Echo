@@ -2159,6 +2159,7 @@ class AppWindow:
     ):
         self._version                 = version
         self._voice_trainer           = voice_trainer
+        self._cloud_sync              = None   # set_cloud_sync, after build
         self._auth                    = auth
         self._on_authenticated        = on_authenticated
         self._on_sign_out             = on_sign_out
@@ -9053,11 +9054,15 @@ class AppWindow:
         if _cur_end not in _END_LABELS:
             _cur_end = "smart"
         _end_var = tk.StringVar(value=_END_LABELS[_cur_end])
+        # Cloud Sync moves this when the choice was made on another PC.
+        self._end_punct_var, self._end_punct_labels = _end_var, _END_LABELS
         _end_menu = Dropdown(_end_card, _end_var, list(_END_LABELS.values()),
                              bg=C["surface_hover"], font=("Segoe UI", 9))
         _end_menu.pack(fill="x", pady=(6, 0))
 
         def _on_end_change(*_a):
+            if getattr(self, "_reflecting", False):
+                return      # set by Cloud Sync, not by the user
             if self._on_settings_change:
                 self._on_settings_change(
                     "end_punctuation",
@@ -9204,6 +9209,8 @@ class AppWindow:
             lambda _e: self._settings_auth_btn.configure(
                 fg=C["error"] if self._auth.user_email else C["accent"]))
 
+        self._build_cloud_sync_card(parent)
+
         # Voice Training used to sit here, under Account. It now closes the
         # Learning tab (_build_voice_training), which is where everything the
         # app knows about the user's voice already lives.
@@ -9344,6 +9351,203 @@ class AppWindow:
         try:
             lbl.pack(fill="x", padx=22, pady=(24, 8))
         except tk.TclError:
+            pass
+
+    # ── Cloud Sync ───────────────────────────────────────────────────────────
+
+    _CLOUD_SYNC_TITLE = "Cloud Sync"
+    _CLOUD_SYNC_DESC = ("Keeps your history, recordings, words and settings on "
+                        "every PC you sign in to.")
+
+    def set_cloud_sync(self, cloud_sync) -> None:
+        self._cloud_sync = cloud_sync
+
+    def _build_cloud_sync_card(self, parent: tk.Frame) -> None:
+        """Opt-in Cloud Sync, under Account. OFF by default on every PC.
+
+        One switch, one line of status that always says in plain words what
+        is and is not leaving this PC, and — whenever it is off and someone is
+        signed in — a way to delete what is already in the cloud, behind a
+        confirm. Turning it off offers that straight away."""
+        cfg = self._config
+        card = self._card(parent, margin=(0, 4))
+        row = tk.Frame(card, bg=C["surface"])
+        row.pack(fill="x")
+        self._card_glyph(row, "update")
+        self._cloud_pill = TogglePill(
+            row, value=bool(getattr(cfg, "cloud_sync", False)) if cfg else False,
+            bg=C["surface"], command=self._on_cloud_sync_toggle)
+        self._cloud_pill.pack(side="right")
+        col = tk.Frame(row, bg=C["surface"])
+        col.pack(side="left", fill="x", expand=True)
+        tk.Label(col, text=self._CLOUD_SYNC_TITLE, fg=C["text"],
+                 bg=C["surface"], font=("Segoe UI", 9),
+                 anchor="w").pack(anchor="w")
+        desc = tk.Label(col, text=self._CLOUD_SYNC_DESC, fg=C["subtext"],
+                        bg=C["surface"], font=("Segoe UI", 8), anchor="w",
+                        justify="left", wraplength=260)
+        desc.pack(fill="x")
+        self._autowrap(desc)
+        self._register_search_setting(self._CLOUD_SYNC_TITLE,
+                                      self._CLOUD_SYNC_DESC,
+                                      "cloud sync backup devices history")
+
+        self._cloud_status = tk.Label(card, text="", fg=C["subtext"],
+                                      bg=C["surface"], font=("Segoe UI", 8),
+                                      anchor="w", justify="left")
+        self._cloud_status.pack(fill="x", pady=(8, 0))
+        self._autowrap(self._cloud_status)
+
+        # Delete-from-cloud: a link, then an inline confirm in its place.
+        self._cloud_del_row = tk.Frame(card, bg=C["surface"])
+        self._cloud_del_link = tk.Label(
+            self._cloud_del_row, text="Delete my data from the cloud",
+            fg=C["error"], bg=C["surface"], font=("Segoe UI", 8),
+            cursor="hand2", anchor="w")
+        self._cloud_del_link.pack(anchor="w")
+        self._cloud_del_link.bind("<Button-1>",
+                                  lambda _e: self._cloud_confirm_delete())
+        self._cloud_confirm = tk.Frame(card, bg=C["surface"])
+        msg = tk.Label(
+            self._cloud_confirm,
+            text=("Delete everything Echo keeps in your BrightLink account: "
+                  "history, recordings, words, phrases and settings. This PC "
+                  "keeps its own copy. This can't be undone."),
+            fg=C["text"], bg=C["surface"], font=("Segoe UI", 8),
+            anchor="w", justify="left")
+        msg.pack(fill="x")
+        self._autowrap(msg)
+        btns = tk.Frame(self._cloud_confirm, bg=C["surface"])
+        btns.pack(fill="x", pady=(6, 0))
+        self._surface_btn(btns, "Cancel", self._cloud_cancel_delete,
+                          font=("Segoe UI", 9), padx=12, pady=5).pack(side="right")
+        self._surface_btn(btns, "Yes, delete it", self._cloud_do_delete,
+                          fg=C["bg"], fill=C["error"], font=("Segoe UI", 9, "bold"),
+                          padx=12, pady=5).pack(side="right", padx=(0, 8))
+
+        cs = getattr(self, "_cloud_sync", None)
+        if cs is not None:
+            text, kind = cs.last_status
+            if text:
+                self._apply_cloud_status(text, kind)
+            else:
+                cs.refresh_status()
+        self._cloud_update_delete_row()
+
+    def _signed_in(self) -> bool:
+        return bool(getattr(self._auth, "user_email", "") or "")
+
+    def _cloud_update_delete_row(self) -> None:
+        """The delete link shows while sync is off and someone is signed in
+        (their earlier data may still be up there, synced before v1.8.0)."""
+        row = getattr(self, "_cloud_del_row", None)
+        if row is None:
+            return
+        pill = getattr(self, "_cloud_pill", None)
+        on = bool(pill.get()) if pill is not None else False
+        # A flag, not winfo_ismapped(): the confirm is packed in the same
+        # event, before Tk has mapped it, so ismapped still reads False.
+        confirming = getattr(self, "_cloud_confirming", False)
+        if not on and self._signed_in() and not confirming:
+            row.pack(fill="x", pady=(6, 0))
+        else:
+            row.pack_forget()
+
+    def _on_cloud_sync_toggle(self, value: bool) -> None:
+        if self._on_settings_change:
+            self._on_settings_change("cloud_sync", bool(value))
+        if value:
+            self._cloud_cancel_delete()
+            self._apply_cloud_status(
+                "Syncing…" if self._signed_in()
+                else "Sign in to sync with your other PCs.",
+                "busy" if self._signed_in() else "signed_out")
+        else:
+            self._apply_cloud_status(
+                "Off. Nothing you dictate leaves this PC.", "off")
+            # Turning it off is exactly when someone wants to be asked about
+            # what is already up there.
+            if self._signed_in():
+                self._cloud_confirm_delete()
+        self._cloud_update_delete_row()
+
+    def _cloud_confirm_delete(self) -> None:
+        self._cloud_confirming = True
+        self._cloud_del_row.pack_forget()
+        self._cloud_confirm.pack(fill="x", pady=(8, 0))
+
+    def _cloud_cancel_delete(self) -> None:
+        self._cloud_confirming = False
+        conf = getattr(self, "_cloud_confirm", None)
+        if conf is not None:
+            conf.pack_forget()
+        self._cloud_update_delete_row()
+
+    def _cloud_do_delete(self) -> None:
+        cs = getattr(self, "_cloud_sync", None)
+        self._cloud_confirming = False
+        self._cloud_confirm.pack_forget()
+        if cs is None:
+            return
+        self._apply_cloud_status("Deleting your data from the cloud…", "busy")
+
+        def _done(ok: bool, detail: dict):
+            if ok:
+                text = "Deleted from the cloud. This PC still has its own copy."
+            else:
+                failed = [k for k, v in (detail or {}).items() if not v]
+                text = ("Some of it could not be deleted"
+                        + (f" ({', '.join(failed)})" if failed else "")
+                        + ". Try again in a moment.")
+            self.set_cloud_sync_status(text, "ok" if ok else "error")
+            if self._root:
+                self._root.after(0, self._cloud_update_delete_row)
+        cs.delete_cloud_data(_done)
+
+    def set_cloud_sync_status(self, text: str, kind: str) -> None:
+        """Thread-safe: CloudSync reports from its worker thread."""
+        if not self._root:
+            return
+        try:
+            self._root.after(0, lambda: self._apply_cloud_status(text, kind))
+        except Exception:
+            pass
+
+    def _apply_cloud_status(self, text: str, kind: str) -> None:
+        lbl = getattr(self, "_cloud_status", None)
+        if lbl is None:
+            return
+        color = {"ok": C["success"], "error": C["error"]}.get(kind, C["subtext"])
+        try:
+            lbl.configure(text=text, fg=color)
+        except tk.TclError:
+            pass
+
+    def reflect_setting(self, key: str, value) -> None:
+        """Show a preference Cloud Sync just brought from another PC.
+        Thread-safe. Moves the control without re-firing its handler."""
+        if not self._root:
+            return
+
+        def _apply():
+            pill = (getattr(self, "_setting_pills", None) or {}).get(key)
+            if pill is not None:
+                try:
+                    pill.set(bool(value))
+                except tk.TclError:
+                    pass
+            if key == "end_punctuation":
+                var = getattr(self, "_end_punct_var", None)
+                labels = getattr(self, "_end_punct_labels", None) or {}
+                if var is not None and value in labels:
+                    self._reflecting = True
+                    try:
+                        var.set(labels[value])
+                    finally:
+                        self._reflecting = False
+        try:
+            self._root.after(0, _apply)
+        except Exception:
             pass
 
     # ── Voice training ───────────────────────────────────────────────────────
@@ -10511,6 +10715,8 @@ class AppWindow:
         if hasattr(self, "_sign_btn"):
             self._sign_btn.configure(text=action_text)
         self._refresh_spacing_btn()
+        if hasattr(self, "_cloud_del_row"):
+            self._cloud_update_delete_row()
         if hasattr(self, "_settings_auth_btn"):
             self._settings_auth_btn.configure(
                 text=action_text, fg=C["error"] if signed_in else C["accent"])
