@@ -9069,6 +9069,10 @@ class AppWindow:
         _toggle_card("auto_lists", "Auto Lists",
                      "Lays spoken lists out as numbered or bulleted lines.",
                      True, icon="punct")
+        _toggle_card("homophone_fix", "Fix Sound-Alike Words",
+                     "Picks won or one, there or their, from the rest of the "
+                     "sentence.",
+                     True, icon="punct")
         _toggle_card("email_format", "Format Emails",
                      "In email apps, puts the greeting and sign-off on their "
                      "own lines.",

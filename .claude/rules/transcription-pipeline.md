@@ -1,5 +1,5 @@
 ---
-paths: ["asr_engine.py", "transcriber.py", "hallucination.py", "disfluency.py", "stream_session.py", "phrase_learning.py", "vocab_store.py", "ai_refiner.py", "spoken_commands.py", "sentence_end.py", "list_format.py", "email_format.py"]
+paths: ["asr_engine.py", "transcriber.py", "hallucination.py", "disfluency.py", "stream_session.py", "phrase_learning.py", "vocab_store.py", "ai_refiner.py", "spoken_commands.py", "sentence_end.py", "list_format.py", "email_format.py", "homophones.py"]
 ---
 # Transcription pipeline
 
@@ -18,3 +18,4 @@ Full history: docs/decisions/accuracy-vocabulary.md and docs/decisions/text-form
 - **A term list may only reach a DECODER PROMPT if a human reviewed it.** `_get_prompt_hotwords()` (whisper) carries the user's own vocabulary only; `_get_hotwords()` (Parakeet, casing-only post-pass) may carry the managed/CRM set. Never merge the two back together: faster-whisper puts `hotwords` in the same token slot as previous-transcript context, so anything in that list can be emitted as speech nobody said. A wrong correction mangles a word the user did say; a wrong prompt invents a sentence they did not
 - `hallucination.clean()` must stay INSIDE both engines' `_post_process`, never at a call site — that is the only point every path (batch, streaming chunk, live caption, upgrade pass) goes through. Its thresholds are load-bearing in both directions: raising `_MIN_RUN`/`_PURE_RUN` lets decoder loops through, lowering them rewrites real emphatic speech. Periodicity is found token-by-token, never unit-by-unit (a unit-aligned scan locks onto a shifted phase and strands a dangling fragment)
 - The `_transcribe_lock` in `Transcriber`/`ParakeetTranscriber` serialises all transcription calls on a single model instance — do not call `transcribe()` concurrently on the same object
+- `homophones.fix()` runs once on the ASSEMBLED dictation in app.py (after destutter, before spoken commands), never inside an engine and never under Live Typing. Every rule needs context on BOTH sides of the word and only spaces between the words of a shape. Adding or widening a rule means adding its legitimate readings as must-not-fire cases in `tests/test_homophones.py` and re-running a large prose corpus: a wrong correction changes what the user said.

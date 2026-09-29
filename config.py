@@ -148,10 +148,11 @@ class Config:
     end_punctuation: str = "smart"  # Full stop at the end of a dictation: "smart" (only when the utterance reads finished — see sentence_end), "always" (the pre-1.6.75 behaviour), "never"
     live_captions: bool = False   # Show live text of what you're saying (replaces the waveform bar while recording)
     live_inject: bool = False     # Type words into the app live as you speak (Parakeet mode); corrects at hotkey-release
+    homophone_fix: bool = True  # Pick the right spelling of a sound-alike word from the words around it ("Revenue one this quarter" -> "won", "their is" -> "there is"). Local and instant; runs before injection. Off during Live Typing either way
     auto_lists: bool = True  # Lay out a clearly enumerated dictation as a real list: "first … second …" becomes 1. 2., an announced comma series becomes bullets. Off during Live Typing either way
     email_format: bool = True  # In an email client (Outlook, Windows Mail, Thunderbird, Gmail or Outlook in a browser), put the greeting, the sign-off and the name after it on their own lines. Off during Live Typing either way
     auto_paragraphs: bool = True  # Paragraph break after a clear pause (2s+ silence following a finished sentence); Parakeet path, off during Live Typing
-    parakeet_version: str = "v2"  # Parakeet model: "v2" (English) or "v3" (multilingual, lower WER); switching triggers a one-time ~660 MB download
+    parakeet_version: str = "v2"  # Parakeet model: "v2" (English; the more accurate for English, 6.05% vs 6.34% avg WER) or "v3" (multilingual); switching triggers a one-time ~660 MB download. v2 is pinned to an exact commit and SHA-256 per file
     show_popup: bool = True  # Show the cursor-icon popup (Insert/Replace/Upgrade) after each dictation; off = text is injected silently with no popup
     popup_height: str = "low"  # Vertical position of the popup: "low" (near the taskbar, default — out of the way of chatbot input boxes), "medium" (mid-screen), or "high" (near the top, above a chatbot window)
     popup_offset: int = 30  # Fine-nudge (px) that lifts the fixed popup ABOVE its popup_height baseline, so the pill clears the taskbar by default; the ▴▾ arrows on the recording pill adjust it live and it sticks. 0 = hug the baseline, NEGATIVE = pushed down into the taskbar strip (clamped to the monitor edge, not the work area)

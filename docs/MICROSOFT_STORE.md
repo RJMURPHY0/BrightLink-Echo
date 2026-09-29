@@ -28,7 +28,7 @@ From the live policy (updated 2026-09-15):
 ## Partner Center values
 
 - **App type**: EXE or MSI app
-- **Package URL**: `https://github.com/RJMURPHY0/BrightLink-Echo/releases/download/v1.7.1/BrightLink-Echo.exe`
+- **Package URL**: `https://github.com/RJMURPHY0/BrightLink-Echo/releases/download/v1.7.2/BrightLink-Echo.exe`
 - **Installer parameters / silent switch**: `--install /S`
 - **Architecture**: x64. **Language**: English (United Kingdom)
 - **Category**: Productivity

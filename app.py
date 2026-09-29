@@ -50,6 +50,7 @@ from config import Config
 # so first paint is near-instant; _core_ready gates everything that needs them.
 from spoken_commands import apply_spoken_commands
 from disfluency import destutter
+import homophones
 from list_format import format_lists
 from email_format import format_email, format_signoff, is_email_app
 import sentence_end
@@ -63,7 +64,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
 
 
 class _RECT(ctypes.Structure):
@@ -459,27 +460,75 @@ class WhisperFlowApp:
         rec = self.recorder
         return rec.get_input_devices() if rec is not None else []
 
+    # Waits between Parakeet download attempts, then _PARAKEET_RETRY_EVERY_S
+    # for as long as the app runs. One attempt per launch was the old rule: a
+    # PC whose single first-run attempt failed (seen 2026-09-29: an empty
+    # model folder, no .part file) ran the whole day on whisper small.en,
+    # which rewrote "make sure the folder name isn't FTC Whisper" as "…is an
+    # FTC whisper", with nothing on screen or in telemetry to say so.
+    _PARAKEET_RETRY_WAITS_S = (30, 120, 600)
+    _PARAKEET_RETRY_EVERY_S = 1800
+
+    def _download_parakeet_with_retry(self, version: str) -> bool:
+        from asr_engine import download_model, model_files_present
+        last_pct = [-10]
+
+        def _progress(frac: float, msg: str) -> None:
+            pct = int(frac * 100)
+            if pct - last_pct[0] >= 10:
+                last_pct[0] = pct
+                print(f"[App] {msg} ({pct}%)")
+
+        attempt = 0
+        while True:
+            attempt += 1
+            last_pct[0] = -10
+            errors: list = []
+            if download_model(progress=_progress, version=version,
+                              error_out=errors):
+                if attempt > 1:
+                    self._log_error_event("parakeet_download_recovered",
+                                          {"attempt": attempt})
+                return True
+            if model_files_present(version=version):
+                return True
+            # Every failed attempt up to the third is reported; after that the
+            # retries are quiet so one offline PC cannot flood the log.
+            if attempt <= 3:
+                self._log_error_event("parakeet_download_failed", {
+                    "attempt": attempt,
+                    "error": errors[0] if errors else "",
+                })
+            waits = self._PARAKEET_RETRY_WAITS_S
+            wait = (waits[attempt - 1] if attempt <= len(waits)
+                    else self._PARAKEET_RETRY_EVERY_S)
+            print(f"[App] Parakeet download failed (attempt {attempt}) — "
+                  f"whisper stays in charge; retrying in {wait}s")
+            time.sleep(wait)
+            if not getattr(self.config, "use_parakeet", True):
+                return False
+
     def _init_parakeet(self) -> None:
         """Download (first run only) and load the Parakeet engine. Any failure
-        leaves the whisper pipeline in charge — strictly additive."""
+        leaves the whisper pipeline in charge — strictly additive. A failed
+        download is retried in the background for the life of the process, and
+        the engine takes over from the next dictation once it loads."""
         try:
-            from asr_engine import model_files_present, download_model
+            from asr_engine import model_files_present, verify_model_files
             if not getattr(self.config, "use_parakeet", True):
                 print("[App] Parakeet disabled in config — whisper pipeline only.")
                 return
             _ver = getattr(self.config, "parakeet_version", "v2")
-            if not model_files_present(version=_ver):
-                print(f"[App] Parakeet model ({_ver}) not found — downloading (~660 MB, one-time)…")
-                last_pct = [-10]
-
-                def _progress(frac: float, msg: str) -> None:
-                    pct = int(frac * 100)
-                    if pct - last_pct[0] >= 10:
-                        last_pct[0] = pct
-                        print(f"[App] {msg} ({pct}%)")
-
-                if not download_model(progress=_progress, version=_ver):
+            # Presence is a size check; verify_model_files reads the bytes
+            # (once per file, then trusts a size+mtime marker) and deletes a
+            # file that is not the pinned model, so the download replaces it.
+            if not (model_files_present(version=_ver)
+                    and verify_model_files(version=_ver)):
+                print(f"[App] Parakeet model ({_ver}) missing or not the pinned "
+                      f"build — downloading (~660 MB, one-time)…")
+                if not self._download_parakeet_with_retry(_ver):
                     return
+                verify_model_files(version=_ver)
             self.parakeet.load_model()
             if self.parakeet.is_loaded:
                 print("[App] Parakeet engine active — near-instant transcription enabled.")
@@ -506,6 +555,17 @@ class WhisperFlowApp:
             model = getattr(self.config, "whisper_model", "") or ""
         return {"engine": engine, "model": model, "language": lang,
                 "app_version": APP_VERSION}
+
+    def _fix_homophones(self, text: str, source: str) -> str:
+        """homophones.fix behind its kill switch. Never raises: a failure here
+        must cost the correction, not the dictation."""
+        if not text or not getattr(self.config, "homophone_fix", True):
+            return text
+        try:
+            return homophones.fix(text, source=source)
+        except Exception as e:
+            print(f"[App] Sound-alike fix failed (non-fatal): {e}")
+            return text
 
     def _fast_engine(self):
         """Engine used for immediate/injection transcription."""
@@ -538,7 +598,7 @@ class WhisperFlowApp:
                     audio, rate, hotwords_str=prompt_hw).strip())
             except Exception as e:
                 print(f"[App] Retry whisper pass failed: {e}")
-        candidates = [c for c in candidates if c]
+        candidates = [self._fix_homophones(c, "retry") for c in candidates if c]
         if not candidates:
             return ""
 
@@ -937,6 +997,7 @@ class WhisperFlowApp:
 
             hallucination.set_reporter(_report)
             disfluency.set_reporter(_report)
+            homophones.set_reporter(_report)
         except Exception as e:
             print(f"[App] hallucination reporter wiring failed (non-fatal): {e}")
 
@@ -1663,6 +1724,17 @@ class WhisperFlowApp:
             if _ds != transcribed_text:
                 transcribed_text = _ds
 
+        # Sound-alike words picked from the rest of the sentence ("Revenue one
+        # this quarter" -> "won"). Over the WHOLE dictation, so a shape that
+        # straddles a streamed chunk join is still seen, and before spoken
+        # commands so every later pass works on the corrected words. Skipped
+        # under Live Typing for the same reason as destutter.
+        if transcribed_text and not getattr(self.config, "live_inject", False):
+            _hf = self._fix_homophones(transcribed_text, "assembled")
+            if _hf != transcribed_text:
+                print(f"[App] Sound-alike fix: '{transcribed_text}' -> '{_hf}'")
+                transcribed_text = _hf
+
         # Spoken symbol commands: "slash settings" -> "/settings". Applied once
         # here so injection, the popup, history logging, the upgrade passes and
         # the live-typing reconcile all see the same converted text.
@@ -2051,6 +2123,9 @@ class WhisperFlowApp:
                     if not accurate:
                         self.popup.clear_upgrading(session=_seq)
                         return
+                    # Same sound-alike fix as the injected text, or the
+                    # upgrade would offer "one" back in place of "won".
+                    accurate = self._fix_homophones(accurate, "upgrade")
                     # Same spoken-symbol conversion as the injected text — the
                     # upgrade must not undo "/settings" back into "slash settings".
                     if getattr(self.config, "spoken_punctuation", True):

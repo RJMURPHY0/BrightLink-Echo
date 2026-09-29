@@ -20,6 +20,7 @@ import brand
 import os
 import re
 import threading
+import urllib.error
 import urllib.request
 from typing import Callable, Optional
 
@@ -31,18 +32,46 @@ import sentence_end
 
 _MODEL_SAMPLE_RATE = 16000
 
-# Model version: "v2" (English, shipped default) or "v3" (multilingual, lower
-# WER on the Open ASR leaderboard). Same file layout on the istupakov HF repos,
-# and onnx-asr >= 0.11 knows both names natively.
+# Model version: "v2" (English, shipped default) or "v3" (multilingual). For
+# English v2 is the more accurate of the two: 6.05% average WER on the Open ASR
+# leaderboard against v3's 6.34% (both model cards, checked 2026-09-29); v3
+# trades some English accuracy for 25 languages. Same file layout on the
+# istupakov HF repos, and onnx-asr >= 0.11 knows both names natively.
 DEFAULT_MODEL_VERSION = "v2"
+
+# Every install must run the SAME model. "resolve/main" is whatever the repo
+# owner last pushed, so the shipped version is pinned to a commit and each file
+# to its size and SHA-256 (from the HF API, and matching a working install
+# byte for byte on 2026-09-29). The model files in this commit are unchanged
+# since the 2025-05-06 upload; the newest commit only edited the README.
+_PINNED_REVISION = {"v2": "0bbb45a3365852604aef28b538a8f066f4ccaa85"}
+_PINNED_FILES = {
+    "v2": {
+        "encoder-model.int8.onnx": (
+            652_184_014,
+            "3e0581fda6ab843888b51e56d7ee78b6d5bc3237ec113af1f732d1d5286aa155"),
+        "decoder_joint-model.int8.onnx": (
+            8_998_286,
+            "a449f49acd68979d418651dd2dcb737cc0f1bf0225e009e29ee326354edbf7d3"),
+        "vocab.txt": (
+            9_384,
+            "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d"),
+        "config.json": (
+            97,
+            "666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466"),
+    },
+}
+_VERIFIED_MARKER = ".verified.json"
 
 
 def _hf_base(version: str = DEFAULT_MODEL_VERSION) -> str:
+    rev = _PINNED_REVISION.get(version, "main")
     return (f"https://huggingface.co/istupakov/parakeet-tdt-0.6b-{version}-onnx"
-            "/resolve/main")
+            f"/resolve/{rev}")
 
 
-# name -> (url path, minimum sane size in bytes)
+# name -> minimum sane size in bytes. A pinned version checks the exact size
+# instead; this floor only applies to an unpinned one (v3).
 _MODEL_FILES = {
     "encoder-model.int8.onnx": 600_000_000,
     "decoder_joint-model.int8.onnx": 5_000_000,
@@ -59,61 +88,170 @@ def models_dir(version: str = DEFAULT_MODEL_VERSION) -> str:
                         f"parakeet-tdt-0.6b-{version}-onnx")
 
 
+def _size_ok(path: str, name: str, version: str) -> bool:
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return False
+    pinned = _PINNED_FILES.get(version, {}).get(name)
+    return size == pinned[0] if pinned else size >= _MODEL_FILES[name]
+
+
 def model_files_present(directory: Optional[str] = None,
                         version: str = DEFAULT_MODEL_VERSION) -> bool:
+    """Cheap presence check (sizes only). verify_model_files() is the one that
+    reads the bytes."""
     d = directory or models_dir(version)
-    for name, min_size in _MODEL_FILES.items():
+    return all(_size_ok(os.path.join(d, name), name, version)
+               for name in _MODEL_FILES)
+
+
+def _sha256(path: str) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def verify_model_files(directory: Optional[str] = None,
+                       version: str = DEFAULT_MODEL_VERSION) -> bool:
+    """True when every file of a pinned version matches its SHA-256.
+
+    A file that does not match is DELETED, so the next download_model()
+    fetches it again rather than loading a model that is not the one this
+    build was tested with. Hashing 650 MB takes about a second, so a file that
+    passed is recorded in a marker keyed on its size and mtime and not read
+    again until it changes. An unpinned version has nothing to compare
+    against and passes on presence alone."""
+    import json
+    d = directory or models_dir(version)
+    pinned = _PINNED_FILES.get(version)
+    if not pinned:
+        return model_files_present(d, version)
+    marker_path = os.path.join(d, _VERIFIED_MARKER)
+    try:
+        with open(marker_path, encoding="utf-8") as f:
+            marker = json.load(f)
+    except (OSError, ValueError):
+        marker = {}
+    ok, changed = True, False
+    for name, (size, digest) in pinned.items():
         p = os.path.join(d, name)
         try:
-            if os.path.getsize(p) < min_size:
-                return False
+            st = os.stat(p)
         except OSError:
-            return False
-    return True
+            ok = False
+            continue
+        stamp = [st.st_size, st.st_mtime_ns, digest]
+        if marker.get(name) == stamp:
+            continue
+        if st.st_size == size and _sha256(p) == digest:
+            marker[name] = stamp
+            changed = True
+            continue
+        print(f"[ParakeetEngine] {name} does not match the pinned model — "
+              f"removing it so it is downloaded again")
+        marker.pop(name, None)
+        changed = True
+        ok = False
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    if changed:
+        try:
+            with open(marker_path, "w", encoding="utf-8") as f:
+                json.dump(marker, f)
+        except OSError:
+            pass
+    return ok
 
 
 def download_model(
     progress: Optional[Callable[[float, str], None]] = None,
     directory: Optional[str] = None,
     version: str = DEFAULT_MODEL_VERSION,
+    error_out: Optional[list] = None,
 ) -> bool:
     """Download the Parakeet model files. Returns True on success.
 
     progress(fraction 0..1, message) is called from the downloading thread.
+    error_out, when given, receives the failure's text so the caller can
+    report why the engine is missing.
     Partial downloads go to .part files and are atomically renamed, so an
     interrupted download never leaves a truncated file that passes the
-    size check.
+    size check. A .part left by an interrupted attempt is RESUMED with an
+    HTTP Range request, so a flaky connection makes progress across retries
+    instead of restarting 650 MB each time. A pinned file is only renamed into
+    place once its SHA-256 matches; a mismatch discards it.
     """
     d = directory or models_dir(version)
     os.makedirs(d, exist_ok=True)
+    pinned = _PINNED_FILES.get(version, {})
     done_bytes = 0
     try:
-        for name, min_size in _MODEL_FILES.items():
+        for name in _MODEL_FILES:
             dest = os.path.join(d, name)
-            if os.path.exists(dest) and os.path.getsize(dest) >= min_size:
+            if _size_ok(dest, name, version):
                 done_bytes += os.path.getsize(dest)
                 continue
             tmp = dest + ".part"
+            have = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+            want = pinned[name][0] if name in pinned else 0
+            if want and have > want:
+                have = 0  # a .part longer than the file is junk
+            headers = {"User-Agent": brand.HTTP_USER_AGENT}
+            if have and (not want or have < want):
+                headers["Range"] = f"bytes={have}-"
             url = f"{_hf_base(version)}/{name}"
-            req = urllib.request.Request(url, headers={"User-Agent": brand.HTTP_USER_AGENT})
-            with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as f:
-                while True:
-                    chunk = resp.read(1024 * 512)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    done_bytes += len(chunk)
-                    if progress:
-                        frac = min(0.99, done_bytes / _TOTAL_DOWNLOAD_BYTES)
-                        progress(frac, f"Downloading speech model… {done_bytes // 1_000_000} MB")
-            if os.path.getsize(tmp) < min_size:
-                raise IOError(f"{name} download truncated ({os.path.getsize(tmp)} bytes)")
+            req = urllib.request.Request(url, headers=headers)
+            if want and have == want:
+                pass  # finished last time, only the hash check was pending
+            else:
+                try:
+                    resp_cm = urllib.request.urlopen(req, timeout=60)
+                except urllib.error.HTTPError as e:
+                    if e.code == 416 and have:
+                        # The server will not resume this .part: drop it so
+                        # the next attempt starts clean instead of failing
+                        # the same way forever.
+                        os.remove(tmp)
+                    raise
+                with resp_cm as resp:
+                    # 206 = the server honoured the Range; anything else is
+                    # the whole file, so start the .part again.
+                    resumed = have and getattr(resp, "status", 200) == 206
+                    if resumed:
+                        done_bytes += have
+                    with open(tmp, "ab" if resumed else "wb") as f:
+                        while True:
+                            chunk = resp.read(1024 * 512)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            done_bytes += len(chunk)
+                            if progress:
+                                frac = min(0.99, done_bytes / _TOTAL_DOWNLOAD_BYTES)
+                                progress(frac, f"Downloading speech model… {done_bytes // 1_000_000} MB")
+            got = os.path.getsize(tmp)
+            if want:
+                if got < want:
+                    raise IOError(f"{name} download truncated ({got} of {want} bytes)")
+                if got != want or _sha256(tmp) != pinned[name][1]:
+                    os.remove(tmp)
+                    raise IOError(f"{name} failed its SHA-256 check — discarded")
+            elif got < _MODEL_FILES[name]:
+                raise IOError(f"{name} download truncated ({got} bytes)")
             os.replace(tmp, dest)
         if progress:
             progress(1.0, "Speech model ready")
         return True
     except Exception as e:
         print(f"[ParakeetEngine] Model download failed: {e}")
+        if error_out is not None:
+            error_out.append(f"{type(e).__name__}: {e}"[:300])
         if progress:
             progress(0.0, "Speech model download failed — using Whisper")
         return False
