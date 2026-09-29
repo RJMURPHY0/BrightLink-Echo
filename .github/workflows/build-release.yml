@@ -362,7 +362,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
           python -c "import sys, asr_engine; sys.exit(0 if asr_engine.download_model() else 1)"
-          if ($LASTEXITCODE -ne 0) { throw "speech model download failed" }
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error title=selftest: speech model download::asr_engine.download_model() failed on the runner"; throw "speech model download failed" }
           python tools/selftest_install.py --setup "dist\$env:SETUP_ASSET" --onefile "dist\$env:DIST_EXE" --report "dist\selftest"
 
       # ── VirusTotal scan ───────────────────────────────────────────────────

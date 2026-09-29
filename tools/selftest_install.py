@@ -46,6 +46,26 @@ NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 PHRASE = "Revenue was up this quarter and the team did well."
 
 
+def annotate(title: str, text: str, limit: int = 1500) -> None:
+    """A GitHub error annotation: shown on the run page and readable through
+    the public checks API, so a failed gate can be diagnosed without the
+    (login-only) job log. Printed only on CI."""
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return
+    body = (text or "(no detail)")[-limit:]
+    body = body.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+    title = title.replace(",", ";").replace("::", ":")
+    print(f"::error title={title}::{body}", flush=True)
+
+
+def log_tail(path: str, lines: int = 25) -> str:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return "\n".join(f.read().splitlines()[-lines:])
+    except OSError as e:
+        return f"unreadable: {e}"
+
+
 class Report:
     def __init__(self, out: str):
         self.out = out
@@ -55,6 +75,8 @@ class Report:
     def check(self, name: str, ok: bool, detail="") -> bool:
         self.data["checks"].append({"name": name, "ok": bool(ok), "detail": str(detail)[:2000]})
         print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f": {detail}" if detail and not ok else ""))
+        if not ok:
+            annotate(f"selftest: {name}", str(detail))
         return ok
 
     def measure(self, key: str, value) -> None:
@@ -323,6 +345,9 @@ def main(argv=None) -> int:
 
     ok = rep.save()
     print("ALL PASSED" if ok else "FAILED: see report.json")
+    if not ok:
+        for name in ("update.log", "setup.log"):
+            annotate(f"selftest log: {name}", log_tail(os.path.join(rep.out, name)))
     return 0 if ok else 1
 
 
