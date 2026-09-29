@@ -148,6 +148,8 @@ class Config:
     end_punctuation: str = "smart"  # Full stop at the end of a dictation: "smart" (only when the utterance reads finished — see sentence_end), "always" (the pre-1.6.75 behaviour), "never"
     live_captions: bool = False   # Show live text of what you're saying (replaces the waveform bar while recording)
     live_inject: bool = False     # Type words into the app live as you speak (Parakeet mode); corrects at hotkey-release
+    cloud_sync: bool = False  # Settings > Account > Cloud Sync. OFF by default on every PC: nothing dictated, typed or recorded is uploaded or pulled down unless the user turns it on. When on, history, recordings, vocabulary, snippets, learned phrases, impact figures and preferences follow the account to its other PCs (cloud_sync.py)
+    sync_stamps: dict = field(default_factory=dict)  # Cloud Sync: when each synced preference was last changed on this PC, so the newer change wins between PCs
     homophone_fix: bool = True  # Pick the right spelling of a sound-alike word from the words around it ("Revenue one this quarter" -> "won", "their is" -> "there is"). Local and instant; runs before injection. Off during Live Typing either way
     auto_lists: bool = True  # Lay out a clearly enumerated dictation as a real list: "first … second …" becomes 1. 2., an announced comma series becomes bullets. Off during Live Typing either way
     email_format: bool = True  # In an email client (Outlook, Windows Mail, Thunderbird, Gmail or Outlook in a browser), put the greeting, the sign-off and the name after it on their own lines. Off during Live Typing either way

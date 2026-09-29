@@ -7,10 +7,11 @@ created_at timestamp — the same value that is the durable local/remote
 identity in supabase_client, so a history row maps to its recording with
 no schema change and the link survives remote merges.
 
-Audio stays on the machine: playback/retry work only for dictations made on
-this device. The two exceptions are both opt-in, one clip at a time: voice
-training (when switched on) and a History feedback report sent with
-"Include the recording" left ticked (supabase_client.send_feedback).
+Audio stays on the machine unless the user opts in. The exceptions: Cloud
+Sync (Settings > Account, off by default) keeps every recording in the
+user's private cloud folder so their other PCs can play it; voice training
+(when switched on); and a History feedback report sent with "Include the
+recording" left ticked (supabase_client.send_feedback).
 Files are pruned oldest-first past a count/size cap.
 """
 
@@ -38,6 +39,23 @@ def audio_dir() -> str:
 
 def _key(created_at: str) -> str:
     return re.sub(r"[^0-9]", "", created_at or "")[:20]
+
+
+def canonical_key(created_at: str) -> str:
+    """The recording's name in Cloud Sync: the timestamp as UTC
+    YYYYMMDDHHMMSSffffff. Unlike _key it does not depend on how the string
+    was written, so a row this PC wrote ("…:47.843200+00:00") and the same
+    row read back from the cloud ("…:47.8432+00:00", or "Z") agree. Falls
+    back to the digits when the value does not parse."""
+    import datetime
+    try:
+        dt = datetime.datetime.fromisoformat(
+            (created_at or "").strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(datetime.timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    except Exception:
+        return _key(created_at)
 
 
 def path_for(created_at: str) -> str:

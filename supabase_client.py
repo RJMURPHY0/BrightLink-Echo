@@ -32,6 +32,13 @@ _FEEDBACK_TABLE = "echo_feedback"
 _FEEDBACK_BUCKET = "echo-feedback-audio"
 _FEEDBACK_AUDIO_MAX = 25 * 1024 * 1024
 
+# Cloud Sync (opt-in): settings and learned phrases as one jsonb row each,
+# recordings in a private bucket under the user's own folder. Created by
+# supabase/cloud_sync.sql (applied through the BrightLink repo's migrations).
+_STATE_TABLE = "echo_user_state"
+_SYNC_BUCKET = "echo-sync-audio"
+_SYNC_AUDIO_MAX = 25 * 1024 * 1024
+
 _local_history_lock = threading.Lock()
 
 
@@ -89,10 +96,29 @@ class SupabaseLogger:
         # Legacy schemas otherwise cost two guaranteed 400 responses per click.
         self._history_select_cols: Optional[str] = None
         self._app_columns_supported: Optional[bool] = None
+        # Cloud Sync (Settings > Account). OFF until the user turns it on:
+        # nothing the user dictated, typed or recorded is uploaded or pulled
+        # down while it is off. Before v1.7.4 this all ran for every signed-in
+        # user with no switch; it is now opt-in on each PC.
+        self._sync_enabled = False
 
     @property
     def is_enabled(self) -> bool:
         return self._enabled
+
+    def set_sync_enabled(self, on: bool) -> None:
+        self._sync_enabled = bool(on)
+
+    @property
+    def sync_enabled(self) -> bool:
+        """The user's Cloud Sync choice on this PC."""
+        return self._sync_enabled
+
+    @property
+    def sync_active(self) -> bool:
+        """Cloud Sync is on AND there is an account to sync with."""
+        return bool(self._enabled and self._sync_enabled
+                    and self._history_owner())
 
     def set_user(self, user_id: Optional[str]) -> None:
         """Set the authenticated user ID to include in all log entries."""
@@ -142,7 +168,7 @@ class SupabaseLogger:
             created_at=created_at, user_id=owner, meta=meta,
         )
         self._remember_local_record(owner, record)
-        if not self._enabled:
+        if not self._enabled or not self._sync_enabled:
             return
         payload = {
             "transcribed_text": text,
@@ -158,8 +184,8 @@ class SupabaseLogger:
 
     def log_refinement(self, original: str, refined: str, mode: str,
                        app_name: str = "", app_exe: str = "") -> None:
-        """Insert a refinement record."""
-        if not self._enabled:
+        """Insert a refinement record (Cloud Sync only)."""
+        if not self._enabled or not self._sync_enabled:
             return
         payload = {
             "transcribed_text": original,
@@ -361,7 +387,8 @@ class SupabaseLogger:
         migrations that were never applied to the live project.
         """
         table = self._LIBRARY_TABLES.get(kind)
-        if not table or not self._enabled or not entries:
+        if (not table or not self._enabled or not self._sync_enabled
+                or not entries):
             return
         if not self._user_id or self._user_id == "local":
             return
@@ -397,7 +424,7 @@ class SupabaseLogger:
         which is indistinguishable from "nothing synced yet" and is exactly
         how it should behave."""
         table = self._LIBRARY_TABLES.get(kind)
-        if not table or not self._enabled:
+        if not table or not self._enabled or not self._sync_enabled:
             return []
         if not self._user_id or self._user_id == "local":
             return []
@@ -579,7 +606,7 @@ class SupabaseLogger:
 
     def refresh_history_async(self, limit: int = 200) -> None:
         owner = self._history_owner()
-        if not self._enabled or owner is None:
+        if not self._enabled or not self._sync_enabled or owner is None:
             return
         with self._history_lock:
             if owner in self._history_refreshing:
@@ -599,7 +626,7 @@ class SupabaseLogger:
     def refresh_history(self, limit: int = 200, *, user_id=_CURRENT_USER) -> list:
         """Synchronously refresh one account; normally use ``fetch_history``."""
         owner = self._history_owner(user_id)
-        if not self._enabled or owner is None:
+        if not self._enabled or not self._sync_enabled or owner is None:
             return self._cached_history_for_owner(owner, limit)
 
         remote, error = self._fetch_remote_history(owner, limit)
@@ -877,7 +904,7 @@ class SupabaseLogger:
         self._publish_history(owner, cached)
 
         # Remote
-        if self._enabled and owner:
+        if self._enabled and self._sync_enabled and owner:
             def _update():
                 try:
                     q = (self._get_client().table(_TABLE)
@@ -896,6 +923,295 @@ class SupabaseLogger:
             threading.Thread(target=_update, daemon=True,
                              name="supabase-history-update").start()
         return True
+
+    # ── Cloud Sync: settings/phrases, history backfill, recordings ────
+    #
+    # Blocking, called only from cloud_sync's background thread, and every
+    # one returns a failure value instead of raising: a table or bucket that
+    # is missing on the live project must cost the user a partial sync, never
+    # a dictation.
+
+    def fetch_state(self, key: str):
+        """(data, ok). data is None when this account has no row yet; ok is
+        False when the fetch itself failed (so the caller must not overwrite
+        what it cannot see)."""
+        owner = self._history_owner()
+        if not self.sync_active:
+            return None, False
+        try:
+            rows = (self._get_client().table(_STATE_TABLE)
+                    .select("data").eq("user_id", owner).eq("key", key)
+                    .limit(1).execute().data or [])
+            return (rows[0].get("data") if rows else None), True
+        except Exception as e:
+            print(f"[Sync] fetch {key} failed (non-fatal): {e}")
+            return None, False
+
+    def push_state(self, key: str, data: dict) -> bool:
+        owner = self._history_owner()
+        if not self.sync_active:
+            return False
+        try:
+            self._get_client().table(_STATE_TABLE).upsert(
+                {"user_id": owner, "key": key, "data": data,
+                 "updated_at": datetime.datetime.now(
+                     datetime.timezone.utc).isoformat()},
+                on_conflict="user_id,key").execute()
+            return True
+        except Exception as e:
+            print(f"[Sync] push {key} failed (non-fatal): {e}")
+            return False
+
+    def remote_history_index(self):
+        """Every (created_at, text) this account has in the cloud, paged, or
+        None on failure. Only the two identity columns are read."""
+        owner = self._history_owner()
+        if not self.sync_active:
+            return None
+        out, page, start = [], 1000, 0
+        try:
+            while True:
+                rows = (self._get_client().table(_TABLE)
+                        .select("created_at, transcribed_text")
+                        .eq("user_id", owner)
+                        .order("created_at", desc=True)
+                        .range(start, start + page - 1)
+                        .execute().data or [])
+                out.extend(rows)
+                if len(rows) < page:
+                    return out
+                start += page
+        except Exception as e:
+            print(f"[Sync] history index failed (non-fatal): {e}")
+            return None
+
+    def upload_history_rows(self, rows: list) -> int:
+        """Insert local rows the cloud does not have yet. Returns how many
+        landed. The same shape log_transcription sends."""
+        owner = self._history_owner()
+        if not self.sync_active or not rows:
+            return 0
+        payload = []
+        for r in rows:
+            p = {"transcribed_text": r.get("transcribed_text") or "",
+                 "created_at": r.get("created_at"), "user_id": owner}
+            if r.get("app_name") and self._app_columns_supported is not False:
+                p["app_name"] = r["app_name"]
+            if r.get("app_exe") and self._app_columns_supported is not False:
+                p["app_exe"] = r["app_exe"]
+            if p["transcribed_text"] and p["created_at"]:
+                payload.append(p)
+        done = 0
+        for i in range(0, len(payload), 200):
+            batch = payload[i:i + 200]
+            try:
+                self._get_client().table(_TABLE).insert(batch).execute()
+                done += len(batch)
+            except Exception as e:
+                if _is_missing_column_error(e, "app_name", "app_exe"):
+                    stripped = [{k: v for k, v in p.items()
+                                 if k not in ("app_name", "app_exe")}
+                                for p in batch]
+                    try:
+                        self._get_client().table(_TABLE).insert(stripped).execute()
+                        done += len(batch)
+                        continue
+                    except Exception as e2:
+                        e = e2
+                print(f"[Sync] history upload failed (non-fatal): {e}")
+                break
+        return done
+
+    def owned_local_history(self, limit: int = 200) -> list:
+        """This account's rows in history.json (never untagged ones: a legacy
+        row is not assigned to whoever happens to sign in)."""
+        owner = self._history_owner()
+        if owner is None:
+            return []
+        return self._local_snapshot(owner, limit)
+
+    def fetch_remote_history_rows(self, limit: int = 200) -> list:
+        owner = self._history_owner()
+        if not self.sync_active:
+            return []
+        rows, error = self._fetch_remote_history(owner, limit)
+        return [] if error is not None else rows
+
+    def persist_history_rows(self, rows: list) -> int:
+        """Write cloud rows into history.json for this account, so a new PC
+        really holds the history (offline too), not only a view of it.
+        Deleted (tombstoned) rows and rows already present are skipped."""
+        owner = self._history_owner()
+        if owner is None or not rows:
+            return 0
+        rows = self._filter_tombstoned([dict(r) for r in rows], owner)
+        added = 0
+        try:
+            path = _local_history_path()
+            with _local_history_lock:
+                entries = []
+                if os.path.exists(path):
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            entries = json.load(f) or []
+                    except Exception:
+                        entries = []
+                mine = [e for e in entries if e.get("user_id") == owner]
+                for r in rows:
+                    if any(self._same_history_event(r, e) for e in mine):
+                        continue
+                    rec = {"transcribed_text": r.get("transcribed_text") or "",
+                           "created_at": r.get("created_at") or "",
+                           "app_name": r.get("app_name") or "",
+                           "app_exe": r.get("app_exe") or "",
+                           "user_id": owner}
+                    if not rec["transcribed_text"] or not rec["created_at"]:
+                        continue
+                    entries.append(rec)
+                    mine.append(rec)
+                    added += 1
+                if added:
+                    entries.sort(key=lambda e: (self._parse_history_time(e)
+                                                or datetime.datetime.min.replace(
+                                                    tzinfo=datetime.timezone.utc)),
+                                 reverse=True)
+                    entries = entries[:200]
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(entries, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"[Sync] history save failed (non-fatal): {e}")
+            return 0
+        if added:
+            with self._history_lock:
+                self._history_cache.pop(owner, None)
+            self._publish_history(owner, self._local_snapshot(owner, 200))
+        return added
+
+    def list_synced_audio(self):
+        """Canonical keys of this account's recordings in the cloud, or None
+        on failure."""
+        owner = self._history_owner()
+        if not self.sync_active:
+            return None
+        keys, start, page = set(), 0, 1000
+        try:
+            bucket = self._get_client().storage.from_(_SYNC_BUCKET)
+            while True:
+                items = bucket.list(owner, {"limit": page, "offset": start}) or []
+                for it in items:
+                    name = (it.get("name") or "") if isinstance(it, dict) else ""
+                    if name.endswith(".wav"):
+                        keys.add(name[:-4])
+                if len(items) < page:
+                    return keys
+                start += page
+        except Exception as e:
+            print(f"[Sync] audio list failed (non-fatal): {e}")
+            return None
+
+    def upload_audio(self, key: str, path: str) -> bool:
+        owner = self._history_owner()
+        if not self.sync_active or not key:
+            return False
+        try:
+            if os.path.getsize(path) > _SYNC_AUDIO_MAX:
+                return False
+            with open(path, "rb") as f:
+                data = f.read()
+            self._get_client().storage.from_(_SYNC_BUCKET).upload(
+                f"{owner}/{key}.wav", data,
+                {"content-type": "audio/wav", "upsert": "true"})
+            return True
+        except Exception as e:
+            print(f"[Sync] audio upload failed (non-fatal): {e}")
+            return False
+
+    def download_audio(self, key: str, dest: str) -> bool:
+        owner = self._history_owner()
+        if not self.sync_active or not key:
+            return False
+        try:
+            data = self._get_client().storage.from_(_SYNC_BUCKET).download(
+                f"{owner}/{key}.wav")
+            if not data:
+                return False
+            tmp = dest + ".part"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, dest)
+            return True
+        except Exception as e:
+            print(f"[Sync] audio download failed (non-fatal): {e}")
+            return False
+
+    def _remove_audio(self, owner: str, keys) -> None:
+        names = [f"{owner}/{k}.wav" for k in keys if k]
+        if not names:
+            return
+        bucket = self._get_client().storage.from_(_SYNC_BUCKET)
+        for i in range(0, len(names), 100):
+            bucket.remove(names[i:i + 100])
+
+    def _purge_synced_audio(self, owner: str, stone: dict) -> None:
+        """A purged history row takes its synced recording with it."""
+        try:
+            import audio_store
+            if stone.get("all_before"):
+                cutoff = audio_store.canonical_key(stone["all_before"])
+                keys = self.list_synced_audio() or set()
+                self._remove_audio(owner, [k for k in keys if k <= cutoff])
+            elif stone.get("created_at"):
+                self._remove_audio(
+                    owner, [audio_store.canonical_key(stone["created_at"])])
+        except Exception as e:
+            print(f"[Sync] audio purge failed (non-fatal): {e}")
+
+    def delete_cloud_data(self) -> dict:
+        """Delete everything personal Echo keeps for this account in the
+        cloud: history, vocabulary, snippets, settings, learned phrases and
+        synced recordings. Works whether or not Cloud Sync is on (it is how
+        someone who turned it off cleans up). The daily usage counts in
+        user_daily_stats are left alone on purpose: they hold no words, and
+        BrightLink's Home dashboards read them. Returns {part: True/False};
+        RLS refusing a delete does not raise, so each table is read back to
+        confirm it is empty."""
+        owner = self._history_owner()
+        result = {}
+        if not self._enabled or owner is None:
+            return {"signed_in": False}
+        client = self._get_client()
+        for part, table in (("history", _TABLE),
+                            ("vocabulary", "user_vocabulary"),
+                            ("snippets", "user_snippets"),
+                            ("settings", _STATE_TABLE)):
+            try:
+                client.table(table).delete().eq("user_id", owner).execute()
+                left = (client.table(table).select("user_id")
+                        .eq("user_id", owner).limit(1).execute().data or [])
+                result[part] = not left
+            except Exception as e:
+                # A table that was never created holds nothing to delete.
+                missing = ("does not exist" in str(e).lower()
+                           or "42p01" in str(e).lower()
+                           or "could not find the table" in str(e).lower())
+                result[part] = missing
+                if not missing:
+                    print(f"[Sync] delete {table} failed: {e}")
+        try:
+            was = self._sync_enabled
+            self._sync_enabled = True       # list/remove are sync-gated
+            try:
+                keys = self.list_synced_audio()
+                if keys:
+                    self._remove_audio(owner, keys)
+                    keys = self.list_synced_audio()
+                result["recordings"] = keys is not None and not keys
+            finally:
+                self._sync_enabled = was
+        except Exception as e:
+            print(f"[Sync] delete recordings failed: {e}")
+            result["recordings"] = False
+        return result
 
     # ── Tombstones (deferred remote deletes) ──────────────────────────
 
@@ -989,8 +1305,12 @@ class SupabaseLogger:
                 if not owner:
                     changed = True  # local-only rows: nothing remote to delete
                     continue
-                # Only the owning account's client can (and should) delete.
-                if (not self._enabled or owner != self._user_id):
+                # Only the owning account's client can (and should) delete,
+                # and only while Cloud Sync is on (off, the stone waits: the
+                # row is already hidden here, and "Delete my data from the
+                # cloud" removes everything at once).
+                if (not self._enabled or not self._sync_enabled
+                        or owner != self._user_id):
                     keep.append(s)
                     continue
                 try:
@@ -1003,6 +1323,7 @@ class SupabaseLogger:
                         q = (q.eq("transcribed_text", s.get("text") or "")
                               .eq("created_at", s.get("created_at") or ""))
                     q.execute()
+                    self._purge_synced_audio(owner, s)
                     changed = True
                     print("[Supabase] Purged tombstoned history (30-day grace elapsed).")
                 except Exception as e:

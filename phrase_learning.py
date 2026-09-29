@@ -303,6 +303,10 @@ class PhraseStore:
         # "Brightlink" what it writes is "brightling", so the only thing the
         # mistake and the target share is the code. See `_has_fumbled`.
         self._fumbled = {}          # code -> count
+        # Phrases the user told us to forget, with when. Only matters to
+        # Cloud Sync: without it, another PC still holding the phrase would
+        # hand it straight back on the next merge.
+        self._forgotten = {}        # norm -> iso
         self._dirty = False
         self._flush_at = 0.0
         self._flushing = False
@@ -343,14 +347,56 @@ class PhraseStore:
                     "count": int(row.get("count") or 0),
                     "learned_at": str(row.get("learned_at") or ""),
                 }
+        forg = data.get("forgotten")
+        if isinstance(forg, dict):
+            self._forgotten = {str(k): str(v) for k, v in forg.items()}
 
     def _snapshot(self) -> dict:
         return {
             "version": _STORE_VERSION,
             "candidates": {k: list(v) for k, v in self._candidates.items()},
             "fumbled": dict(self._fumbled),
-            "phrases": list(self._phrases.values()),
+            "phrases": [dict(v) for v in self._phrases.values()],
+            "forgotten": dict(self._forgotten),
         }
+
+    def snapshot(self) -> dict:
+        """A copy of everything this store holds (Cloud Sync pushes it)."""
+        with self._lock:
+            return self._snapshot()
+
+    def replace_with(self, data: dict) -> None:
+        """Adopt a merged snapshot (Cloud Sync pulled one) and save it."""
+        if not isinstance(data, dict):
+            return
+        with self._lock:
+            self._candidates, self._fumbled = {}, {}
+            self._phrases, self._forgotten = {}, {}
+            cands = data.get("candidates")
+            for norm, row in (cands.items() if isinstance(cands, dict) else ()):
+                try:
+                    self._candidates[norm] = [int(row[0]), str(row[1])]
+                except (TypeError, ValueError, IndexError):
+                    continue
+            fum = data.get("fumbled")
+            for code, n in (fum.items() if isinstance(fum, dict) else ()):
+                try:
+                    self._fumbled[str(code)] = int(n)
+                except (TypeError, ValueError):
+                    continue
+            for row in data.get("phrases") or []:
+                if isinstance(row, dict) and row.get("phrase"):
+                    norm = " ".join(row["phrase"].split()).lower()
+                    self._phrases[norm] = {
+                        "phrase": " ".join(row["phrase"].split()),
+                        "count": int(row.get("count") or 0),
+                        "learned_at": str(row.get("learned_at") or ""),
+                    }
+            forg = data.get("forgotten")
+            if isinstance(forg, dict):
+                self._forgotten = {str(k): str(v) for k, v in forg.items()}
+            self._prune()
+        self._touch(urgent=True)
 
     def flush(self) -> bool:
         """Write now, on this thread. Returns success; never raises — losing a
@@ -527,12 +573,16 @@ class PhraseStore:
             hit = self._phrases.pop(norm, None) is not None
             if hit:
                 self._candidates.pop(norm, None)
+                self._forgotten[norm] = _now()
         if hit:
             self._touch(urgent=True)
         return hit
 
     def clear(self) -> None:
         with self._lock:
+            now = _now()
+            for norm in self._phrases:
+                self._forgotten[norm] = now
             self._candidates.clear()
             self._phrases.clear()
             self._fumbled.clear()

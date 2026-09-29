@@ -28,7 +28,7 @@ From the live policy (updated 2026-09-15):
 ## Partner Center values
 
 - **App type**: EXE or MSI app
-- **Package URL**: `https://github.com/RJMURPHY0/BrightLink-Echo/releases/download/v1.7.3/BrightLink-Echo.exe`
+- **Package URL**: `https://github.com/RJMURPHY0/BrightLink-Echo/releases/download/v1.7.4/BrightLink-Echo.exe`
 - **Installer parameters / silent switch**: `--install /S`
 - **Architecture**: x64. **Language**: English (United Kingdom)
 - **Category**: Productivity
@@ -48,7 +48,7 @@ speak, and your words land where your cursor is: email, chat, documents, the
 browser.
 
 Speech recognition runs on your own computer, so it is fast, works offline
-and your voice never leaves your machine.
+and your voice stays on your machine unless you choose otherwise.
 
 - Punctuation, paragraphs and spoken lists laid out for you
 - Custom vocabulary for names and terms the app should always get right
@@ -56,8 +56,9 @@ and your voice never leaves your machine.
 - Refine: tidy, shorten or rewrite selected text with one key (Alt+R)
 - History of every dictation, with playback
 
-Signing in is optional. With a BrightLink account your history, vocabulary
-and snippets follow you between computers.
+Signing in is optional. Turn on Cloud Sync (off by default) and your
+history, recordings, vocabulary, snippets and preferences follow you between
+computers; turn it off and delete what is stored at any time.
 
 ### Notes for certification
 
