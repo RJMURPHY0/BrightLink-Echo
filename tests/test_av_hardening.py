@@ -31,6 +31,21 @@ class NoHiddenWindowStyleTests(unittest.TestCase):
         self.assertIn("SW_HIDE", _src(os.path.join("installer", "echo.iss")))
 
 
+class ScriptHashPortabilityTests(unittest.TestCase):
+    """The shipped PowerShell hashes through .NET. Get-FileHash is a module
+    script function in Windows PowerShell 5.1, and a powershell.exe started
+    from PowerShell 7 inherits a PSModulePath that cannot load it: CI run
+    36682309186 refused every install with "Get-FileHash is not recognized"."""
+
+    def test_no_shipped_script_uses_get_filehash(self):
+        for rel in (os.path.join("installer", "activate.ps1"), "updater.py", "app_install.py"):
+            self.assertNotRegex(_src(rel), r"Get-FileHash\s+-", rel)
+
+    def test_they_hash_with_dotnet(self):
+        for rel in (os.path.join("installer", "activate.ps1"), "updater.py"):
+            self.assertIn("System.Security.Cryptography.SHA256", _src(rel), rel)
+
+
 class ActivationScriptSigningTests(unittest.TestCase):
     def setUp(self):
         try:

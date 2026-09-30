@@ -557,8 +557,16 @@ $Log    = '{log_file}'
 $Stage  = "$CurExe.staging"
 $Backup = "$CurExe.previous"
 function Log($msg) {{ "[$(Get-Date -Format 'HH:mm:ss')] $msg" | Add-Content -Path $Log -Encoding UTF8 }}
+# .NET, never Get-FileHash: a powershell.exe that inherits PowerShell 7's
+# PSModulePath cannot load it (installer/activate.ps1 has the story).
 function HashOf($p) {{
-    try {{ (Get-FileHash -Path $p -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower() }} catch {{ '' }}
+    try {{
+        $s = [System.IO.File]::Open($p, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {{
+            $h = [System.Security.Cryptography.SHA256]::Create()
+            try {{ ([System.BitConverter]::ToString($h.ComputeHash($s)) -replace '-', '').ToLower() }} finally {{ $h.Dispose() }}
+        }} finally {{ $s.Dispose() }}
+    }} catch {{ '' }}
 }}
 Log "Update started. PID={pid}"
 Log "New: $NewExe"

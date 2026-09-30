@@ -59,8 +59,21 @@ $Bad = Join-Path $InstallDir 'bad-version.txt'
 function Log([string]$msg) {
     try { "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [activate $Version] $msg" | Add-Content -LiteralPath $Log -Encoding UTF8 } catch {}
 }
+# SHA-256 through .NET, never Get-FileHash: in Windows PowerShell 5.1 that is a
+# script function of a module, and a powershell.exe started from PowerShell 7
+# (a CI step, or a user's pwsh terminal running the installer) inherits pwsh's
+# PSModulePath and cannot load it ("Get-FileHash is not recognized"). Found in
+# CI run 36682309186, where it refused every install.
+function Sha256Of([string]$p) {
+    $s = [System.IO.File]::Open($p, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $h = [System.Security.Cryptography.SHA256]::Create()
+        try { return ([System.BitConverter]::ToString($h.ComputeHash($s)) -replace '-', '').ToLower() }
+        finally { $h.Dispose() }
+    } finally { $s.Dispose() }
+}
 function HashOf([string]$p) {
-    try { (Get-FileHash -LiteralPath $p -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower() } catch { '' }
+    try { Sha256Of $p } catch { '' }
 }
 function Test-ExeHash([string]$p, [string]$want) {
     # A freshly written exe is often held by an antivirus scan for a few
@@ -69,7 +82,7 @@ function Test-ExeHash([string]$p, [string]$want) {
     $why = ''
     for ($i = 0; $i -lt [Math]::Min($Attempts, 15); $i++) {
         try {
-            $got = (Get-FileHash -LiteralPath $p -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower()
+            $got = Sha256Of $p
             if ($got -eq $want) {
                 if ($i -gt 0) { Log "Exe hash matched on attempt $($i + 1)." }
                 return $true
