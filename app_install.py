@@ -696,15 +696,18 @@ def _spawn_cleanup(dirs: list) -> None:
     flags = (_NO_WIN
              | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
              | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0))
+    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path]
+    std = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        subprocess.Popen(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-             "-File", script_path],
-            creationflags=flags,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        try:
+            subprocess.Popen(cmd, creationflags=flags, **std)
+        except OSError:
+            # A job that forbids breakaway (a CI runner, some launchers)
+            # refuses the whole CreateProcess. Start it inside the job rather
+            # than not at all, as updater.spawn_activation does: without this
+            # the uninstall silently left the install folder behind.
+            subprocess.Popen(cmd, creationflags=flags & ~getattr(
+                subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0), **std)
     except Exception as e:
         print(f"[Install] Deferred cleanup could not start: {e}")
 

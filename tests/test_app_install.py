@@ -280,6 +280,36 @@ class DeleteGuardTests(unittest.TestCase):
         self.assertIn("CREATE_NO_WINDOW", inspect.getsource(app_install))
 
 
+class CleanupInsideAJobTests(unittest.TestCase):
+    """A job that forbids breakaway (a CI runner, some launchers) refuses the
+    whole CreateProcess. The uninstall then silently left the install folder
+    behind (CI run 36683407903); it must start the cleanup inside the job."""
+
+    def test_a_refused_breakaway_still_starts_the_cleanup(self):
+        import subprocess
+        breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
+        if not breakaway:
+            self.skipTest("Windows only")
+        calls = []
+
+        def fake_popen(cmd, creationflags=0, **kw):
+            calls.append(creationflags)
+            if creationflags & breakaway:
+                raise PermissionError(5, "Access is denied")
+            return mock.Mock()
+
+        d = tempfile.mkdtemp()
+        try:
+            with mock.patch.object(app_install, "safe_to_delete", return_value=True), \
+                    mock.patch.object(app_install.subprocess, "Popen", side_effect=fake_popen):
+                app_install._spawn_cleanup([d])
+        finally:
+            os.rmdir(d)
+        self.assertEqual(2, len(calls))
+        self.assertTrue(calls[0] & breakaway)
+        self.assertFalse(calls[1] & breakaway)
+
+
 class NotificationIdentityTests(unittest.TestCase):
     """A toast from an unpackaged app is titled with its AppUserModelID unless
     that id has a DisplayName registered. Without it v1.6.89 showed

@@ -363,7 +363,7 @@ def main(argv=None) -> int:
         shutil.rmtree(parked, ignore_errors=True)
         shutil.move(models, parked)
     subprocess.run([exe, "--uninstall", "/S"], timeout=120)
-    deadline = time.time() + 60
+    deadline = time.time() + 240  # thousands of leftover onefile unpack files
     while time.time() < deadline and os.path.exists(root):
         time.sleep(1)
     rep.check("uninstall removed the install folder", not os.path.exists(root))
