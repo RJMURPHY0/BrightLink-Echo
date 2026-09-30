@@ -1,8 +1,10 @@
 """Upgrade scenarios on a clean Windows machine, driven by the REAL updaters.
 
-    python tools/e2e_upgrade.py upgrade --from 1.7.2 --assets dist --report out
-    python tools/e2e_upgrade.py faults  --assets dist --report out
-    python tools/e2e_upgrade.py next    --assets dist --next-assets dist-next --report out
+    python tools/e2e_upgrade.py seed-model
+    python tools/e2e_upgrade.py upgrade   --from 1.7.2 --assets dist --report out
+    python tools/e2e_upgrade.py installed --from 1.8.0 --assets dist --report out
+    python tools/e2e_upgrade.py faults    --assets dist --report out
+    python tools/e2e_upgrade.py next      --assets dist --next-assets dist-next --report out
 
 RUN ONLY ON A THROWAWAY MACHINE (the CI runner): it edits the hosts file,
 trusts a test CA machine-wide, installs and kills Echo, and runs old releases
@@ -17,8 +19,12 @@ serves is a CI dry run's signed files.
            repo name) is installed and running. Its OWN updater module (from
            its git tag, since an old client only checks when signed in) and
            its own swap script install the bridge; the bridge then migrates
-           the machine by itself. Settings, a user-data file and the speech
-           model must come through untouched, with one Installed apps entry.
+           the machine by itself, which also moves the legacy folders to the
+           current names. Settings, a user-data file and the speech model must
+           come through untouched, with one Installed apps entry.
+  installed  the installed layout under the legacy names (v1.8.0, from the
+           real GitHub) updates itself through its own updater: the installer
+           stages where v1.8.0 looks, and activate.ps1 moves the machine.
   faults   with the bridge installed: a wrong checksum, a cut-off download, a
            release with no installer, no network, the installer killed while
            staging, and the install locked. After each, the machine must still
@@ -43,7 +49,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import brand  # noqa: E402
+import data_paths  # noqa: E402
 import install_layout as il  # noqa: E402
+import updater  # noqa: E402
 from tools.selftest_install import (NO_WIN, Report, reg_value, stop_all,  # noqa: E402
                                     task_exists, uninstall_entries)
 
@@ -171,7 +179,8 @@ def collect_logs(rep: Report):
     src = [os.path.join(il.install_dir(), n) for n in (il.UPDATE_LOG, "startup-error.log")]
     src += [os.path.join(il.install_dir(), n) for n in os.listdir(il.install_dir())
             if n.startswith("setup-") and n.endswith(".log")] if os.path.isdir(il.install_dir()) else []
-    src.append(os.path.join(tempfile.gettempdir(), "ftc_whisper_update.log"))
+    for slug in (brand.FILE_SLUG, brand.LEGACY_FILE_SLUG):
+        src.append(os.path.join(tempfile.gettempdir(), f"{slug}_update.log"))
     for p in src:
         try:
             shutil.copy(p, os.path.join(rep.out, os.path.basename(p)))
@@ -188,9 +197,21 @@ def check_migrated(rep: Report, version: str, label: str):
               not [d for d in os.listdir(il.install_dir()) if d.startswith(brand.PENDING_DIR_PREFIX)])
     rep.check(f"{label}: one Installed apps entry", uninstall_entries() == [brand.UNINSTALL_KEY_NAME],
               uninstall_entries())
-    cmd = reg_value("Software\\Classes\\" + brand.URL_SCHEME + r"\shell\open\command") or ""
-    rep.check(f"{label}: URL protocol opens the canonical exe", exe.lower() in cmd.lower(), cmd)
+    for scheme in (brand.URL_SCHEME, brand.LEGACY_URL_SCHEME):
+        cmd = reg_value("Software\\Classes\\" + scheme + r"\shell\open\command") or ""
+        rep.check(f"{label}: {scheme}:// opens the canonical exe", exe.lower() in cmd.lower(), cmd)
     rep.check(f"{label}: logon task present", task_exists())
+    # v1.8.1: everything under the current names, nothing under the legacy ones.
+    rep.check(f"{label}: runs from the current folder",
+              os.path.dirname(exe).lower() == data_paths.new_local_dir().lower(), exe)
+    rep.check(f"{label}: legacy local folder gone",
+              wait_for(lambda: not os.path.exists(data_paths.legacy_local_dir()), 120),
+              os.listdir(data_paths.legacy_local_dir())
+              if os.path.isdir(data_paths.legacy_local_dir()) else "")
+    rep.check(f"{label}: legacy roaming folder gone",
+              not os.path.exists(data_paths.legacy_roaming_dir()))
+    rep.check(f"{label}: no logon task under the legacy name",
+              not task_exists(brand.LEGACY_TASK_NAME))
 
 
 def seed_user_data() -> dict:
@@ -200,7 +221,7 @@ def seed_user_data() -> dict:
     data["custom_vocabulary"] = "E2eSentinelWord"
     with open(cfg, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
-    roaming = os.path.join(os.environ["APPDATA"], brand.DATA_DIR_NAME)
+    roaming = data_paths.roaming_dir()
     os.makedirs(roaming, exist_ok=True)
     with open(os.path.join(roaming, "e2e-sentinel.txt"), "w") as f:
         f.write("keep me")
@@ -212,7 +233,7 @@ def check_user_data(rep: Report, models_before: dict, label: str):
         rep.check(f"{label}: settings survived",
                   json.load(f).get("custom_vocabulary") == "E2eSentinelWord")
     rep.check(f"{label}: %APPDATA% data survived", os.path.exists(os.path.join(
-        os.environ["APPDATA"], brand.DATA_DIR_NAME, "e2e-sentinel.txt")))
+        data_paths.new_roaming_dir(), "e2e-sentinel.txt")))
     after = model_listing()
     rep.check(f"{label}: speech model untouched (not re-downloaded)",
               models_before and after == models_before,
@@ -348,7 +369,7 @@ def scenario_faults(rep: Report, work: str, assets: str, version: str):
         pending = os.path.join(il.install_dir(), il.pending_dir_name(version))
         seen = wait_for(lambda: os.path.isdir(pending), 600, every=0.5)
         rep.check("kill-stage: staging started", seen)
-        subprocess.run(["taskkill", "/F", "/IM", "FTC-Whisper-Setup-new*"], capture_output=True,
+        subprocess.run(["taskkill", "/F", "/IM", updater._SETUP_PREFIX + "*"], capture_output=True,
                        creationflags=NO_WIN)
         failed = wait_for(lambda: _failures(version) >= 1, 600, every=5)
         rep.check("kill-stage: the failed stage was counted", failed)
@@ -362,8 +383,11 @@ def scenario_faults(rep: Report, work: str, assets: str, version: str):
         rep.check("locked: holding the canonical exe", h not in (None, ctypes.c_void_p(-1).value))
         try:
             restart()
-            wait_for(lambda: "exe swap failed" in open(os.path.join(il.install_dir(), il.UPDATE_LOG),
-                                                        encoding="utf-8", errors="replace").read(),
+            # v1.8.1 moves the legacy folder first, and a held exe stops that
+            # (exit 6, nothing changed); either refusal leaves the bridge.
+            wait_for(lambda: any(t in open(os.path.join(il.install_dir(), il.UPDATE_LOG),
+                                           encoding="utf-8", errors="replace").read()
+                                 for t in ("exe swap failed", "could not be moved")),
                      900, every=5)
         finally:
             k32.CloseHandle(ctypes.c_void_p(h))
@@ -380,6 +404,53 @@ def scenario_faults(rep: Report, work: str, assets: str, version: str):
     finally:
         collect_logs(rep)
         gh.stop()
+
+
+def scenario_installed(rep: Report, work: str, assets: str, old: str, version: str):
+    """v1.8.0's installed layout, under the legacy names, updated by its own
+    updater: /STAGEONLY without /DIR stages in the legacy folder, v1.8.0 checks
+    the staged exe under the legacy name, then activate.ps1 moves everything."""
+    dl = os.path.join(work, "Downloads")
+    os.makedirs(dl, exist_ok=True)
+    setup = os.path.join(dl, brand.LEGACY_SETUP_UPDATE_ASSET)
+    urllib.request.urlretrieve(f"{REAL}/v{old}/{brand.LEGACY_SETUP_UPDATE_ASSET}", setup)
+    p = subprocess.run([setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], timeout=900)
+    rep.check(f"v{old} installed with its installer", p.returncode == 0, p.returncode)
+    rep.check(f"v{old} is in the legacy folder", data_paths.uses_legacy()
+              and il.is_installed_layout_exe(canonical()), canonical())
+    start_canonical()
+    rep.check(f"v{old} running", wait_for(lambda: ping_version() == old, 240))
+    models = seed_user_data()
+    gh = FakeGitHub(work)
+    gh.start(version, assets, {"migrate_percent": 0})
+    try:
+        restart()
+        t0 = time.time()
+        rep.check(f"v{old} updated itself to v{version}",
+                  wait_for(lambda: migrated_to(version), 1500, every=5))
+        rep.measure(f"installed_update_seconds_from_{old}", round(time.time() - t0))
+        check_migrated(rep, version, f"v{old} installed")
+        check_user_data(rep, models, f"v{old} installed")
+        rep.check("one Installed apps entry, under the current key",
+                  uninstall_entries() == [brand.UNINSTALL_KEY_NAME], uninstall_entries())
+    finally:
+        collect_logs(rep)
+        gh.stop()
+
+
+def seed_model() -> int:
+    """Put the speech model where an old version expects it (the legacy
+    folder), from the CI cache's copy in the current one if there is one."""
+    old = os.path.join(data_paths.legacy_local_dir(), "models")
+    cached = os.path.join(data_paths.new_local_dir(), "models")
+    os.makedirs(data_paths.legacy_local_dir(), exist_ok=True)
+    if os.path.isdir(cached) and not os.path.exists(old):
+        shutil.move(cached, old)
+        shutil.rmtree(data_paths.new_local_dir(), ignore_errors=True)
+    import asr_engine
+    ok = asr_engine.download_model()
+    print("[e2e] model in", asr_engine.models_dir(), "ok" if ok else "FAILED")
+    return 0 if ok else 1
 
 
 def scenario_next(rep: Report, work: str, assets: str, next_assets: str, version: str, nxt: str):
@@ -408,12 +479,14 @@ def scenario_next(rep: Report, work: str, assets: str, next_assets: str, version
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("scenario", choices=("upgrade", "faults", "next"))
-    ap.add_argument("--assets", required=True, help="folder with a dry run's release files")
+    ap.add_argument("scenario", choices=("seed-model", "upgrade", "installed", "faults", "next"))
+    ap.add_argument("--assets", default="", help="folder with a dry run's release files")
     ap.add_argument("--next-assets", default="")
     ap.add_argument("--from", dest="old", default="")
-    ap.add_argument("--report", required=True)
+    ap.add_argument("--report", default="report")
     a = ap.parse_args(argv)
+    if a.scenario == "seed-model":
+        return seed_model()
     rep = Report(os.path.abspath(a.report))
     work = tempfile.mkdtemp(prefix="echo-e2e-")
     version = _exe_version(os.path.join(a.assets, brand.UPDATE_ASSET))
@@ -421,6 +494,8 @@ def main(argv=None) -> int:
     try:
         if a.scenario == "upgrade":
             scenario_upgrade(rep, work, a.assets, a.old, version)
+        elif a.scenario == "installed":
+            scenario_installed(rep, work, a.assets, a.old, version)
         elif a.scenario == "faults":
             scenario_faults(rep, work, a.assets, version)
         else:

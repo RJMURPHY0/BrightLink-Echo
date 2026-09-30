@@ -1,5 +1,5 @@
 """
-Authentication manager for FTC Whisper.
+Authentication manager for BrightLink Echo.
 Handles sign-up, sign-in, session persistence, and token refresh via Supabase Auth.
 Session tokens are encrypted on disk using Windows DPAPI so they are only readable
 by the same Windows user account.
@@ -9,6 +9,7 @@ import ctypes
 import ctypes.wintypes
 import json
 import brand
+import data_paths
 import os
 import threading
 import time
@@ -83,10 +84,9 @@ def _dpapi_decrypt(ciphertext: bytes) -> bytes:
 
 
 def _session_path() -> str:
-    # Store in %APPDATA%\FTC Whisper so the session survives EXE reinstalls
+    # Store in the roaming data folder so the session survives EXE reinstalls
     # or moves to a different folder.
-    app_data = os.environ.get("APPDATA") or os.path.expanduser("~")
-    folder = os.path.join(app_data, brand.DATA_DIR_NAME)
+    folder = data_paths.roaming_dir()
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, ".session")
 
@@ -95,8 +95,7 @@ def _last_email_path() -> str:
     """Plain-text file holding the last email that signed in — used only to
     prefill the login field. No password is ever stored here (the DPAPI
     session file handles credentials / auto-login)."""
-    app_data = os.environ.get("APPDATA") or os.path.expanduser("~")
-    folder = os.path.join(app_data, brand.DATA_DIR_NAME)
+    folder = data_paths.roaming_dir()
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, "last-email.txt")
 
@@ -132,9 +131,7 @@ def _restore_log_path() -> str:
     """auth-restore.log lives beside startup-error.log in %LOCALAPPDATA%\\FTC
     Whisper (the app's diagnostics folder), falling back to %APPDATA% so it is
     always writable."""
-    base = (os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-            or os.path.expanduser("~"))
-    folder = os.path.join(base, brand.DATA_DIR_NAME)
+    folder = data_paths.local_dir()
     try:
         os.makedirs(folder, exist_ok=True)
     except OSError:

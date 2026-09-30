@@ -1,22 +1,26 @@
 """Install the real build on a clean Windows machine and prove it works.
 
-    python tools/selftest_install.py --setup dist\\FTC-Whisper-Setup.exe
-                                     --onefile "dist\\FTC Whisper.exe"
+    python tools/selftest_install.py --setup dist\\BrightLink-Echo-Setup.exe
+                                     --onefile "dist\\BrightLink Echo.exe"
                                      --report dist\\selftest
 
 RUN ONLY ON A THROWAWAY MACHINE (the CI runner, Windows Sandbox, a clean VM):
-it installs into the real %LOCALAPPDATA%\\FTC Whisper, registers with Windows,
+it installs into the real %LOCALAPPDATA% data folders, registers with Windows,
 stops every running copy of the app, and uninstalls at the end.
 
 What it does, in the order an existing user meets it:
 
   1. the onefile bridge's --selftest, measuring what it unpacks per launch
-  2. the onefile bridge started normally: it installs itself at the canonical
-     path the way every release up to v1.7.x did, and answers /ping
+  2. the onefile bridge started normally: it installs itself at the legacy
+     canonical path the way every release up to v1.7.x did, and answers /ping
+     (the speech model is put in the legacy folder first, where such a user
+     has it)
   3. a setting is written into that install's config.json
   4. the installer is run silently while that copy is still running: it must
-     stop it, switch the machine to the installed layout, keep the setting,
-     and leave exactly ONE Installed apps entry
+     stop it, move the legacy folders to the current names (model included,
+     nothing re-downloaded), switch the machine to the installed layout, keep
+     the setting, and leave exactly ONE Installed apps entry and no launcher
+     under a legacy name
   5. the installed app started normally: /ping, health.json, and what it
      writes per launch (nothing unpacked)
   6. the installed exe's --selftest (real model, the bundle's own onnxruntime)
@@ -39,6 +43,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import brand  # noqa: E402
+import data_paths  # noqa: E402
 import install_layout  # noqa: E402
 
 PING = "http://127.0.0.1:47832/ping"
@@ -121,7 +126,8 @@ def tree_stats(path: str, skip=("models",)) -> tuple:
 
 
 def stop_all() -> None:
-    for image in ("FTC Whisper.exe", brand.DOWNLOAD_ASSET, brand.UPDATE_ASSET):
+    for image in (brand.CANONICAL_EXE_NAME, brand.LEGACY_CANONICAL_EXE_NAME,
+                  brand.DOWNLOAD_ASSET, brand.UPDATE_ASSET):
         subprocess.run(["taskkill", "/F", "/IM", image], capture_output=True, creationflags=NO_WIN)
     time.sleep(2)
 
@@ -194,7 +200,8 @@ def uninstall_entries() -> list:
                     break
                 i += 1
                 name = reg_value(base + "\\" + sub, "DisplayName") or ""
-                if sub == brand.UNINSTALL_KEY_NAME or (inno_key and sub.lower() == inno_key) \
+                if sub in (brand.UNINSTALL_KEY_NAME, brand.LEGACY_UNINSTALL_KEY_NAME) \
+                        or (inno_key and sub.lower() == inno_key) \
                         or name in brand.product_names():
                     found.append(sub)
     except OSError:
@@ -202,10 +209,20 @@ def uninstall_entries() -> list:
     return found
 
 
-def task_exists() -> bool:
-    r = subprocess.run(["schtasks", "/query", "/tn", brand.TASK_NAME], capture_output=True,
+def task_exists(name: str = brand.TASK_NAME) -> bool:
+    r = subprocess.run(["schtasks", "/query", "/tn", name], capture_output=True,
                        creationflags=NO_WIN)
     return r.returncode == 0
+
+
+def model_listing(root: str) -> dict:
+    base = os.path.join(root, "models")
+    out = {}
+    for dirpath, _d, names in os.walk(base):
+        for n in names:
+            p = os.path.join(dirpath, n)
+            out[os.path.relpath(p, base)] = os.path.getsize(p)
+    return out
 
 
 def main(argv=None) -> int:
@@ -215,16 +232,27 @@ def main(argv=None) -> int:
     ap.add_argument("--report", required=True)
     args = ap.parse_args(argv)
     rep = Report(os.path.abspath(args.report))
-    root = install_layout.install_dir()
-    exe = install_layout.canonical_exe(root)
+    # Before the installer: a pre-1.8 user's machine, everything under the
+    # legacy name. After it: the current name, and nothing under the legacy one.
+    old_root = data_paths.legacy_local_dir()
+    old_exe = data_paths.canonical_exe(old_root)
+    root = data_paths.new_local_dir()
+    exe = os.path.join(root, brand.CANONICAL_EXE_NAME)
     wav = os.path.join(rep.out, "selftest.wav")
     make_wav(wav)
     stop_all()
+    # The CI cache restores the model into the current folder; a pre-1.8 user
+    # has it in the legacy one.
+    if os.path.isdir(os.path.join(root, "models")) and not os.path.exists(old_root):
+        os.makedirs(old_root)
+        shutil.move(os.path.join(root, "models"), os.path.join(old_root, "models"))
+        shutil.rmtree(root, ignore_errors=True)
+    models_before = model_listing(old_root)
 
     # 1. The onefile bridge, as every pre-1.8 client runs.
     r, secs, pf, pmb = selftest(os.path.abspath(args.onefile), wav,
                                 os.path.join(rep.out, "selftest-onefile.json"),
-                                os.path.join(root, "runtime"))
+                                os.path.join(old_root, "runtime"))
     rep.check("onefile --selftest transcribes", r.get("passed"), r)
     rep.check("onefile build reports its layout", r.get("layout") == "onefile", r.get("layout"))
     rep.measure("onefile_selftest_seconds", secs)
@@ -238,26 +266,26 @@ def main(argv=None) -> int:
     rep.check("onefile app answers /ping", ping >= 0)
     rep.measure("onefile_seconds_to_ping", round(ping, 1))
     deadline = time.time() + 120
-    while time.time() < deadline and not (os.path.exists(exe)
+    while time.time() < deadline and not (os.path.exists(old_exe)
                                           and brand.UNINSTALL_KEY_NAME in uninstall_entries()):
         time.sleep(1)
-    rep.check("onefile app installed itself at the canonical path",
-              os.path.exists(exe) and not install_layout.is_installed_layout_exe(exe))
+    rep.check("onefile app installed itself at the legacy canonical path",
+              os.path.exists(old_exe) and not install_layout.is_installed_layout_exe(old_exe))
 
     # 2b. What an existing user actually runs: the canonical copy (every
     # launcher points there). The first launch above keeps running from where
     # it was started, so its config.json is not in the install folder.
     stop_all()
-    subprocess.Popen([exe], cwd=root)
+    subprocess.Popen([old_exe], cwd=old_root)
     ping = wait_ping(180)
     rep.check("installed onefile copy answers /ping", ping >= 0)
     deadline = time.time() + 60
-    while time.time() < deadline and not os.path.exists(os.path.join(root, "config.json")):
+    while time.time() < deadline and not os.path.exists(os.path.join(old_root, "config.json")):
         time.sleep(1)
     time.sleep(5)
 
     # 3. A setting that must survive the migration.
-    cfg_path = os.path.join(root, "config.json")
+    cfg_path = os.path.join(old_root, "config.json")
     try:
         with open(cfg_path, "r", encoding="utf-8") as f:
             cfg = json.load(f)
@@ -274,16 +302,23 @@ def main(argv=None) -> int:
                         "/NORESTART", f"/LOG={os.path.join(rep.out, 'setup.log')}"],
                        timeout=900)
     rep.measure("install_seconds", round(time.time() - t0, 1))
-    for name in ("update.log",):
+    for folder in (root, old_root):
         try:
-            shutil.copy(os.path.join(root, name), os.path.join(rep.out, name))
+            shutil.copy(os.path.join(folder, "update.log"), os.path.join(rep.out, "update.log"))
+            break
         except OSError:
             pass
+    cfg_path = os.path.join(root, "config.json")
     if p.returncode != 0:
         # GitHub keeps only 10 error annotations per step: the logs go first.
         annotate("selftest log: update.log", log_tail(os.path.join(rep.out, "update.log"), 40))
         annotate("selftest log: setup.log", log_tail(os.path.join(rep.out, "setup.log"), 40))
     rep.check("installer exits 0", p.returncode == 0, p.returncode)
+    rep.check("the legacy folder was moved to the current name", not os.path.exists(old_root)
+              and os.path.exists(os.path.join(root, brand.MIGRATED_MARKER)))
+    rep.check("the speech model moved with it (nothing re-downloaded)",
+              models_before and model_listing(root) == models_before,
+              f"{len(models_before)} files before, {len(model_listing(root))} after")
     rep.check("canonical exe is the installed layout", install_layout.is_installed_layout_exe(exe))
     manifest = install_layout.load_manifest(os.path.join(
         root, install_layout.exe_contents_dir(exe), install_layout.MANIFEST_NAME))
@@ -296,9 +331,11 @@ def main(argv=None) -> int:
     us = reg_value(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\\" + brand.UNINSTALL_KEY_NAME,
                    "UninstallString") or ""
     rep.check("uninstall entry runs the canonical exe", us.lower() == f'"{exe}" --uninstall'.lower(), us)
-    cmd = reg_value("Software\\Classes\\" + brand.URL_SCHEME + r"\shell\open\command") or ""
-    rep.check("URL protocol opens the canonical exe", exe.lower() in cmd.lower(), cmd)
+    for scheme in (brand.URL_SCHEME, brand.LEGACY_URL_SCHEME):
+        cmd = reg_value("Software\\Classes\\" + scheme + r"\shell\open\command") or ""
+        rep.check(f"{scheme}:// opens the canonical exe", exe.lower() in cmd.lower(), cmd)
     rep.check("logon task registered (Start with Windows ticked)", task_exists())
+    rep.check("no logon task under the legacy name", not task_exists(brand.LEGACY_TASK_NAME))
     try:
         import app_install
         rep.check("Start menu entry exists", os.path.exists(app_install.start_menu_link()))
@@ -366,11 +403,13 @@ def main(argv=None) -> int:
     deadline = time.time() + 240  # thousands of leftover onefile unpack files
     while time.time() < deadline and os.path.exists(root):
         time.sleep(1)
-    rep.check("uninstall removed the install folder", not os.path.exists(root))
+    rep.check("uninstall removed the install folder",
+              not os.path.exists(root) and not os.path.exists(old_root))
     rep.check("uninstall removed the Installed apps entry", not uninstall_entries(), uninstall_entries())
     rep.check("uninstall removed the logon task", not task_exists())
-    rep.check("uninstall removed the URL protocol",
-              reg_value("Software\\Classes\\" + brand.URL_SCHEME) is None)
+    rep.check("uninstall removed the URL protocols",
+              reg_value("Software\\Classes\\" + brand.URL_SCHEME) is None
+              and reg_value("Software\\Classes\\" + brand.LEGACY_URL_SCHEME) is None)
     if os.path.isdir(parked):
         os.makedirs(root, exist_ok=True)
         shutil.move(parked, models)

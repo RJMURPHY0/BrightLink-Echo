@@ -136,7 +136,7 @@ class WiringTests(unittest.TestCase):
         self.assertIn("text=brand.PRODUCT_SHORT_NAME", _src("popup.py"))
 
     def test_the_build_ships_the_artwork(self):
-        spec = _src("ftc_whisper.spec")
+        spec = _src("echo.spec")
         self.assertIn("os.path.join(APP_DIR, 'assets', 'brand', '*.png')", spec)
         self.assertIn("datas.append((_p, os.path.join('assets', 'brand')))", spec)
 

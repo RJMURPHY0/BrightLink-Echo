@@ -1,6 +1,6 @@
 """Rewrite the installed layout's manifest after the exe is signed.
 
-    python tools/make_manifest.py ["dist\\FTC Whisper"]
+    python tools/make_manifest.py ["dist\\BrightLink Echo"]
 
 Signing changes the exe's bytes, so the manifest the spec wrote describes an
 exe that no longer exists. CI runs this between signing and building the
@@ -25,7 +25,10 @@ from tools.build_installer import app_version  # noqa: E402
 # file past the limit fails to copy and the version never installs, so the
 # build fails first. Found 2026-09-29: anthropic ships a 104-character module
 # path, and a local build from a deep scratch folder crossed the line.
-_PROFILE_BUDGET = len(r"C:\Users\\") + 32 + len("\\AppData\\Local\\") + len(brand.DATA_DIR_NAME) + 1
+# Both folder names count: a v1.8.0 copy stages in the legacy folder and
+# activate.ps1 then moves it into the new one.
+_PROFILE_BUDGET = (len(r"C:\Users\\") + 32 + len("\\AppData\\Local\\")
+                   + max(len(brand.DATA_DIR_NAME), len(brand.LEGACY_DATA_DIR_NAME)) + 1)
 _MAX_PATH = 259
 
 

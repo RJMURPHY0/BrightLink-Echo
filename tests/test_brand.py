@@ -1,11 +1,13 @@
 """Guards for the product name split in brand.py.
 
-Two things must never regress:
-  1. Renaming the product changes only what people SEE. Every folder, exe,
-     registry key, scheme and release asset that installed copies find by name
-     keeps its original value. Moving one loses users their 660 MB model,
-     sign-in, shortcuts or auto-update.
-  2. Nothing shown to a person hard-codes a product name. The name lives in
+Three things must never regress:
+  1. Renaming the product changes only what people SEE. The on-disk names
+     (folders, exe, launchers, registry keys) moved once, in v1.8.1, through a
+     migration in installer/activate.ps1; the legacy values stay pinned here
+     so that migration and clean-up can always find them.
+  2. What older installed copies find by name (release assets, the CRM's URL
+     scheme, the taskbar id, the signer) never changes.
+  3. Nothing shown to a person hard-codes a product name. The name lives in
      brand.py alone, so the next rename is a one-line change.
 """
 
@@ -27,18 +29,39 @@ LEGACY = brand.UNRECORDED_PRODUCT_NAME
 
 
 class FrozenIdentityTests(unittest.TestCase):
+    def test_on_disk_names_are_the_products(self):
+        # Moved in v1.8.1 (activate.ps1 migrates every installed copy). What a
+        # person sees in Explorer, Task Manager, Startup apps and Installed apps.
+        self.assertEqual("BrightLink Echo", brand.DATA_DIR_NAME)
+        self.assertEqual("BrightLink Echo", brand.EXE_BASENAME)
+        self.assertEqual("BrightLink Echo.exe", brand.CANONICAL_EXE_NAME)
+        self.assertEqual("Global\\BrightLink_Echo_SingleInstance", brand.MUTEX_NAME)
+        self.assertEqual("BrightLink Echo", brand.TASK_NAME)
+        self.assertEqual("BrightLink Echo", brand.RUN_VALUE_NAME)
+        self.assertEqual("brightlinkecho", brand.URL_SCHEME)
+        self.assertEqual("BrightLinkEcho", brand.UNINSTALL_KEY_NAME)
+        self.assertEqual("migrated.json", brand.MIGRATED_MARKER)
+
+    def test_legacy_names_stay_findable(self):
+        # What v1.8.0 and older left on every machine. The migration, the
+        # clean-up and the uninstaller find them by exactly these names.
+        self.assertEqual("FTC Whisper", brand.LEGACY_DATA_DIR_NAME)
+        self.assertEqual("FTC Whisper.exe", brand.LEGACY_CANONICAL_EXE_NAME)
+        self.assertEqual("Global\\FTC_Whisper_SingleInstance", brand.LEGACY_MUTEX_NAME)
+        self.assertEqual("FTC Whisper", brand.LEGACY_TASK_NAME)
+        self.assertEqual("FTC Whisper", brand.LEGACY_RUN_VALUE_NAME)
+        self.assertEqual("ftcwhisper", brand.LEGACY_URL_SCHEME)
+        self.assertEqual("FTCWhisper", brand.LEGACY_UNINSTALL_KEY_NAME)
+        self.assertEqual("FTCWhisperSetup", brand.LEGACY_SETUP_MUTEX)
+
     def test_plumbing_keeps_its_original_values(self):
-        # Each is found BY NAME by installed copies, the updater, the CRM or
-        # Windows itself. Changing one strands every existing install.
-        self.assertEqual("FTC Whisper", brand.DATA_DIR_NAME)
-        self.assertEqual("FTC Whisper", brand.EXE_BASENAME)
-        self.assertEqual("FTC Whisper.exe", brand.CANONICAL_EXE_NAME)
-        self.assertEqual("Global\\FTC_Whisper_SingleInstance", brand.MUTEX_NAME)
-        self.assertEqual("FTC Whisper", brand.TASK_NAME)
-        self.assertEqual("FTC Whisper", brand.RUN_VALUE_NAME)
-        self.assertEqual("ftcwhisper", brand.URL_SCHEME)
-        self.assertEqual("FTCWhisper", brand.UNINSTALL_KEY_NAME)
+        # Each is found BY NAME by older installed copies, the CRM or Windows
+        # itself. Changing one strands every copy that looks for it.
         self.assertEqual("FTC-Whisper.exe", brand.UPDATE_ASSET)
+        self.assertEqual("FTC-Whisper-Setup.exe", brand.LEGACY_SETUP_UPDATE_ASSET)
+        self.assertEqual("FTC-Whisper-rollout.json", brand.LEGACY_ROLLOUT_ASSET)
+        self.assertEqual("BrightLink-Echo-Setup.exe", brand.SETUP_UPDATE_ASSET)
+        self.assertEqual("BrightLink-Echo-rollout.json", brand.ROLLOUT_ASSET)
         # Taskbar pins and notifications group under it; its visible name is
         # registered separately, so the id itself never has to move.
         self.assertEqual("FTC.Whisper", brand.APP_USER_MODEL_ID)
@@ -48,8 +71,6 @@ class FrozenIdentityTests(unittest.TestCase):
         self.assertEqual("FTC Whisper", brand.UNRECORDED_PRODUCT_NAME)
         # The installed-layout names (v1.8.0): every installed copy finds its
         # next version, its own files and its pending update by these.
-        self.assertEqual("FTC-Whisper-Setup.exe", brand.SETUP_UPDATE_ASSET)
-        self.assertEqual("FTC-Whisper-rollout.json", brand.ROLLOUT_ASSET)
         self.assertEqual("app-", brand.CONTENTS_DIR_PREFIX)
         self.assertEqual("pending-", brand.PENDING_DIR_PREFIX)
         # SmartScreen reputation is bound to this exact subject.
@@ -60,9 +81,10 @@ class FrozenIdentityTests(unittest.TestCase):
         # The bridge, the installer, the rollout switch and the download are
         # four different files; two sharing a name would make a pre-1.8
         # updater install the installer as if it were the app.
-        names = {brand.UPDATE_ASSET, brand.SETUP_UPDATE_ASSET, brand.ROLLOUT_ASSET}
-        self.assertEqual(3, len(names))
-        self.assertNotIn(brand.DOWNLOAD_ASSET, (brand.UPDATE_ASSET, brand.ROLLOUT_ASSET))
+        names = {brand.UPDATE_ASSET, brand.SETUP_UPDATE_ASSET, brand.ROLLOUT_ASSET,
+                 brand.LEGACY_SETUP_UPDATE_ASSET, brand.LEGACY_ROLLOUT_ASSET}
+        self.assertEqual(5, len(names))
+        self.assertNotIn(brand.DOWNLOAD_ASSET, names)
 
     def test_the_first_name_stays_on_the_legacy_list(self):
         # Shortcut renames, launcher clean-up and history icons all look up
@@ -89,9 +111,10 @@ class FrozenIdentityTests(unittest.TestCase):
         self.assertEqual([], top)
 
 
-class ModulesUseFrozenValuesTests(unittest.TestCase):
-    """Every data path and key resolves to the frozen names, and keeps doing
-    so when the display name changes."""
+class ModulesUseTheDataFolderTests(unittest.TestCase):
+    """Every data path resolves through data_paths: the current folders on a
+    new or migrated machine, the legacy ones on a machine not moved yet, and
+    none of it follows the display name."""
 
     @classmethod
     def setUpClass(cls):
@@ -138,11 +161,11 @@ class ModulesUseFrozenValuesTests(unittest.TestCase):
             "phrases": phrase_learning.store_dir(),
         }
 
-    def _check(self, paths):
-        local_dir = os.path.join(self.local, "FTC Whisper")
-        roaming_dir = os.path.join(self.roaming, "FTC Whisper")
+    def _check(self, paths, folder="BrightLink Echo", exe="BrightLink Echo.exe"):
+        local_dir = os.path.join(self.local, folder)
+        roaming_dir = os.path.join(self.roaming, folder)
         self.assertEqual(local_dir, paths["app data"])
-        self.assertEqual(os.path.join(local_dir, "FTC Whisper.exe"), paths["canonical exe"])
+        self.assertEqual(os.path.join(local_dir, exe), paths["canonical exe"])
         self.assertEqual(local_dir, paths["install dir"])
         self.assertEqual(roaming_dir, paths["user data"])
         for key in ("models", "phrases"):
@@ -150,7 +173,34 @@ class ModulesUseFrozenValuesTests(unittest.TestCase):
         for key in ("audio", "session", "stats", "history"):
             self.assertTrue(paths[key].startswith(roaming_dir + os.sep), key)
 
-    def test_data_paths_use_the_frozen_folder(self):
+    def test_a_new_machine_uses_the_current_folders(self):
+        self._check(self._paths())
+
+    def test_a_machine_not_moved_yet_keeps_its_legacy_folders(self):
+        # A pre-1.8 copy on the bridge, or an update that has not run: moving
+        # its data under it would lose the model, the session and history.
+        os.makedirs(os.path.join(self.local, "FTC Whisper"))
+        os.makedirs(os.path.join(self.roaming, "FTC Whisper"))
+        self._check(self._paths(), "FTC Whisper", "FTC Whisper.exe")
+
+    def test_a_migrated_machine_ignores_a_legacy_leftover(self):
+        # activate.ps1 marks the new folder once it holds everything; a locked
+        # file may still keep a legacy folder alive for a while.
+        os.makedirs(os.path.join(self.local, "FTC Whisper"))
+        os.makedirs(os.path.join(self.local, "BrightLink Echo"))
+        with open(os.path.join(self.local, "BrightLink Echo", "migrated.json"), "w") as f:
+            f.write("{}")
+        os.makedirs(os.path.join(self.roaming, "BrightLink Echo"))
+        self._check(self._paths())
+
+    def test_a_folder_holding_the_current_exe_is_home_without_a_marker(self):
+        # A fresh install, before any legacy folder existed; an old exe run
+        # later recreates one, and must not pull the app back to it.
+        os.makedirs(os.path.join(self.local, "BrightLink Echo"))
+        with open(os.path.join(self.local, "BrightLink Echo", "BrightLink Echo.exe"), "w") as f:
+            f.write("exe")
+        os.makedirs(os.path.join(self.local, "FTC Whisper", "runtime"))
+        os.makedirs(os.path.join(self.roaming, "BrightLink Echo"))
         self._check(self._paths())
 
     def test_a_rename_moves_no_data(self):
@@ -167,10 +217,14 @@ class ModulesUseFrozenValuesTests(unittest.TestCase):
             "https://api.github.com/repos/RJMURPHY0/BrightLink-Echo/releases/latest",
             updater._GITHUB_API,
         )
-        self.assertTrue(app_install.UNINSTALL_KEY.endswith("\\Uninstall\\FTCWhisper"))
-        self.assertTrue(app_install.APP_PATHS_KEY.endswith("\\App Paths\\FTC Whisper.exe"))
-        self.assertEqual("Software\\Classes\\ftcwhisper", app_install.URL_PROTOCOL_KEY)
-        self.assertEqual("FTC Whisper", app_install.TASK_NAME)
+        self.assertTrue(app_install.UNINSTALL_KEY.endswith("\\Uninstall\\BrightLinkEcho"))
+        self.assertTrue(app_install.APP_PATHS_KEY.endswith("\\App Paths\\BrightLink Echo.exe"))
+        self.assertEqual("Software\\Classes\\brightlinkecho", app_install.URL_PROTOCOL_KEY)
+        self.assertEqual("BrightLink Echo", app_install.TASK_NAME)
+        # What register() removes, and the uninstaller removes too.
+        self.assertTrue(app_install.LEGACY_UNINSTALL_KEY.endswith("\\Uninstall\\FTCWhisper"))
+        self.assertTrue(app_install.LEGACY_APP_PATHS_KEY.endswith("\\App Paths\\FTC Whisper.exe"))
+        self.assertEqual("Software\\Classes\\ftcwhisper", app_install.LEGACY_URL_PROTOCOL_KEY)
 
 
 def _docstring_nodes(tree):
@@ -204,7 +258,7 @@ def _name_literals(path, pattern):
 class NoHardCodedNameTests(unittest.TestCase):
     def _runtime_files(self):
         files = [f for f in os.listdir(ROOT) if f.endswith(".py") and f != "brand.py"]
-        files.append("ftc_whisper.spec")
+        files.append("echo.spec")
         return sorted(files)
 
     def test_no_display_name_outside_brand(self):
@@ -249,7 +303,7 @@ class VersionResourceTests(unittest.TestCase):
         self.assertEqual(brand.PRODUCT_NAME, after["ProductName"])
         self.assertEqual(brand.PRODUCT_NAME, after["FileDescription"])
         self.assertEqual(brand.COMPANY_NAME, after["CompanyName"])
-        self.assertEqual("FTC Whisper.exe", after["OriginalFilename"])
+        self.assertEqual(brand.CANONICAL_EXE_NAME, after["OriginalFilename"])
         self.assertNotIn(" ", after["InternalName"])
         self.assertIn("2026", after["LegalCopyright"])
         for key in ("FileVersion", "ProductVersion", "Comments"):
@@ -290,15 +344,16 @@ class VersionResourceTests(unittest.TestCase):
             brand.render_version_info(template, 2026)
 
     def test_spec_takes_names_from_brand(self):
-        spec = open(os.path.join(ROOT, "ftc_whisper.spec"), encoding="utf-8").read()
+        spec = open(os.path.join(ROOT, "echo.spec"), encoding="utf-8").read()
         self.assertIn("name=_brand.EXE_BASENAME", spec)       # frozen, never the display name
         self.assertIn("_brand.render_version_info(", spec)
         self.assertIn("version=_version_file", spec)
-        self.assertIn("_brand.DATA_DIR_NAME + '\\\\runtime'", spec)
+        # The bridge only ever runs as a pre-1.8 copy's exe, in the legacy folder.
+        self.assertIn("_brand.LEGACY_DATA_DIR_NAME + '\\\\runtime'", spec)
         self.assertIn("'brand',", spec)                        # hidden import
 
     def test_spec_builds_the_bridge_and_the_installed_layout(self):
-        spec = open(os.path.join(ROOT, "ftc_whisper.spec"), encoding="utf-8").read()
+        spec = open(os.path.join(ROOT, "echo.spec"), encoding="utf-8").read()
         # The installed layout's contents folder is named after the version.
         self.assertIn("_contents = _brand.CONTENTS_DIR_PREFIX + _APP_VERSION", spec)
         self.assertIn("contents_directory=_contents", spec)
@@ -317,7 +372,8 @@ class VersionResourceTests(unittest.TestCase):
     def test_the_installer_leaves_one_installed_apps_entry_and_no_admin(self):
         iss = open(os.path.join(ROOT, "installer", "echo.iss"), encoding="utf-8").read()
         for line in ("PrivilegesRequired=lowest", "Uninstallable=no", "CreateUninstallRegKey=no",
-                     "CloseApplications=no", "DefaultDirName={localappdata}\\{#DataDir}"):
+                     "CloseApplications=no", "DefaultDirName={code:InstallRoot}",
+                     "SetupMutex={#SetupMutex},{#LegacySetupMutex}"):
             self.assertIn(line, iss)
         # Staging runs while the app is open, so no AppMutex directive.
         self.assertNotIn("\nAppMutex=", iss)
@@ -327,12 +383,17 @@ class VersionResourceTests(unittest.TestCase):
         self.assertTrue(all(ord(c) < 128 for c in iss))
         import tools.build_installer as bi
         d = bi.defines("dist", "out", "w.png", "s.png", "1.8.0")
-        self.assertEqual("FTC-Whisper-Setup", d["OutputBase"])
+        self.assertEqual("BrightLink-Echo-Setup", d["OutputBase"])
         self.assertNotEqual(d["OutputBase"] + ".exe", brand.CANONICAL_EXE_NAME)
         self.assertEqual("app-1.8.0", d["ContentsDir"])
         self.assertEqual("pending-1.8.0", d["PendingDir"])
         self.assertEqual(brand.PRODUCT_NAME, d["AppName"])
         self.assertEqual(brand.DATA_DIR_NAME, d["DataDir"])
+        self.assertEqual(brand.LEGACY_DATA_DIR_NAME, d["LegacyDataDir"])
+        self.assertEqual(brand.LEGACY_CANONICAL_EXE_NAME, d["LegacyExeName"])
+        # A v1.8.0 updater stages without /DIR and checks the legacy exe name.
+        self.assertIn("if IsStageOnly and not HasDirParam then", iss)
+        self.assertIn('DestName: "{#LegacyExeName}"', iss)
         self.assertEqual("1.8.0.0", d["FileVersion"])
 
 
@@ -384,12 +445,18 @@ class WorkflowTests(unittest.TestCase):
     def _order(self):
         return [s.get("name") for s in self.wf["jobs"]["build-windows"]["steps"]]
 
-    def test_every_release_carries_all_four_assets(self):
+    def test_every_release_carries_all_six_assets(self):
+        # v1.8.0 copies fetch the installer and rollout file under the legacy
+        # names; a release without them strands every one of them.
         files = self.steps["Publish versioned release"]["with"]["files"]
-        for out in ("UPDATE_ASSET", "SETUP_ASSET", "DOWNLOAD_ASSET", "ROLLOUT_ASSET"):
+        check = self.steps["Check the release has every asset"]["env"]["FILES"]
+        for out in ("UPDATE_ASSET", "SETUP_ASSET", "DOWNLOAD_ASSET", "ROLLOUT_ASSET",
+                    "LEGACY_SETUP_ASSET", "LEGACY_ROLLOUT_ASSET"):
             self.assertIn(f"steps.version.outputs.{out}", files)
+            self.assertIn(f"steps.version.outputs.{out}", check)
         read = self.steps["Read version and product names"]["run"]
-        for name in ("brand.SETUP_UPDATE_ASSET", "brand.ROLLOUT_ASSET", "brand.SIGNER_SUBJECT"):
+        for name in ("brand.SETUP_UPDATE_ASSET", "brand.ROLLOUT_ASSET", "brand.SIGNER_SUBJECT",
+                     "brand.LEGACY_SETUP_UPDATE_ASSET", "brand.LEGACY_ROLLOUT_ASSET"):
             self.assertIn(name, read)
         copy = self.steps["Name the release assets"]["run"]
         # The download people get is the installer, under the name every
@@ -408,7 +475,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertLess(order.index("Write the installed-layout manifest"), order.index("Build installer"))
         self.assertLess(order.index("Build installer"), order.index("Sign installer"))
         verify = self.steps["Verify signature"]["run"]
-        for f in ("$env:UPDATE_ASSET", "$env:SETUP_ASSET", "$env:DOWNLOAD_ASSET", "$env:DIST_DIR\\$env:DIST_EXE"):
+        for f in ("$env:UPDATE_ASSET", "$env:SETUP_ASSET", "$env:LEGACY_SETUP_ASSET",
+                  "$env:DOWNLOAD_ASSET", "$env:DIST_DIR\\$env:DIST_EXE"):
             self.assertIn(f, verify)
         self.assertIn("$env:SIGNER", verify)
 

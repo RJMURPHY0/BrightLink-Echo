@@ -1,6 +1,7 @@
 name: Installer migration scenarios
 
-# Proves the onefile -> installed-layout migration on clean Windows machines,
+# Proves the onefile -> installed-layout migration, and the v1.8.1 move from
+# the legacy folder names to the current ones, on clean Windows machines,
 # with the REAL signed files of a "Build and publish Windows installer" dry
 # run (Run workflow, publish unticked). Each job is a fresh VM: it installs
 # old releases from GitHub, points api.github.com/github.com at a local fake
@@ -26,6 +27,10 @@ on:
         description: "Old releases to upgrade from (JSON list)"
         required: false
         default: '["1.7.2", "1.6.86", "1.6.79"]'
+      installed_from:
+        description: "Installed-layout releases (legacy folder names) to update from (JSON list)"
+        required: false
+        default: '["1.8.0"]'
 
 permissions:
   contents: read
@@ -58,16 +63,60 @@ jobs:
           merge-multiple: true
       # The model is fetched once, like the app does, so the scenario can
       # prove an update never re-downloads it.
+      # Saved from wherever the model ends up (the current folder, once the
+      # scenario has moved the machine); seed-model puts it back in the legacy
+      # folder, where the old version being upgraded expects it.
       - uses: actions/cache@v4
         with:
-          path: ~\AppData\Local\FTC Whisper\models
+          path: |
+            ~\AppData\Local\BrightLink Echo\models
+            ~\AppData\Local\FTC Whisper\models
           key: parakeet-${{ hashFiles('asr_engine.py') }}
-      - run: python -c "import sys, asr_engine; sys.exit(0 if asr_engine.download_model() else 1)"
+      - run: python tools/e2e_upgrade.py seed-model
       - run: python tools/e2e_upgrade.py upgrade --from ${{ matrix.from }} --assets dist --report report
       - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-upgrade-from-${{ matrix.from }}
+          path: report/
+
+  installed:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        from: ${{ fromJSON(inputs.installed_from) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: constraints.txt
+      - run: uv pip install --system -r requirements.txt -c constraints.txt
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+          path: dist
+          merge-multiple: true
+      # Saved from wherever the model ends up (the current folder, once the
+      # scenario has moved the machine); seed-model puts it back in the legacy
+      # folder, where the old version being upgraded expects it.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\BrightLink Echo\models
+            ~\AppData\Local\FTC Whisper\models
+          key: parakeet-${{ hashFiles('asr_engine.py') }}
+      - run: python tools/e2e_upgrade.py seed-model
+      - run: python tools/e2e_upgrade.py installed --from ${{ matrix.from }} --assets dist --report report
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-installed-from-${{ matrix.from }}
           path: report/
 
   faults:
@@ -88,11 +137,16 @@ jobs:
           github-token: ${{ github.token }}
           path: dist
           merge-multiple: true
+      # Saved from wherever the model ends up (the current folder, once the
+      # scenario has moved the machine); seed-model puts it back in the legacy
+      # folder, where the old version being upgraded expects it.
       - uses: actions/cache@v4
         with:
-          path: ~\AppData\Local\FTC Whisper\models
+          path: |
+            ~\AppData\Local\BrightLink Echo\models
+            ~\AppData\Local\FTC Whisper\models
           key: parakeet-${{ hashFiles('asr_engine.py') }}
-      - run: python -c "import sys, asr_engine; sys.exit(0 if asr_engine.download_model() else 1)"
+      - run: python tools/e2e_upgrade.py seed-model
       - run: python tools/e2e_upgrade.py faults --assets dist --report report
       - if: always()
         uses: actions/upload-artifact@v4
@@ -125,11 +179,16 @@ jobs:
           github-token: ${{ github.token }}
           path: dist-next
           merge-multiple: true
+      # Saved from wherever the model ends up (the current folder, once the
+      # scenario has moved the machine); seed-model puts it back in the legacy
+      # folder, where the old version being upgraded expects it.
       - uses: actions/cache@v4
         with:
-          path: ~\AppData\Local\FTC Whisper\models
+          path: |
+            ~\AppData\Local\BrightLink Echo\models
+            ~\AppData\Local\FTC Whisper\models
           key: parakeet-${{ hashFiles('asr_engine.py') }}
-      - run: python -c "import sys, asr_engine; sys.exit(0 if asr_engine.download_model() else 1)"
+      - run: python tools/e2e_upgrade.py seed-model
       - run: python tools/e2e_upgrade.py next --assets dist --next-assets dist-next --report report
       - if: always()
         uses: actions/upload-artifact@v4

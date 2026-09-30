@@ -38,6 +38,7 @@ counts merging with another machine's would only blur the threshold.
 import json
 import math
 import brand
+import data_paths
 import os
 import re
 import threading
@@ -280,8 +281,7 @@ def _safe_name(key: str) -> str:
 
 
 def store_dir() -> str:
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    return os.path.join(base, brand.DATA_DIR_NAME, "phrases")
+    return os.path.join(data_paths.local_dir(), "phrases")
 
 
 class PhraseStore:

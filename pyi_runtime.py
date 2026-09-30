@@ -33,7 +33,9 @@ import os
 import sys
 
 # Set on the one relaunch we perform, so a relaunch can never loop.
-GUARD_VAR = "FTC_WHISPER_RUNTIME_RESET"
+GUARD_VAR = "BRIGHTLINK_ECHO_RUNTIME_RESET"
+# The same guard as v1.8.0 and older named it: stripped from a launch too.
+_LEGACY_GUARD_VAR = "FTC_WHISPER_RUNTIME_RESET"
 _RESET_VAR = "PYINSTALLER_RESET_ENVIRONMENT"
 
 
@@ -43,7 +45,7 @@ def clean_launch_env(base=None) -> dict:
     and our relaunch guard dropped so the child can still heal itself."""
     env = dict(os.environ if base is None else base)
     for key in list(env):
-        if key.upper().startswith("_PYI_") or key.upper() == GUARD_VAR:
+        if key.upper().startswith("_PYI_") or key.upper() in (GUARD_VAR, _LEGACY_GUARD_VAR):
             del env[key]
     env[_RESET_VAR] = "1"
     return env

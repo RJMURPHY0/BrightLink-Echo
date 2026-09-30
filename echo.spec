@@ -1,21 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec for FTC Whisper (BrightLink Echo).
+PyInstaller spec for BrightLink Echo.
 
 One Analysis, two outputs (v1.8.0):
 
-  dist\\FTC Whisper.exe    ONEFILE, exactly as every release before. Published as
+  dist\\BrightLink Echo.exe  ONEFILE, exactly as every release before. Published as
                           UPDATE_ASSET, the "bridge" every pre-1.8 updater can
                           still install; it runs as today, then migrates the
                           machine to the installed layout.
-  dist\\FTC Whisper\\       ONEDIR, the installed layout: FTC Whisper.exe plus
+  dist\\BrightLink Echo\\   ONEDIR, the installed layout: BrightLink Echo.exe plus
                           app-<APP_VERSION>\\ (contents_directory), with
                           activate.ps1 and manifest.json. The installer
                           (installer\\echo.iss) ships this folder.
 
 ECHO_BUILD=onefile or ECHO_BUILD=onedir builds one of them (local dev only;
 CI always builds both). The speech model is NOT bundled: the app downloads it
-once, into %LOCALAPPDATA%\\FTC Whisper\\models.
+once, into <local data folder>\\models (data_paths.local_dir).
 """
 
 import os
@@ -212,8 +212,8 @@ if _BUILD in ('both', 'onefile'):
     a.zipfiles,
     a.datas,
     [],
-    # FROZEN, never the display name: dist\FTC Whisper.exe is what CI copies to
-    # both release assets, and OriginalFilename names the installed exe.
+    # The on-disk name, never the display name. CI copies this exe to
+    # UPDATE_ASSET (the bridge); OriginalFilename names the installed exe.
     name=_brand.EXE_BASENAME,
     debug=False,
     bootloader_ignore_signals=False,
@@ -230,7 +230,10 @@ if _BUILD in ('both', 'onefile'):
     # ExpandEnvironmentStringsW; the "no expansion" note in --runtime-tmpdir's
     # help applies to POSIX). We already require this folder to be writable —
     # the model, the canonical exe and the logs all live in it.
-    runtime_tmpdir='%LOCALAPPDATA%\\' + _brand.DATA_DIR_NAME + '\\runtime',
+    # The LEGACY folder: the bridge only ever runs as a pre-1.8 copy's exe,
+    # inside that folder, until the rollout moves the machine to the installed
+    # layout (whose activation then moves the folder, runtime\ included).
+    runtime_tmpdir='%LOCALAPPDATA%\\' + _brand.LEGACY_DATA_DIR_NAME + '\\runtime',
     console=False,          # no black console window
     disable_windowed_traceback=False,
     # Embedded exe icon = the BrightLink chain mark, the same artwork as the

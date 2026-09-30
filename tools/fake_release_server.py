@@ -56,25 +56,33 @@ def sha256(path: str) -> str:
     return _HASHES[key]
 
 
+SETUP_NAMES = (brand.SETUP_UPDATE_ASSET, brand.LEGACY_SETUP_UPDATE_ASSET)
+ROLLOUT_NAMES = (brand.ROLLOUT_ASSET, brand.LEGACY_ROLLOUT_ASSET)
+
+
 def release(c: dict) -> dict:
     v = c["version"].lstrip("vV")
     assets = []
-    names = [brand.UPDATE_ASSET, brand.SETUP_UPDATE_ASSET, brand.DOWNLOAD_ASSET]
+    # Every name a real release carries, including the installer and rollout
+    # file under the names v1.8.0 copies ask for.
+    names = [brand.UPDATE_ASSET, brand.SETUP_UPDATE_ASSET, brand.LEGACY_SETUP_UPDATE_ASSET,
+             brand.DOWNLOAD_ASSET]
     if c.get("fault") == "no-setup":
-        names.remove(brand.SETUP_UPDATE_ASSET)
+        names = [n for n in names if n not in SETUP_NAMES]
     for name in names:
         p = os.path.join(c["assets"], name)
         if not os.path.exists(p):
             continue
         digest = sha256(p)
-        if c.get("fault") == "bad-digest" and name == brand.SETUP_UPDATE_ASSET:
+        if c.get("fault") == "bad-digest" and name in SETUP_NAMES:
             digest = "0" * 64
         assets.append({"name": name, "size": os.path.getsize(p), "digest": "sha256:" + digest,
                        "browser_download_url": f"https://github.com/fake/releases/download/v{v}/{name}"})
     rollout = json.dumps(c.get("rollout") or {}).encode()
-    assets.append({"name": brand.ROLLOUT_ASSET, "size": len(rollout),
-                   "digest": "sha256:" + hashlib.sha256(rollout).hexdigest(),
-                   "browser_download_url": f"https://github.com/fake/releases/download/v{v}/{brand.ROLLOUT_ASSET}"})
+    for name in ROLLOUT_NAMES:
+        assets.append({"name": name, "size": len(rollout),
+                       "digest": "sha256:" + hashlib.sha256(rollout).hexdigest(),
+                       "browser_download_url": f"https://github.com/fake/releases/download/v{v}/{name}"})
     return {"tag_name": f"v{v}", "name": f"v{v}", "prerelease": False, "assets": assets}
 
 
@@ -103,7 +111,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(200, json.dumps(release(c)).encode())
         if path.startswith("/fake/releases/download/"):
             name = path.rsplit("/", 1)[1]
-            if name == brand.ROLLOUT_ASSET:
+            if name in ROLLOUT_NAMES:
                 return self._send(200, json.dumps(c.get("rollout") or {}).encode())
             p = os.path.join(c["assets"], name)
             if not os.path.isfile(p):
@@ -114,7 +122,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(size))
             self.end_headers()
             limit = size // 2 if (c.get("fault") == "truncate"
-                                  and name == brand.SETUP_UPDATE_ASSET) else size
+                                  and name in SETUP_NAMES) else size
             with open(p, "rb") as f:
                 sent = 0
                 while sent < limit:

@@ -475,7 +475,7 @@ def foreground_is_elevated_blocked() -> bool:
     process while we are NOT elevated. In that case Windows UIPI silently drops
     all our injected input — clipboard paste, SendInput, and WM_CHAR all fail
     with no error. The caller uses this to warn the user instead of failing
-    silently ('Run FTC Whisper as administrator to type into elevated apps').
+    silently ('Run BrightLink Echo as administrator to type into elevated apps').
     """
     try:
         u32 = ctypes.windll.user32
@@ -677,10 +677,10 @@ def _log_inject_failure(detail: str) -> None:
     """Append one line to a small rolling failure log. The frozen exe has no
     console, so this file is the only way a 'text never landed' report from
     another machine can say WHICH app, WHICH strategy, and whether the target
-    was elevated. %LOCALAPPDATA%\\FTC Whisper\\inject-failures.log"""
+    was elevated. <local data folder>\\inject-failures.log"""
     try:
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        folder = os.path.join(base, brand.DATA_DIR_NAME)
+        import data_paths
+        folder = data_paths.local_dir()
         os.makedirs(folder, exist_ok=True)
         path = os.path.join(folder, "inject-failures.log")
         lines: list[str] = []

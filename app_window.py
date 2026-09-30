@@ -1,5 +1,5 @@
 ﻿"""
-FTC Whisper — Main application window.
+BrightLink Echo — Main application window.
 
 Dashboard: Home / Hotkey / History tabs.
 Dark theme with rounded-corner cards via Canvas.
@@ -5532,7 +5532,7 @@ class AppWindow:
     # ── Hotkey tab ────────────────────────────────────────────────────────────
 
     _HELP_HANDS_FREE = (
-        "Tap the keys once and Whisper starts listening. Tap them again "
+        f"Tap the keys once and {brand.PRODUCT_SHORT_NAME} starts listening. Tap them again "
         "and it stops, then types what you said into whatever you were "
         "already working in — no need to hold anything down.\n\n"
         "Press Change Hotkey to set your own. Any single key (F9, for "
@@ -5540,7 +5540,7 @@ class AppWindow:
     )
     _HELP_PTT = (
         "Hold the keys down while you talk and let go when you are done — "
-        "the way a walkie-talkie works. Whisper types what you said the "
+        f"the way a walkie-talkie works. {brand.PRODUCT_SHORT_NAME} types what you said the "
         "moment you release. Best when you want short bursts and nothing "
         "left listening by accident.\n\n"
         "Press Change Hotkey to set your own. Any single key (F9, for "
@@ -5548,7 +5548,7 @@ class AppWindow:
     )
     _HELP_REFINE = (
         "Highlight some text anywhere — an email, a document, a chat box — "
-        "then press these keys. Whisper reads what you selected and offers "
+        f"then press these keys. {brand.PRODUCT_SHORT_NAME} reads what you selected and offers "
         "a tidier version you can drop straight back in its place.\n\n"
         "Press Change Hotkey to set your own. Any single key (F9, for "
         "instance) or any combination of two works."
@@ -10464,7 +10464,8 @@ class AppWindow:
             if not exe_path:
                 # Running from source — no frozen exe to swap; open the release page.
                 import webbrowser
-                webbrowser.open(download_url)
+                from updater import manual_download_url
+                webbrowser.open(manual_download_url())
                 return
             # Set synchronously — the after(0) UI update alone left a gap where
             # a second click (from a re-opened banner) started a duplicate run.
@@ -10517,7 +10518,8 @@ class AppWindow:
                     user_email=getattr(self._auth, "user_email", None),
                 )
                 import webbrowser
-                webbrowser.open(download_url)
+                from updater import manual_download_url
+                webbrowser.open(manual_download_url())
                 self._ui_after(0, _reset_btns)
 
             threading.Thread(target=_worker, daemon=True, name="in-app-update").start()

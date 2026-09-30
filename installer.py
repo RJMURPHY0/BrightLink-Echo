@@ -1,5 +1,5 @@
 """
-FTC Whisper post-install script.
+BrightLink Echo post-install script (source checkout only).
 Called by install.bat after the venv and pip dependencies are ready.
   - Creates config.json from template if it does not exist
   - Generates logo.ico from the BrightLink chain mark (assets/brand)
@@ -88,7 +88,7 @@ def create_shortcut(icon_path: str) -> None:
 
 
 def add_to_startup() -> None:
-    """Add FTC Whisper to Windows startup via the user Startup folder."""
+    """Add the app to Windows startup via the user Startup folder."""
     try:
         import winreg
         # Resolve %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
@@ -125,7 +125,7 @@ def add_to_startup() -> None:
 
 
 def register_url_protocol() -> None:
-    """Register ftcwhisper:// URL protocol so browsers can launch the app."""
+    """Register the URL protocol so browsers can launch the app."""
     try:
         import winreg
         cmd = f'"{PYTHON}" "{APP_PY}" "%1"'
@@ -135,7 +135,7 @@ def register_url_protocol() -> None:
             winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\shell\open\command") as k:
             winreg.SetValueEx(k, "", 0, winreg.REG_SZ, cmd)
-        print("  [OK] Registered ftcwhisper:// URL protocol.")
+        print(f"  [OK] Registered {brand.URL_SCHEME}:// URL protocol.")
     except Exception as e:
         print(f"  [WARN] URL protocol registration failed: {e}")
 

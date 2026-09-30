@@ -4,7 +4,12 @@
 ; the version from app.py as /D defines: nothing product-specific is typed here.
 ;
 ; What it does, and deliberately does not do:
-;   * per-user, no admin, no UAC prompt: %LOCALAPPDATA%\FTC Whisper
+;   * per-user, no admin, no UAC prompt: %LOCALAPPDATA%\<DataDir>
+;   * one exception to that folder: run with /STAGEONLY and no /DIR it stages
+;     in %LOCALAPPDATA%\<LegacyDataDir>, because only a v1.8.0 updater runs it
+;     that way and v1.8.0 looks for the staged files there (under the legacy
+;     exe name too). activate.ps1 then moves the legacy folders to the current
+;     names. Every later updater passes /DIR
 ;   * lays the new version out in pending-<version>\ ONLY. It never writes into
 ;     the running version's files, so it can run while the app is open (the
 ;     updater stages with /STAGEONLY and switches when the user is idle)
@@ -12,8 +17,8 @@
 ;     against the manifest, moves the folder in, swaps the one exe with a
 ;     backup, and registers with Windows through the app's own --install /S
 ;   * no uninstaller and no Installed apps entry of its own
-;     (Uninstallable=no): the app's own entry, "FTCWhisper", is the only one,
-;     and its "<exe> --uninstall" removes everything
+;     (Uninstallable=no): the app's own entry is the only one, and its
+;     "<exe> --uninstall" removes everything
 ;   * no AppMutex: staging must be allowed while the app runs
 ;   * the speech model is NOT in here: the app downloads it once, with its own
 ;     retry, resume and per-file SHA-256 check
@@ -43,7 +48,7 @@ VersionInfoCopyright={#Copyright}
 ; Never the app's own OriginalFilename: activate.ps1 stops copies of the APP
 ; found by that name, and must never stop the installer running it.
 VersionInfoOriginalFileName={#OutputBase}.exe
-DefaultDirName={localappdata}\{#DataDir}
+DefaultDirName={code:InstallRoot}
 DisableDirPage=yes
 UsePreviousAppDir=no
 DirExistsWarning=no
@@ -58,7 +63,7 @@ Uninstallable=no
 CreateUninstallRegKey=no
 CloseApplications=no
 RestartApplications=no
-SetupMutex=FTCWhisperSetup
+SetupMutex={#SetupMutex},{#LegacySetupMutex}
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputBase}
 SetupIconFile={#IconFile}
@@ -91,6 +96,9 @@ Type: filesandordirs; Name: "{app}\{#PendingPrefix}*"
 
 [Files]
 Source: "{#SourceDir}\{#ExeName}"; DestDir: "{app}\{#PendingDir}"; Flags: ignoreversion
+; The same exe under the legacy name, for the v1.8.0 updater's own check of
+; what it staged. activate.ps1 installs the current name and drops this copy.
+Source: "{#SourceDir}\{#ExeName}"; DestDir: "{app}\{#PendingDir}"; DestName: "{#LegacyExeName}"; Flags: ignoreversion; Check: StagingInLegacyFolder
 Source: "{#SourceDir}\{#ContentsDir}\*"; DestDir: "{app}\{#PendingDir}\{#ContentsDir}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Run]
@@ -109,6 +117,38 @@ begin
   for I := 1 to ParamCount do
     if CompareText(ParamStr(I), '/STAGEONLY') = 0 then
       Result := True;
+end;
+
+procedure InitializeWizard;
+begin
+  // The progress page would print every extracted path, including the
+  // legacy folder a v1.8.0 updater stages in. The status line and the bar
+  // are enough.
+  WizardForm.FilenameLabel.Visible := False;
+end;
+
+function HasDirParam: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(Copy(ParamStr(I), 1, 5), '/DIR=') = 0 then
+      Result := True;
+end;
+
+function InstallRoot(Param: String): String;
+begin
+  if IsStageOnly and not HasDirParam then
+    Result := ExpandConstant('{localappdata}\{#LegacyDataDir}')
+  else
+    Result := ExpandConstant('{localappdata}\{#DataDir}');
+end;
+
+function StagingInLegacyFolder: Boolean;
+begin
+  Result := CompareText(ExtractFileName(RemoveBackslash(ExpandConstant('{app}'))),
+                        '{#LegacyDataDir}') = 0;
 end;
 
 function Activated: Boolean;

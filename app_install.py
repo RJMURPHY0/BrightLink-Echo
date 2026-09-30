@@ -1,5 +1,5 @@
 """
-Windows application registration for FTC Whisper.
+Windows application registration for the app.
 
 Makes the installed copy look like a real application to Windows instead of a
 loose exe someone left in Downloads:
@@ -12,9 +12,9 @@ loose exe someone left in Downloads:
 
 Names come from brand.py. The DISPLAY name (shortcut names, the Installed apps
 entry, dialogs) may change, and register() carries existing shortcuts across a
-rename. Every folder, registry key and exe name used here is FROZEN, because
-installed copies find them by name: never build a path or a key from
-brand.PRODUCT_NAME.
+rename. Folders, registry keys and the exe name come from brand's on-disk
+names, never from brand.PRODUCT_NAME. v1.8.1 moved those from the legacy
+names: register() removes what an older version registered under them.
 
 Everything is per-user (HKCU + %LOCALAPPDATA%/%APPDATA%), so nothing needs
 elevation and nothing touches another account. This is the same shape Slack,
@@ -23,7 +23,7 @@ is why those apps show up in Start and in Installed apps while still updating
 themselves in place.
 
 AUTO-UPDATE IS UNTOUCHED. Every shortcut and every registry value points at the
-CANONICAL exe (%LOCALAPPDATA%\\FTC Whisper\\FTC Whisper.exe), the path the
+CANONICAL exe (data_paths.canonical_exe()), the path the
 updater swaps in place, so no link can ever go stale after an update.
 register() re-runs on every launch and refreshes DisplayVersion, so the entry in
 Installed apps tracks the version the app actually is.
@@ -42,6 +42,7 @@ import sys
 import time
 
 import brand
+import data_paths
 
 _REG_UNINSTALL = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
 _REG_APP_PATHS = r"Software\Microsoft\Windows\CurrentVersion\App Paths"
@@ -54,6 +55,11 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 URL_PROTOCOL_KEY = "Software\\Classes\\" + brand.URL_SCHEME
 NOTIFICATION_ID_KEY = "Software\\Classes\\AppUserModelId\\" + brand.APP_USER_MODEL_ID
 TASK_NAME = brand.TASK_NAME
+# What v1.8.0 and older registered. register() removes them once this copy has
+# registered itself; the uninstaller removes both generations.
+LEGACY_UNINSTALL_KEY = _REG_UNINSTALL + "\\" + brand.LEGACY_UNINSTALL_KEY_NAME
+LEGACY_APP_PATHS_KEY = _REG_APP_PATHS + "\\" + brand.LEGACY_CANONICAL_EXE_NAME
+LEGACY_URL_PROTOCOL_KEY = "Software\\Classes\\" + brand.LEGACY_URL_SCHEME
 
 STATE_FILE = "install-state.json"
 
@@ -72,20 +78,14 @@ _NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _install_dir() -> str:
-    """%LOCALAPPDATA%\\FTC Whisper. Deliberately duplicated from app.py rather
-    than imported, so the uninstaller never drags the whole app in."""
-    base = os.environ.get("LOCALAPPDATA") or os.path.join(
-        os.path.expanduser("~"), "AppData", "Local"
-    )
-    return os.path.join(base, brand.DATA_DIR_NAME)
+    """The local data folder. data_paths is standard library only, so the
+    uninstaller still never drags the whole app in."""
+    return data_paths.local_dir()
 
 
 def _user_data_dir() -> str:
-    """%APPDATA%\\FTC Whisper: config, encrypted session, local audio."""
-    base = os.environ.get("APPDATA") or os.path.join(
-        os.path.expanduser("~"), "AppData", "Roaming"
-    )
-    return os.path.join(base, brand.DATA_DIR_NAME)
+    """The roaming data folder: config, encrypted session, local audio."""
+    return data_paths.roaming_dir()
 
 
 def _shell_folder(name: str, fallback: str) -> str:
@@ -434,10 +434,118 @@ def _write_app_paths(exe: str, old_names: list = ()) -> None:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as k:
             winreg.SetValueEx(k, "", 0, winreg.REG_SZ, exe)
             winreg.SetValueEx(k, "Path", 0, winreg.REG_SZ, os.path.dirname(exe))
-    for name in old_names:
-        key = app_paths_key(name)
-        if key.lower() != APP_PATHS_KEY.lower():
+    for key in [app_paths_key(name) for name in old_names] + [LEGACY_APP_PATHS_KEY]:
+        if key.lower() not in (APP_PATHS_KEY.lower(),
+                               app_paths_key(brand.PRODUCT_NAME).lower()):
             _delete_key_tree(winreg.HKEY_CURRENT_USER, key)
+
+
+def remove_legacy_registrations() -> list:
+    """Drop the Installed apps entry and launchers v1.8.0 and older registered
+    under the legacy names, once this copy has registered its own. Without it
+    Installed apps lists the product twice and the old logon task starts an
+    exe that no longer exists. The legacy URL scheme stays: the CRM opens it,
+    and app.py registers it to this exe."""
+    import winreg
+
+    done = []
+    if LEGACY_UNINSTALL_KEY.lower() != UNINSTALL_KEY.lower():
+        try:
+            winreg.OpenKey(winreg.HKEY_CURRENT_USER, LEGACY_UNINSTALL_KEY).Close()
+        except OSError:
+            pass
+        else:
+            _delete_key_tree(winreg.HKEY_CURRENT_USER, LEGACY_UNINSTALL_KEY)
+            done.append("removed legacy Installed apps entry")
+    done += remove_legacy_launchers()
+    return done
+
+
+def legacy_entry_present() -> bool:
+    """One registry open: is the legacy Installed apps entry there?"""
+    if LEGACY_UNINSTALL_KEY.lower() == UNINSTALL_KEY.lower():
+        return False
+    try:
+        import winreg
+
+        winreg.OpenKey(winreg.HKEY_CURRENT_USER, LEGACY_UNINSTALL_KEY).Close()
+        return True
+    except OSError:
+        return False
+
+
+def remove_legacy_launchers() -> list:
+    """The legacy logon task and HKCU Run value, if either is still there."""
+    done = []
+    if brand.LEGACY_TASK_NAME != brand.TASK_NAME:
+        try:
+            r = subprocess.run(
+                ["schtasks", "/delete", "/tn", brand.LEGACY_TASK_NAME, "/f"],
+                capture_output=True, text=True, timeout=20, creationflags=_NO_WIN,
+            )
+            if r.returncode == 0:
+                done.append("removed legacy logon task")
+        except Exception:
+            pass
+    if brand.LEGACY_RUN_VALUE_NAME != brand.RUN_VALUE_NAME:
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE
+            ) as k:
+                winreg.DeleteValue(k, brand.LEGACY_RUN_VALUE_NAME)
+                done.append("removed legacy Run value")
+        except OSError:
+            pass
+    return done
+
+
+def pinned_link_dirs() -> list:
+    """Every folder holding a .lnk a person may have to this app: desktop,
+    Start menu, and what they pinned to the taskbar or Start."""
+    pinned = os.path.join(_shell_folder("AppData", os.environ.get("APPDATA", "")),
+                          "Microsoft", "Internet Explorer", "Quick Launch", "User Pinned")
+    return [desktop_dir(), start_menu_dir(),
+            os.path.join(pinned, "TaskBar"), os.path.join(pinned, "StartMenu")]
+
+
+def retarget_script(dirs: list, old_exes: list, exe: str) -> str:
+    """PowerShell that points every .lnk in *dirs* whose target is one of
+    *old_exes* at *exe*. Prints one "retargeted <path>" line per link. Never
+    creates, renames or deletes a link."""
+    folders = ", ".join(f"'{_ps_quote(d)}'" for d in dirs)
+    olds = ", ".join(f"'{_ps_quote(p)}'" for p in old_exes)
+    return (
+        "$sh = New-Object -ComObject WScript.Shell; "
+        f"$old = @({olds}); "
+        f"foreach ($d in @({folders})) {{ "
+        "if (-not (Test-Path -LiteralPath $d)) { continue }; "
+        "foreach ($f in @(Get-ChildItem -LiteralPath $d -Filter *.lnk -ErrorAction SilentlyContinue)) { "
+        "try { $l = $sh.CreateShortcut($f.FullName); "
+        "if ($old -contains $l.TargetPath) { "
+        f"$l.TargetPath = '{_ps_quote(exe)}'; "
+        f"$l.WorkingDirectory = '{_ps_quote(os.path.dirname(exe))}'; "
+        "$l.Save(); Write-Output ('retargeted ' + $f.FullName) } } catch {} } }"
+    )
+
+
+def retarget_legacy_links(exe: str) -> list:
+    """Point shortcuts and taskbar/Start pins that still open the legacy exe
+    (moved away by the v1.8.1 migration) at *exe*. Returns what it changed."""
+    old = data_paths.canonical_exe(data_paths.legacy_local_dir())
+    if os.path.normcase(os.path.abspath(old)) == os.path.normcase(os.path.abspath(exe)):
+        return []
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+             retarget_script(pinned_link_dirs(), [old], exe)],
+            capture_output=True, text=True, timeout=30, creationflags=_NO_WIN,
+        )
+    except Exception as e:
+        return [f"could not check shortcuts: {e}"]
+    return [line.strip() for line in (r.stdout or "").splitlines()
+            if line.startswith("retargeted ")]
 
 
 # ── Notification name ────────────────────────────────────────────────────────
@@ -531,6 +639,24 @@ def register(exe: str, version: str) -> None:
     except Exception as e:
         print(f"[Install] App Paths registration skipped: {e}")
 
+    # Once per exe path: what the legacy-named versions registered, and every
+    # shortcut or pin still aimed at the legacy exe. Latched in the install
+    # state (keyed by the exe, because a copy still in the legacy folder has
+    # nothing to retarget yet and its state file moves with the folder), and
+    # re-run whenever the legacy Installed apps entry is back: a rolled-back
+    # migration hands the machine to a legacy-named version, which registers
+    # it again on its next launch.
+    state = load_state(install_dir)
+    if state.get("legacy_cleared_for") != exe or legacy_entry_present():
+        try:
+            steps = remove_legacy_registrations() + retarget_legacy_links(exe)
+            for step in steps:
+                print(f"[Install] {step}")
+            if not any(step.startswith("could not") for step in steps):
+                save_state(install_dir, dict(state, legacy_cleared_for=exe))
+        except Exception as e:
+            print(f"[Install] Legacy clean-up skipped: {e}")
+
 
 # ── Uninstall ────────────────────────────────────────────────────────────────
 
@@ -570,7 +696,8 @@ def image_names() -> list:
     assets as downloaded, and each display name. The installed exe is NOT named
     after the product, which is why the display name alone would miss it."""
     names = []
-    for image in ((brand.CANONICAL_EXE_NAME, brand.UPDATE_ASSET, brand.DOWNLOAD_ASSET)
+    for image in ((brand.CANONICAL_EXE_NAME, brand.LEGACY_CANONICAL_EXE_NAME,
+                   brand.UPDATE_ASSET, brand.DOWNLOAD_ASSET)
                   + tuple(f"{n}.exe" for n in brand.product_names())):
         if image.lower() not in (seen.lower() for seen in names):
             names.append(image)
@@ -610,12 +737,14 @@ def _remove_launchers() -> None:
                 pass
     except Exception:
         pass
+    remove_legacy_launchers()
 
 
 def _remove_registry_entries() -> None:
     import winreg
 
-    paths = [UNINSTALL_KEY, APP_PATHS_KEY, URL_PROTOCOL_KEY, NOTIFICATION_ID_KEY]
+    paths = [UNINSTALL_KEY, APP_PATHS_KEY, URL_PROTOCOL_KEY, NOTIFICATION_ID_KEY,
+             LEGACY_UNINSTALL_KEY, LEGACY_APP_PATHS_KEY, LEGACY_URL_PROTOCOL_KEY]
     paths += [app_paths_key(n) for n in brand.product_names()]
     for path in paths:
         _delete_key_tree(winreg.HKEY_CURRENT_USER, path)
@@ -642,9 +771,9 @@ def safe_to_delete(path: str) -> bool:
     if not path:
         return False
     p = os.path.normcase(os.path.abspath(path))
-    # The frozen folder name, never the display name: a renamed product still
-    # keeps its data in the original folders.
-    if os.path.basename(p) != os.path.normcase(brand.DATA_DIR_NAME):
+    # Our on-disk folder names (current or legacy), never the display name.
+    if os.path.basename(p) not in (os.path.normcase(brand.DATA_DIR_NAME),
+                                   os.path.normcase(brand.LEGACY_DATA_DIR_NAME)):
         return False
     for var in ("LOCALAPPDATA", "APPDATA"):
         root = os.environ.get(var)
@@ -684,7 +813,7 @@ def _spawn_cleanup(dirs: list) -> None:
     import tempfile
 
     script_path = os.path.join(
-        tempfile.gettempdir(), f"ftc_whisper_uninstall_{os.getpid()}.ps1"
+        tempfile.gettempdir(), f"{brand.FILE_SLUG}_uninstall_{os.getpid()}.ps1"
     )
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(cleanup_script(os.getpid(), dirs, script_path))
@@ -713,7 +842,7 @@ def _spawn_cleanup(dirs: list) -> None:
 
 
 def run_uninstall(silent: bool = False) -> int:
-    """Handle `FTC Whisper.exe --uninstall [/S]`, the UninstallString Windows
+    """Handle `<exe> --uninstall [/S]`, the UninstallString Windows
     runs from Installed apps. Returns 0 when the uninstall ran, 1 if the user
     backed out."""
     name = brand.PRODUCT_NAME
@@ -741,9 +870,11 @@ def run_uninstall(silent: bool = False) -> int:
     _remove_registry_entries()
     _remove_shortcuts()
 
-    dirs = [_install_dir()]
+    # Both generations of folder: a machine may still hold a legacy one that a
+    # locked file kept from being moved.
+    dirs = list(data_paths.all_local_dirs())
     if remove_data:
-        dirs.append(_user_data_dir())
+        dirs += list(data_paths.all_roaming_dirs())
 
     if not silent:
         _message_box(

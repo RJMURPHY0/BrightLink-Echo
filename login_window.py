@@ -1,5 +1,5 @@
 """
-FTC Whisper — Login / Sign-up window.
+BrightLink Echo — Login / Sign-up window.
 Shown on first launch and whenever the session has expired.
 Blocks the app from starting until the user is authenticated.
 """

@@ -1,5 +1,5 @@
 """
-Configuration management for FTC Whisper.
+Configuration management for BrightLink Echo.
 Loads/saves settings from a JSON file with sensible defaults.
 
 When running as a PyInstaller bundle:
