@@ -62,6 +62,28 @@ function Log([string]$msg) {
 function HashOf([string]$p) {
     try { (Get-FileHash -LiteralPath $p -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower() } catch { '' }
 }
+function Test-ExeHash([string]$p, [string]$want) {
+    # A freshly written exe is often held by an antivirus scan for a few
+    # seconds, and a read in that window fails. Retry before calling it wrong,
+    # and log what was actually seen when it stays wrong.
+    $why = ''
+    for ($i = 0; $i -lt [Math]::Min($Attempts, 15); $i++) {
+        try {
+            $got = (Get-FileHash -LiteralPath $p -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower()
+            if ($got -eq $want) {
+                if ($i -gt 0) { Log "Exe hash matched on attempt $($i + 1)." }
+                return $true
+            }
+            $len = (Get-Item -LiteralPath $p -ErrorAction SilentlyContinue).Length
+            $why = "got $got ($len bytes), want $want"
+        } catch {
+            $why = "unreadable: $($_.Exception.Message)"
+        }
+        Start-Sleep -Seconds 1
+    }
+    Log "Exe hash check failed for ${p}: $why"
+    return $false
+}
 function Finish([int]$code) {
     Log "Exit $code."
     if ($PSCommandPath -and ([System.IO.Path]::GetFileName($PSCommandPath) -like 'activate-*.ps1')) {
@@ -172,7 +194,7 @@ if ($already) {
         elseif ($item.Length -ne [int64]$f.size) { $problems += "size $($f.path)" }
         if ($problems.Count -ge 5) { break }
     }
-    if ((HashOf $PendingExe) -ne $wantExe) { $problems += "exe hash $PendingExe" }
+    if (-not (Test-ExeHash $PendingExe $wantExe)) { $problems += "exe hash $PendingExe" }
     if ($problems.Count -gt 0) {
         Log "NOT installing: pending-$Version is incomplete: $($problems -join '; ')"
         Launch-Current
@@ -206,7 +228,7 @@ if ($already) {
             } else {
                 [System.IO.File]::Move($PendingExe, $Canonical)
             }
-            if ((HashOf $Canonical) -ne $wantExe) { throw 'installed exe does not match the manifest' }
+            if (-not (Test-ExeHash $Canonical $wantExe)) { throw 'installed exe does not match the manifest' }
             $swapped = $true
         } catch {
             Log "Exe swap attempt $($i + 1) failed: $_"
