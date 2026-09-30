@@ -479,22 +479,26 @@ class SupabaseLogger:
         return result[0]
 
     def fetch_user_display_name(self) -> str:
-        """The signed-in user's name from their profile row (FTC Contacts shares
-        this Supabase project, so it's the same account the CRM knows them by).
-        Used to sign off Email refinements. Best-effort: returns "" when signed
-        out, offline, or the column/row isn't there. Called from a background
-        thread, so this blocks inline. RLS scopes the row to the current user."""
+        """The signed-in user's name from their org membership (FTC Contacts
+        shares this Supabase project, so it's the same account the CRM knows them
+        by). The shared `handle_new_user` trigger writes the signup name onto
+        `org_members.display_name`; `sender_name` is the CRM's outreach name and
+        is the fallback. Used to sign off Email refinements. Best-effort: returns
+        "" when signed out, offline, or the row/column isn't there. Called from a
+        background thread, so this blocks inline. RLS scopes rows to the user."""
         if not self._enabled or not self._user_id or self._user_id == "local":
             return ""
         try:
             r = (self._get_client()
-                 .table("profiles")
-                 .select("full_name")
-                 .eq("id", self._user_id)
+                 .table("org_members")
+                 .select("display_name,sender_name")
+                 .eq("user_id", self._user_id)
                  .limit(1)
                  .execute())
             if r.data:
-                return (r.data[0].get("full_name") or "").strip()
+                row = r.data[0]
+                return ((row.get("display_name") or row.get("sender_name") or "")
+                        .strip())
         except Exception as exc:
             print(f"[Supabase] fetch_user_display_name failed (non-fatal): {exc}")
         return ""
