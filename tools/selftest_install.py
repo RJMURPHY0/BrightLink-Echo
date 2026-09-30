@@ -55,7 +55,9 @@ def annotate(title: str, text: str, limit: int = 1500) -> None:
     body = (text or "(no detail)")[-limit:]
     body = body.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
     title = title.replace(",", ";").replace("::", ":")
-    print(f"::error title={title}::{body}", flush=True)
+    line = f"::error title={title}::{body}"
+    # The runner's console is cp1252; logs carry a BOM and other characters.
+    print(line.replace("﻿", "").encode("ascii", "replace").decode("ascii"), flush=True)
 
 
 def log_tail(path: str, lines: int = 25) -> str:
