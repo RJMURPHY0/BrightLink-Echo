@@ -64,6 +64,10 @@ $RunValueName = 'BrightLink Echo'
 $UninstallKeyName = 'BrightLinkEcho'
 $UrlScheme = 'brightlinkecho'
 $LegacyTaskName = 'FTC Whisper'
+$LegacyRunValueName = 'FTC Whisper'
+# Start with Windows: the Run entry Task Manager lists, and its on/off record.
+$RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$ApprovedKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'
 
 # A folder that is any process's current directory cannot be renamed, and the
 # updater that starts this script may have been started inside the legacy one.
@@ -287,7 +291,9 @@ function Remove-NewRegistrations {
                      "HKCU:\Software\Classes\$UrlScheme")) {
         Remove-Item -LiteralPath $k -Recurse -Force -ErrorAction SilentlyContinue
     }
-    Remove-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $RunValueName -Force -ErrorAction SilentlyContinue
+    foreach ($k in @($RunKey, $ApprovedKey)) {
+        Remove-ItemProperty -LiteralPath $k -Name $RunValueName -Force -ErrorAction SilentlyContinue
+    }
 }
 function Retarget-Links([string]$from, [string]$to) {
     # Shortcuts and taskbar/Start pins aimed at $from now open $to.
@@ -494,10 +500,20 @@ if ($script:PrevHomeLegacy -and -not $NoSystemChanges) {
     # sign-in must still start the app and every pin must still open it.
     Retarget-Links (Join-Path $LegacyDir $LegacyExeName) $script:Canonical
     & schtasks.exe /query /tn $LegacyTaskName 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) {
+    $legacyTask = ($LASTEXITCODE -eq 0)
+    $legacyRun = $null -ne (Get-ItemProperty -LiteralPath $RunKey -Name $LegacyRunValueName -ErrorAction SilentlyContinue)
+    if ($legacyTask -or $legacyRun) {
         try {
-            New-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name $RunValueName `
-                -Value "`"$($script:Canonical)`"" -PropertyType String -Force | Out-Null
+            New-ItemProperty -LiteralPath $RunKey -Name $RunValueName `
+                -Value "`"$($script:Canonical)`" --startup" -PropertyType String -Force | Out-Null
+            # Task Manager's on/off record moves with it: a person who switched
+            # the legacy entry off there keeps it off (the new exe reads it).
+            $approved = (Get-ItemProperty -LiteralPath $ApprovedKey -Name $LegacyRunValueName -ErrorAction SilentlyContinue).$LegacyRunValueName
+            if ($null -ne $approved) {
+                if (-not (Test-Path -LiteralPath $ApprovedKey)) { New-Item -Path $ApprovedKey -Force | Out-Null }
+                New-ItemProperty -LiteralPath $ApprovedKey -Name $RunValueName `
+                    -Value ([byte[]]$approved) -PropertyType Binary -Force | Out-Null
+            }
             Log 'Start at sign-in bridged to the new exe until it registers itself.'
         } catch { Log "Could not bridge start at sign-in: $_" }
     }

@@ -52,6 +52,8 @@ _REG_APP_PATHS = r"Software\Microsoft\Windows\CurrentVersion\App Paths"
 UNINSTALL_KEY = _REG_UNINSTALL + "\\" + brand.UNINSTALL_KEY_NAME
 APP_PATHS_KEY = _REG_APP_PATHS + "\\" + brand.CANONICAL_EXE_NAME
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+STARTUP_APPROVED_KEY = (r"Software\Microsoft\Windows\CurrentVersion\Explorer"
+                        r"\StartupApproved\Run")
 URL_PROTOCOL_KEY = "Software\\Classes\\" + brand.URL_SCHEME
 NOTIFICATION_ID_KEY = "Software\\Classes\\AppUserModelId\\" + brand.APP_USER_MODEL_ID
 TASK_NAME = brand.TASK_NAME
@@ -475,7 +477,8 @@ def legacy_entry_present() -> bool:
 
 
 def remove_legacy_launchers() -> list:
-    """The legacy logon task and HKCU Run value, if either is still there."""
+    """The legacy logon task, HKCU Run value and Startup apps record, if
+    any is still there."""
     done = []
     if brand.LEGACY_TASK_NAME != brand.TASK_NAME:
         try:
@@ -488,16 +491,21 @@ def remove_legacy_launchers() -> list:
         except Exception:
             pass
     if brand.LEGACY_RUN_VALUE_NAME != brand.RUN_VALUE_NAME:
-        try:
-            import winreg
+        import winreg
 
-            with winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE
-            ) as k:
-                winreg.DeleteValue(k, brand.LEGACY_RUN_VALUE_NAME)
-                done.append("removed legacy Run value")
-        except OSError:
-            pass
+        # The Run value and Task Manager's on/off record for it. A disable
+        # recorded there has already been carried over to the current name
+        # (app._startup_setting_at_launch, activate.ps1) by the time this runs.
+        for key, what in ((RUN_KEY, "Run value"),
+                          (STARTUP_APPROVED_KEY, "Startup apps record")):
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE
+                ) as k:
+                    winreg.DeleteValue(k, brand.LEGACY_RUN_VALUE_NAME)
+                    done.append(f"removed legacy {what}")
+            except OSError:
+                pass
     return done
 
 
@@ -727,16 +735,18 @@ def _remove_launchers() -> None:
         )
     except Exception:
         pass
-    try:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE
-        ) as k:
-            try:
-                winreg.DeleteValue(k, brand.RUN_VALUE_NAME)
-            except FileNotFoundError:
-                pass
-    except Exception:
-        pass
+    # The Run entry and Task Manager's on/off record for it.
+    for key in (RUN_KEY, STARTUP_APPROVED_KEY):
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE
+            ) as k:
+                try:
+                    winreg.DeleteValue(k, brand.RUN_VALUE_NAME)
+                except FileNotFoundError:
+                    pass
+        except Exception:
+            pass
     remove_legacy_launchers()
 
 

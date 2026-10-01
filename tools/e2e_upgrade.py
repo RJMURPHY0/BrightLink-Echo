@@ -53,7 +53,7 @@ import data_paths  # noqa: E402
 import install_layout as il  # noqa: E402
 import updater  # noqa: E402
 from tools.selftest_install import (NO_WIN, Report, reg_value, stop_all,  # noqa: E402
-                                    task_exists, uninstall_entries)
+                                    startup_entry, task_exists, uninstall_entries)
 
 HOSTS = r"C:\Windows\System32\drivers\etc\hosts"
 MARK = "# echo-e2e"
@@ -200,6 +200,8 @@ def check_migrated(rep: Report, version: str, label: str):
     for scheme in (brand.URL_SCHEME, brand.LEGACY_URL_SCHEME):
         cmd = reg_value("Software\\Classes\\" + scheme + r"\shell\open\command") or ""
         rep.check(f"{label}: {scheme}:// opens the canonical exe", exe.lower() in cmd.lower(), cmd)
+    rep.check(f"{label}: Run entry opens the canonical exe",
+              exe.lower() in startup_entry().lower(), startup_entry())
     rep.check(f"{label}: logon task present", task_exists())
     # v1.8.1: everything under the current names, nothing under the legacy ones.
     rep.check(f"{label}: runs from the current folder",

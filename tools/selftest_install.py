@@ -210,6 +210,7 @@ def uninstall_entries() -> list:
 
 
 def task_exists(name: str = brand.TASK_NAME) -> bool:
+    """The early sign-in launcher (the Run entry is the one Task Manager lists)."""
     r = subprocess.run(["schtasks", "/query", "/tn", name], capture_output=True,
                        creationflags=NO_WIN)
     return r.returncode == 0
@@ -223,6 +224,11 @@ def model_listing(root: str) -> dict:
             p = os.path.join(dirpath, n)
             out[os.path.relpath(p, base)] = os.path.getsize(p)
     return out
+
+
+def startup_entry(name: str = brand.RUN_VALUE_NAME) -> str:
+    """The Start with Windows launcher Task Manager lists under Startup apps."""
+    return reg_value(r"Software\Microsoft\Windows\CurrentVersion\Run", name) or ""
 
 
 def main(argv=None) -> int:
@@ -334,6 +340,11 @@ def main(argv=None) -> int:
     for scheme in (brand.URL_SCHEME, brand.LEGACY_URL_SCHEME):
         cmd = reg_value("Software\\Classes\\" + scheme + r"\shell\open\command") or ""
         rep.check(f"{scheme}:// opens the canonical exe", exe.lower() in cmd.lower(), cmd)
+    run = startup_entry()
+    rep.check("Run entry opens the canonical exe (Start with Windows ticked)",
+              run.lower() == f'"{exe}" --startup'.lower(), run)
+    rep.check("no Run entry under the legacy name",
+              not startup_entry(brand.LEGACY_RUN_VALUE_NAME), startup_entry(brand.LEGACY_RUN_VALUE_NAME))
     rep.check("logon task registered (Start with Windows ticked)", task_exists())
     rep.check("no logon task under the legacy name", not task_exists(brand.LEGACY_TASK_NAME))
     try:
@@ -406,6 +417,7 @@ def main(argv=None) -> int:
     rep.check("uninstall removed the install folder",
               not os.path.exists(root) and not os.path.exists(old_root))
     rep.check("uninstall removed the Installed apps entry", not uninstall_entries(), uninstall_entries())
+    rep.check("uninstall removed the Run entry", not startup_entry(), startup_entry())
     rep.check("uninstall removed the logon task", not task_exists())
     rep.check("uninstall removed the URL protocols",
               reg_value("Software\\Classes\\" + brand.URL_SCHEME) is None

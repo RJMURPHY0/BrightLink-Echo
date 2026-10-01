@@ -526,6 +526,8 @@ class ActivationContractTests(unittest.TestCase):
         self.assertIn(f"$MarkerName = '{brand.MIGRATED_MARKER}'", self.src)
         self.assertIn(f"$TaskName = '{brand.TASK_NAME}'", self.src)
         self.assertIn(f"$RunValueName = '{brand.RUN_VALUE_NAME}'", self.src)
+        self.assertIn(f"$LegacyTaskName = '{brand.LEGACY_TASK_NAME}'", self.src)
+        self.assertIn(f"$LegacyRunValueName = '{brand.LEGACY_RUN_VALUE_NAME}'", self.src)
         self.assertIn(f"$UninstallKeyName = '{brand.UNINSTALL_KEY_NAME}'", self.src)
         self.assertIn(f"$UrlScheme = '{brand.URL_SCHEME}'", self.src)
         self.assertIn(f'Contents = "{brand.CONTENTS_DIR_PREFIX}$Version"', self.src)
@@ -549,6 +551,23 @@ class ActivationContractTests(unittest.TestCase):
         self.assertNotIn("Get-Process -Name", self.src)
         self.assertIn("if (-not $ours -and $KillCopiesElsewhere)", self.src)
         self.assertIn("($orig -eq $ExeName) -or ($orig -eq $LegacyExeName)", self.src)
+
+    def test_start_with_windows_crosses_the_migration_as_it_was(self):
+        import app_install
+        # The bridge launches like every sign-in launcher, and a Task Manager
+        # disable under the legacy name moves to the current one.
+        bridge = self.src[self.src.index("$legacyTask = "):self.src.index("# 6. Register")]
+        self.assertIn('--startup"', bridge)
+        self.assertIn("-Name $LegacyRunValueName", bridge)
+        self.assertIn("New-ItemProperty -LiteralPath $ApprovedKey -Name $RunValueName", bridge)
+        self.assertIn("-PropertyType Binary", bridge)
+        # A rollback takes the new pair away again.
+        undo = self.src[self.src.index("function Remove-NewRegistrations"):
+                        self.src.index("function Retarget-Links")]
+        self.assertIn("foreach ($k in @($RunKey, $ApprovedKey))", undo)
+        for key, var in ((app_install.RUN_KEY, "$RunKey"),
+                         (app_install.STARTUP_APPROVED_KEY, "$ApprovedKey")):
+            self.assertIn(f"{var} = 'HKCU:\\{key}'", self.src)
 
     def test_the_folders_move_only_after_leaving_them(self):
         # The v1.8.0 updater starts this script inside the legacy folder; a

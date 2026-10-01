@@ -67,8 +67,8 @@ DATA_DIR_NAME = "BrightLink Echo"         # %LOCALAPPDATA%\<this>, %APPDATA%\<th
 EXE_BASENAME = "BrightLink Echo"          # PyInstaller name=, so dist\BrightLink Echo.exe
 CANONICAL_EXE_NAME = EXE_BASENAME + ".exe"  # the installed exe every launcher targets
 MUTEX_NAME = "Global\\BrightLink_Echo_SingleInstance"
-TASK_NAME = "BrightLink Echo"             # Task Scheduler logon task
-RUN_VALUE_NAME = "BrightLink Echo"        # HKCU Run fallback launcher
+TASK_NAME = "BrightLink Echo"             # logon task: the early sign-in launcher
+RUN_VALUE_NAME = "BrightLink Echo"        # HKCU Run entry: what Task Manager lists
 URL_SCHEME = "brightlinkecho"             # brightlinkecho://launch
 UNINSTALL_KEY_NAME = "BrightLinkEcho"     # HKCU ...\Uninstall\<this>
 SETUP_MUTEX = "BrightLinkEchoSetup"       # the installer's own single-instance mutex
