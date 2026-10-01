@@ -38,7 +38,7 @@ Built for Windows. Transcription runs **fully locally** using [faster-whisper](h
 2. Double-click it. Windows may show a SmartScreen warning: click **More info → Run anyway**. The exe is signed by BRIGHTLINK (OS) LTD, so the dialog names the publisher; the warning is purely because the certificate is new and has not built reputation yet
 3. The app starts immediately in your system tray
 4. **Installs itself**: on first run it becomes a proper Windows application: a **Start-menu entry** (so it turns up in Start and in search), a **desktop shortcut**, and an entry in **Settings → Apps → Installed apps** with a working uninstaller. No admin rights needed; everything is per-user.
-5. **Auto-starts with Windows**: the app registers itself as a Task Scheduler logon task, so it launches automatically every time you log in (with above-normal priority to load before Teams, OneDrive, etc.)
+5. **Auto-starts with Windows**: a Task Scheduler logon task starts the app early at sign-in (above-normal priority, before Explorer runs Run-key apps), and an HKCU Run entry lists it as BrightLink Echo in Task Manager's Startup apps, where it can be switched on or off (Settings follows). Whichever launcher fires second exits silently.
 
 To remove it: **Settings → Apps → Installed apps → BrightLink Echo → Uninstall**. You're asked whether to keep your settings and history.
 
@@ -83,7 +83,7 @@ first run.)
 | `input_device` | *(empty)* | Optional microphone override (device name fragment or numeric index); empty = auto-default + fallback |
 | `inject_method` | `clipboard` | `clipboard` (paste) or `keystrokes` (typed key events) |
 | `sound_feedback` | `true` | Beep sounds on start/stop |
-| `auto_start` | `false` | Reserved — currently unused (the app always registers its Windows logon startup task) |
+| `auto_start` | `false` | Reserved, unused: `start_with_windows` controls the Run entry |
 | `anthropic_api_key` | *(empty)* | [Anthropic API key](https://console.anthropic.com/) — enables AI refinement |
 | `openrouter_api_key` | *(empty)* | OpenRouter API key — alternative to Anthropic for AI refinement |
 | `openrouter_model` | `google/gemini-2.5-flash-lite` | OpenRouter model used for refinement/context-fix |

@@ -45,7 +45,7 @@ sys.path.insert(0, ROOT)
 import brand  # noqa: E402
 import install_layout as il  # noqa: E402
 from tools.selftest_install import (NO_WIN, Report, reg_value, stop_all,  # noqa: E402
-                                    task_exists, uninstall_entries)
+                                    startup_entry, task_exists, uninstall_entries)
 
 HOSTS = r"C:\Windows\System32\drivers\etc\hosts"
 MARK = "# echo-e2e"
@@ -190,6 +190,8 @@ def check_migrated(rep: Report, version: str, label: str):
               uninstall_entries())
     cmd = reg_value("Software\\Classes\\" + brand.URL_SCHEME + r"\shell\open\command") or ""
     rep.check(f"{label}: URL protocol opens the canonical exe", exe.lower() in cmd.lower(), cmd)
+    rep.check(f"{label}: Run entry opens the canonical exe",
+              exe.lower() in startup_entry().lower(), startup_entry())
     rep.check(f"{label}: logon task present", task_exists())
 
 

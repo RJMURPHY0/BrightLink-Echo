@@ -110,7 +110,7 @@ class LaunchSiteTests(unittest.TestCase):
     def test_handoff_launches_clean(self):
         src = _src("app.py")
         body = src[src.index("def _handoff_to_canonical_if_newer"):
-                   src.index("def _ensure_startup_task")]
+                   src.index("def _startup_command")]
         self.assertIn("env=pyi_runtime.clean_launch_env()", body)
 
     def test_guard_runs_before_any_project_import(self):

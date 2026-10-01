@@ -203,9 +203,15 @@ def uninstall_entries() -> list:
 
 
 def task_exists() -> bool:
+    """The early sign-in launcher (the Run entry is the one Task Manager lists)."""
     r = subprocess.run(["schtasks", "/query", "/tn", brand.TASK_NAME], capture_output=True,
                        creationflags=NO_WIN)
     return r.returncode == 0
+
+
+def startup_entry() -> str:
+    """The Start with Windows launcher Task Manager lists under Startup apps."""
+    return reg_value(r"Software\Microsoft\Windows\CurrentVersion\Run", brand.RUN_VALUE_NAME) or ""
 
 
 def main(argv=None) -> int:
@@ -298,6 +304,9 @@ def main(argv=None) -> int:
     rep.check("uninstall entry runs the canonical exe", us.lower() == f'"{exe}" --uninstall'.lower(), us)
     cmd = reg_value("Software\\Classes\\" + brand.URL_SCHEME + r"\shell\open\command") or ""
     rep.check("URL protocol opens the canonical exe", exe.lower() in cmd.lower(), cmd)
+    run = startup_entry()
+    rep.check("Run entry opens the canonical exe (Start with Windows ticked)",
+              run.lower() == f'"{exe}" --startup'.lower(), run)
     rep.check("logon task registered (Start with Windows ticked)", task_exists())
     try:
         import app_install
@@ -368,6 +377,7 @@ def main(argv=None) -> int:
         time.sleep(1)
     rep.check("uninstall removed the install folder", not os.path.exists(root))
     rep.check("uninstall removed the Installed apps entry", not uninstall_entries(), uninstall_entries())
+    rep.check("uninstall removed the Run entry", not startup_entry(), startup_entry())
     rep.check("uninstall removed the logon task", not task_exists())
     rep.check("uninstall removed the URL protocol",
               reg_value("Software\\Classes\\" + brand.URL_SCHEME) is None)

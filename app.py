@@ -1307,8 +1307,8 @@ class WhisperFlowApp:
             self.feedback.sound_enabled = bool(value)
         elif key == "start_with_windows":
             threading.Thread(
-                target=_sync_startup_task, args=(bool(value),),
-                daemon=True, name="startup-task",
+                target=_sync_startup, args=(bool(value),),
+                daemon=True, name="startup-entry",
             ).start()
         elif key == "popup_height":
             self.popup.set_popup_height(value)
@@ -3596,6 +3596,11 @@ def _ensure_single_instance() -> None:
     mutex = kernel32.CreateMutexW(None, True, MUTEX_NAME)
     err = kernel32.GetLastError()
 
+    if err == ERROR_ALREADY_EXISTS and _launched_at_sign_in():
+        # The other sign-in launcher got there first: nothing to show.
+        _report_healthy(cleanup=False)
+        os._exit(0)
+
     if err == ERROR_ALREADY_EXISTS:
         # Another instance is running — ask it to show itself via the local HTTP
         # server (/show calls app_window.show() → deiconify() + Win32 focus).
@@ -3880,47 +3885,113 @@ def _handoff_to_canonical_if_newer() -> None:
         print(f"[App] Handoff to installed version failed ({e}) — continuing.")
 
 
-def _ensure_startup_task() -> None:
-    """
-    Register FTC Whisper as a Task Scheduler logon task pointing at the STABLE
-    exe path, then reconcile away every legacy/duplicate launcher so exactly one
-    auto-start mechanism exists (no boot-time double-launch race).
+# Every sign-in launcher passes this. Two of them fire at sign-in (the logon
+# task early, the Run entry later), so the one that finds the app already
+# running must exit silently instead of opening its window.
+_STARTUP_ARG = "--startup"
 
-    Falls back to the registry Run key only if schtasks is unavailable.
-    """
-    import subprocess
 
+def _launched_at_sign_in() -> bool:
+    return any(a.lower() == _STARTUP_ARG for a in sys.argv[1:])
+
+
+def _startup_command() -> str:
     target = _startup_target()
-    script = "" if getattr(sys, "frozen", False) else os.path.abspath(__file__)
-    exe_cmd = f'"{target}"' + (f' "{script}"' if script else "")
+    if getattr(sys, "frozen", False):
+        return f'"{target}" {_STARTUP_ARG}'
+    return f'"{target}" "{os.path.abspath(__file__)}" {_STARTUP_ARG}'
 
+
+def _startup_registry_state():
+    """Start with Windows as Task Manager's Startup apps shows it: True
+    (enabled), False (disabled there) or None (no Run entry yet: a first run,
+    or an install from before the Run entry was added)."""
+    import winreg
+    from app_install import RUN_KEY as _RUN_KEY, STARTUP_APPROVED_KEY as _APPROVED_KEY
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
+            winreg.QueryValueEx(k, brand.RUN_VALUE_NAME)
+    except OSError:
+        return None
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _APPROVED_KEY) as k:
+            data, _ = winreg.QueryValueEx(k, brand.RUN_VALUE_NAME)
+    except OSError:
+        return True  # no approval record: Windows runs it
+    # Task Manager's encoding: an odd first byte means disabled.
+    return not (data and data[0] & 1)
+
+
+def _sync_startup(enabled: bool) -> None:
+    """Make Start with Windows match the setting, with two launchers.
+
+    The HKCU Run entry is what Task Manager lists under Startup apps (as the
+    exe's FileDescription, signed by our publisher) and its on/off switch.
+    Off keeps the entry and marks it disabled the way Task Manager does, so
+    it stays listed and either side can turn it back on.
+
+    The logon task is what starts the app early: it fires at sign-in, before
+    Explorer gets round to Run entries. It exists only while the setting is
+    on, and a task launch still checks the Run entry first (_main), so a
+    disable in Task Manager holds even before the app next syncs."""
+    import winreg
+    from app_install import RUN_KEY as _RUN_KEY, STARTUP_APPROVED_KEY as _APPROVED_KEY
+    cmd = _startup_command()
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
+            winreg.SetValueEx(k, brand.RUN_VALUE_NAME, 0, winreg.REG_SZ, cmd)
+        # Rewrite the approval only on a change, so a disable keeps the time
+        # Task Manager stamped on it.
+        if _startup_registry_state() is not enabled:
+            if enabled:
+                data = bytes([2]) + bytes(11)
+            else:
+                filetime = int((time.time() + 11644473600) * 10_000_000)
+                data = bytes([3]) + bytes(3) + filetime.to_bytes(8, "little")
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _APPROVED_KEY) as k:
+                winreg.SetValueEx(k, brand.RUN_VALUE_NAME, 0,
+                                  winreg.REG_BINARY, data)
+        print(f"[App] Start with Windows {'on' if enabled else 'off'}: {cmd}")
+    except OSError as e:
+        _log_startup_error(RuntimeError(f"Start with Windows not saved: {e}"))
+    if enabled:
+        _ensure_logon_task()
+    else:
+        _remove_logon_task()
+    _reconcile_legacy_launchers()
+    _repair_desktop_shortcut(_startup_target())
+
+
+def _ensure_logon_task() -> None:
+    """The early launcher: a Task Scheduler logon task for the stable exe at
+    above-normal priority. Re-registered when missing, pointing elsewhere,
+    without --startup, or at the old below-normal priority."""
+    import subprocess
+    target = _startup_target()
     _NO_WIN = subprocess.CREATE_NO_WINDOW
-
-    # Re-register if the task is missing OR no longer points at the stable path.
-    # (The old check accepted any task that merely mentioned the exe substring,
-    # so it never repaired a task pointing at a stale/Downloads path.)
     try:
         result = subprocess.run(
-            ["schtasks", "/query", "/tn", TASK_NAME, "/fo", "LIST", "/v"],
+            ["schtasks", "/query", "/tn", TASK_NAME, "/xml"],
             capture_output=True, text=True, creationflags=_NO_WIN,
         )
-        if result.returncode == 0 and os.path.normcase(target) in os.path.normcase(result.stdout):
-            # Re-register if the task was created with the old below-normal priority (6).
-            # Priority 4 = above-normal in the Task Scheduler scale (0=highest, 10=lowest).
-            if "<Priority>4</Priority>" in result.stdout or "Priority: 4" in result.stdout:
-                _reconcile_legacy_launchers(task_ok=True)
-                return  # already correct
-            # Fall through to re-register with the correct priority.
+        # lower(), not normcase(): normcase also turns the XML's / into \.
+        out = result.stdout.lower()
+        if (result.returncode == 0 and target.lower() in out
+                and _STARTUP_ARG in out and "<priority>4</priority>" in out):
+            return  # already correct
     except Exception:
         pass
 
     user = os.environ.get("USERNAME", "")
     domain = os.environ.get("USERDOMAIN", "")
     user_id = f"{domain}\\{user}" if domain and user else user
+    if getattr(sys, "frozen", False):
+        args = _STARTUP_ARG
+    else:
+        args = f'"{os.path.abspath(__file__)}" {_STARTUP_ARG}'
 
-    arguments = "" if getattr(sys, "frozen", False) else f"<Arguments>{script}</Arguments>"
-
-    # Create / overwrite the task — ONLOGON, current user, no elevation needed
+    # ONLOGON, current user, no elevation needed. Priority 4 is above normal
+    # on Task Scheduler's scale (0 highest, 10 lowest).
     xml = f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
@@ -3949,11 +4020,10 @@ def _ensure_startup_task() -> None:
   <Actions>
     <Exec>
       <Command>{target}</Command>
-      {arguments}
+      <Arguments>{args.replace('"', '&quot;')}</Arguments>
     </Exec>
   </Actions>
 </Task>"""
-
     try:
         import tempfile
         with tempfile.NamedTemporaryFile(
@@ -3961,29 +4031,22 @@ def _ensure_startup_task() -> None:
         ) as tf:
             tf.write(xml)
             xml_path = tf.name
-
-        result = subprocess.run(
-            ["schtasks", "/create", "/tn", TASK_NAME, "/xml", xml_path, "/f"],
-            capture_output=True, text=True, creationflags=_NO_WIN,
-        )
-        os.unlink(xml_path)
-
-        if result.returncode == 0:
-            print(f"[App] Startup task registered (Task Scheduler): {exe_cmd}")
-            _reconcile_legacy_launchers(task_ok=True)
-        else:
+        try:
+            result = subprocess.run(
+                ["schtasks", "/create", "/tn", TASK_NAME, "/xml", xml_path, "/f"],
+                capture_output=True, text=True, creationflags=_NO_WIN,
+            )
+        finally:
+            os.unlink(xml_path)
+        if result.returncode != 0:
             raise RuntimeError(result.stderr.strip())
-
+        print(f"[App] Logon task registered: {target} {args}")
     except Exception as e:
-        print(f"[App] Task Scheduler registration failed ({e}), falling back to registry")
-        _ensure_startup_registry_fallback()
-
-    _repair_desktop_shortcut(target)
+        # The Run entry still starts the app, only later in sign-in.
+        _log_startup_error(RuntimeError(f"Logon task not registered: {e}"))
 
 
-def _remove_startup_task() -> None:
-    """Start with Windows is OFF: delete the logon task and every fallback
-    launcher, so nothing starts the app at sign-in."""
+def _remove_logon_task() -> None:
     import subprocess
     try:
         r = subprocess.run(
@@ -3992,20 +4055,30 @@ def _remove_startup_task() -> None:
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         if r.returncode == 0:
-            print("[App] Startup task removed (Start with Windows is off).")
+            print("[App] Logon task removed (Start with Windows is off).")
     except Exception as e:
-        print(f"[App] Could not remove startup task: {e}")
-    # Same cleanup as a healthy task: the Run value and Startup shortcuts.
-    _reconcile_legacy_launchers(task_ok=True)
+        print(f"[App] Could not remove the logon task: {e}")
 
 
-def _sync_startup_task(enabled: bool) -> None:
-    """Make the logon task match the Start with Windows setting."""
-    if enabled:
-        _ensure_startup_task()
-    else:
-        _remove_startup_task()
-        _repair_desktop_shortcut(_startup_target())
+def _startup_setting_at_launch(config) -> bool:
+    """Task Manager can switch the entry on or off while the app is closed.
+    Its choice wins, and the saved setting is updated so Settings agrees.
+    With no entry yet, the saved setting is applied as it is."""
+    try:
+        state = _startup_registry_state()
+    except Exception as e:
+        print(f"[App] Could not read Start with Windows from the registry: {e}")
+        state = None
+    if state is None or state == bool(config.start_with_windows):
+        return bool(config.start_with_windows)
+    print(f"[App] Start with Windows was turned {'on' if state else 'off'} "
+          "in Task Manager; Settings now matches.")
+    config.start_with_windows = state
+    try:
+        config.save()
+    except Exception as e:
+        print(f"[App] Could not save Start with Windows: {e}")
+    return state
 
 
 def _install_requested() -> bool:
@@ -4050,7 +4123,7 @@ def _run_silent_install() -> int:
     _apply_installer_choices()
     _register_application()
     _register_url_protocol()
-    _sync_startup_task(_installed_start_with_windows())
+    _sync_startup(_installed_start_with_windows())
     print(f"[App] Installed at {target}")
     return 0
 
@@ -4179,34 +4252,12 @@ def _register_application() -> None:
         print(f"[App] Application registration skipped (non-fatal): {e}")
 
 
-def _reconcile_legacy_launchers(task_ok: bool) -> None:
+def _reconcile_legacy_launchers() -> None:
     """
-    Remove every competing/legacy auto-start entry so there is ONE source of
-    truth. When the Task Scheduler task is healthy this deletes the HKCU\\Run
-    fallback value and any stale Startup-folder shortcuts (current + historical
-    names) that older versions created — these were racing the task at boot and
-    one pointed at a path that no longer exists.
+    Remove Startup-folder shortcuts (current and historical names) that older
+    versions created: they raced the real launchers at boot, and one pointed
+    at a path that no longer exists.
     """
-    if not task_ok:
-        return
-
-    # 1. HKCU Run fallback value
-    try:
-        import winreg
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Run",
-            0, winreg.KEY_SET_VALUE,
-        ) as k:
-            try:
-                winreg.DeleteValue(k, brand.RUN_VALUE_NAME)
-                print("[App] Removed duplicate HKCU\\Run launcher.")
-            except FileNotFoundError:
-                pass
-    except Exception as e:
-        print(f"[App] Could not clean Run key: {e}")
-
-    # 2. Stale Startup-folder shortcuts (current + historical names)
     try:
         startup_dir = os.path.join(
             os.environ.get("APPDATA", ""),
@@ -4249,36 +4300,6 @@ def _register_url_protocol() -> None:
         print("[App] Registered ftcwhisper:// URL protocol handler.")
     except Exception as e:
         print(f"[App] Could not register URL protocol: {e}")
-
-
-def _ensure_startup_registry_fallback() -> None:
-    """Registry Run key fallback — used only if Task Scheduler is unavailable."""
-    import winreg
-
-    RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    VALUE   = brand.RUN_VALUE_NAME
-
-    target = _startup_target()
-    if getattr(sys, "frozen", False):
-        cmd = f'"{target}"'
-    else:
-        script = os.path.abspath(__file__)
-        cmd = f'"{target}" "{script}"'
-
-    try:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE
-        ) as k:
-            try:
-                current, _ = winreg.QueryValueEx(k, VALUE)
-                if current == cmd:
-                    return
-            except FileNotFoundError:
-                pass
-            winreg.SetValueEx(k, VALUE, 0, winreg.REG_SZ, cmd)
-            print(f"[App] Startup registry key set: {cmd}")
-    except Exception as e:
-        print(f"[App] Could not set startup registry: {e}")
 
 
 def _log_startup_error(exc: BaseException) -> None:
@@ -4403,17 +4424,24 @@ def _main() -> None:
         # the app is open, and must neither hand off nor show anything.
         if _install_requested():
             os._exit(_run_silent_install())
+        # The logon task fires even when Startup apps in Task Manager has the
+        # app disabled (it only governs the Run entry), so check first.
+        if _launched_at_sign_in():
+            try:
+                if _startup_registry_state() is False:
+                    os._exit(0)
+            except Exception as e:
+                print(f"[App] Could not read Start with Windows: {e}")
         # BEFORE the mutex: an old copy that defers to the installed version
         # must not be holding the single-instance mutex when the new exe starts.
         _handoff_to_canonical_if_newer()
         _ensure_single_instance()
         config = Config.load()
-        # Run in background — schtasks can be slow on first launch and there's
-        # no reason to block the UI thread waiting for a Task Scheduler write.
+        # Off the UI thread: schtasks can be slow on first launch.
         threading.Thread(
-            target=_sync_startup_task,
-            args=(bool(getattr(config, "start_with_windows", True)),),
-            daemon=True, name="startup-task",
+            target=_sync_startup,
+            args=(_startup_setting_at_launch(config),),
+            daemon=True, name="startup-entry",
         ).start()
         threading.Thread(target=_register_url_protocol, daemon=True, name="url-protocol").start()
         threading.Thread(

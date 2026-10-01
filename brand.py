@@ -61,8 +61,8 @@ DATA_DIR_NAME = "FTC Whisper"             # %LOCALAPPDATA%\<this>, %APPDATA%\<th
 EXE_BASENAME = "FTC Whisper"              # PyInstaller name=, so dist\FTC Whisper.exe
 CANONICAL_EXE_NAME = EXE_BASENAME + ".exe"  # the installed exe every launcher targets
 MUTEX_NAME = "Global\\FTC_Whisper_SingleInstance"
-TASK_NAME = "FTC Whisper"                 # Task Scheduler logon task
-RUN_VALUE_NAME = "FTC Whisper"            # HKCU Run fallback launcher
+TASK_NAME = "FTC Whisper"                 # logon task: the early sign-in launcher
+RUN_VALUE_NAME = "FTC Whisper"            # HKCU Run entry: what Task Manager lists
 URL_SCHEME = "ftcwhisper"                 # the CRM opens ftcwhisper://launch
 UNINSTALL_KEY_NAME = "FTCWhisper"         # HKCU ...\Uninstall\<this>
 UPDATE_ASSET = "FTC-Whisper.exe"          # what every installed updater downloads

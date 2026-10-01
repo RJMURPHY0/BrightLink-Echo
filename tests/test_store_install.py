@@ -3,8 +3,8 @@
 The Store runs an EXE installer silently (policy 10.2.9): `--install /S` must
 install and exit with no window, and it must run BEFORE the version handoff
 and the single-instance mutex, because the app may already be open. Start
-with Windows is the consent Store policy 10.2.8 asks for: the logon task is
-created only when it is on.
+with Windows is the consent Store policy 10.2.8 asks for: the HKCU Run entry
+is enabled only when it is on, and Task Manager's Startup apps lists it.
 """
 
 import json
@@ -49,7 +49,7 @@ class SilentInstallTests(unittest.TestCase):
                                lambda: calls.append("url")), \
              mock.patch.object(app_mod, "_installed_start_with_windows",
                                lambda: start), \
-             mock.patch.object(app_mod, "_sync_startup_task",
+             mock.patch.object(app_mod, "_sync_startup",
                                lambda on: calls.append(("startup", on))), \
              mock.patch.object(app_mod, "_log_startup_error", lambda e: None):
             code = app_mod._run_silent_install()
@@ -125,19 +125,120 @@ class InstalledConfigTests(unittest.TestCase):
         self.assertTrue(self._read(json.dumps({"auto_start": False})))
 
 
+class _FakeWinreg:
+    """Just enough of winreg for the Start with Windows code, so tests never
+    touch the real registry."""
+    HKEY_CURRENT_USER = "HKCU"
+    REG_SZ, REG_BINARY = 1, 3
+    KEY_SET_VALUE = KEY_READ = 0
+
+    def __init__(self):
+        self.keys = {}
+
+    class _Key:
+        def __init__(self, values):
+            self.values = values
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def OpenKey(self, root, path, *a):
+        if path not in self.keys:
+            raise FileNotFoundError(path)
+        return self._Key(self.keys[path])
+
+    def CreateKey(self, root, path):
+        return self._Key(self.keys.setdefault(path, {}))
+
+    def QueryValueEx(self, k, name):
+        if name not in k.values:
+            raise FileNotFoundError(name)
+        return k.values[name], 0
+
+    def SetValueEx(self, k, name, _reserved, _type, data):
+        k.values[name] = data
+
+
 class SyncStartupTests(unittest.TestCase):
-    def test_on_registers_off_removes(self):
-        calls = []
-        with mock.patch.object(app_mod, "_ensure_startup_task",
-                               lambda: calls.append("ensure")), \
-             mock.patch.object(app_mod, "_remove_startup_task",
-                               lambda: calls.append("remove")), \
-             mock.patch.object(app_mod, "_repair_desktop_shortcut",
-                               lambda t: None), \
-             mock.patch.object(app_mod, "_startup_target", lambda: "x"):
-            app_mod._sync_startup_task(True)
-            app_mod._sync_startup_task(False)
-        self.assertEqual(calls, ["ensure", "remove"])
+    """Start with Windows is the HKCU Run entry plus Task Manager's on/off
+    record, so the app shows (and can be switched) in Startup apps."""
+
+    def setUp(self):
+        import app_install
+        self.reg = _FakeWinreg()
+        self.task = []
+        self.run_key = app_install.RUN_KEY
+        self.approved_key = app_install.STARTUP_APPROVED_KEY
+        self.name = app_mod.brand.RUN_VALUE_NAME
+        for p in (mock.patch.dict(sys.modules, {"winreg": self.reg}),
+                  mock.patch.object(app_mod, "_startup_target", lambda: "C:/x/Echo.exe"),
+                  mock.patch.object(app_mod, "_reconcile_legacy_launchers", lambda: None),
+                  mock.patch.object(app_mod, "_ensure_logon_task",
+                                    lambda: self.task.append("ensure")),
+                  mock.patch.object(app_mod, "_remove_logon_task",
+                                    lambda: self.task.append("remove")),
+                  mock.patch.object(app_mod, "_repair_desktop_shortcut", lambda t: None),
+                  mock.patch.object(app_mod.sys, "frozen", True, create=True)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def approval(self):
+        return self.reg.keys.get(self.approved_key, {}).get(self.name)
+
+    def test_on_writes_an_enabled_run_entry(self):
+        app_mod._sync_startup(True)
+        self.assertEqual(self.reg.keys[self.run_key][self.name], '"C:/x/Echo.exe" --startup')
+        self.assertIsNone(self.approval())  # no record: Windows runs it
+        self.assertIs(app_mod._startup_registry_state(), True)
+        self.assertEqual(self.task, ["ensure"])  # the early launcher
+
+    def test_on_after_off_clears_the_disable(self):
+        app_mod._sync_startup(False)
+        app_mod._sync_startup(True)
+        self.assertEqual(self.approval(), bytes([2]) + bytes(11))
+        self.assertIs(app_mod._startup_registry_state(), True)
+
+    def test_off_keeps_the_entry_listed_but_disabled(self):
+        app_mod._sync_startup(False)
+        self.assertIn(self.name, self.reg.keys[self.run_key])
+        self.assertEqual(len(self.approval()), 12)
+        self.assertEqual(self.approval()[0], 3)
+        self.assertIs(app_mod._startup_registry_state(), False)
+        self.assertEqual(self.task, ["remove"])
+
+    def test_unchanged_state_keeps_task_managers_record(self):
+        stamped = bytes([3, 0, 0, 0]) + bytes(range(1, 9))
+        self.reg.keys[self.run_key] = {self.name: '"old"'}
+        self.reg.keys[self.approved_key] = {self.name: stamped}
+        app_mod._sync_startup(False)
+        self.assertEqual(self.approval(), stamped)
+        self.assertEqual(self.reg.keys[self.run_key][self.name], '"C:/x/Echo.exe" --startup')
+
+    def test_no_approval_record_means_enabled(self):
+        self.reg.keys[self.run_key] = {self.name: '"x"'}
+        self.assertIs(app_mod._startup_registry_state(), True)
+
+    def test_no_entry_yet_applies_the_saved_setting(self):
+        cfg = mock.Mock(start_with_windows=False)
+        self.assertIs(app_mod._startup_registry_state(), None)
+        self.assertFalse(app_mod._startup_setting_at_launch(cfg))
+        cfg.save.assert_not_called()
+
+    def test_task_manager_choice_wins_and_settings_follow(self):
+        self.reg.keys[self.run_key] = {self.name: '"x"'}
+        self.reg.keys[self.approved_key] = {self.name: bytes([3]) + bytes(11)}
+        cfg = mock.Mock(start_with_windows=True)
+        self.assertFalse(app_mod._startup_setting_at_launch(cfg))
+        self.assertFalse(cfg.start_with_windows)
+        cfg.save.assert_called_once()
+
+        self.reg.keys[self.approved_key][self.name] = bytes([2]) + bytes(11)
+        cfg = mock.Mock(start_with_windows=False)
+        self.assertTrue(app_mod._startup_setting_at_launch(cfg))
+        self.assertTrue(cfg.start_with_windows)
 
 
 class ConfigTests(unittest.TestCase):
@@ -162,11 +263,31 @@ class SourceOrderTests(unittest.TestCase):
         self.assertLess(i, main.index("_ensure_single_instance()"))
         self.assertLess(i, main.index("WhisperFlowApp("))
 
-    def test_startup_task_follows_the_setting(self):
+    def test_startup_entry_follows_the_setting(self):
         src = open(app_mod.__file__, encoding="utf-8").read()
         main = src[src.index("def _main() -> None:"):]
-        self.assertNotIn("target=_ensure_startup_task", main)
-        self.assertIn("start_with_windows", main)
+        self.assertIn("args=(_startup_setting_at_launch(config),)", main)
+
+    def test_sign_in_launch_checks_task_manager_before_anything(self):
+        src = open(app_mod.__file__, encoding="utf-8").read()
+        main = src[src.index("def _main() -> None:"):]
+        i = main.index("if _launched_at_sign_in():")
+        self.assertLess(i, main.index("_handoff_to_canonical_if_newer()"))
+        self.assertLess(i, main.index("_ensure_single_instance()"))
+
+    def test_duplicate_sign_in_launch_never_shows_the_window(self):
+        src = open(app_mod.__file__, encoding="utf-8").read()
+        body = src[src.index("def _ensure_single_instance"):src.index("TASK_NAME = ")]
+        self.assertLess(body.index("_launched_at_sign_in()"), body.index("/show"))
+
+    def test_both_launchers_pass_the_startup_flag(self):
+        src = open(app_mod.__file__, encoding="utf-8").read()
+        task = src[src.index("def _ensure_logon_task"):src.index("def _remove_logon_task")]
+        self.assertIn("args = _STARTUP_ARG", task)
+        self.assertIn("<Priority>4</Priority>", task)
+        with mock.patch.object(app_mod, "_startup_target", lambda: "C:/x/E.exe"), \
+             mock.patch.object(app_mod.sys, "frozen", True, create=True):
+            self.assertEqual(app_mod._startup_command(), '"C:/x/E.exe" --startup')
 
     def test_settings_has_the_toggle(self):
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

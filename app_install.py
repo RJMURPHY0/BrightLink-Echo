@@ -51,6 +51,8 @@ _REG_APP_PATHS = r"Software\Microsoft\Windows\CurrentVersion\App Paths"
 UNINSTALL_KEY = _REG_UNINSTALL + "\\" + brand.UNINSTALL_KEY_NAME
 APP_PATHS_KEY = _REG_APP_PATHS + "\\" + brand.CANONICAL_EXE_NAME
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+STARTUP_APPROVED_KEY = (r"Software\Microsoft\Windows\CurrentVersion\Explorer"
+                        r"\StartupApproved\Run")
 URL_PROTOCOL_KEY = "Software\\Classes\\" + brand.URL_SCHEME
 NOTIFICATION_ID_KEY = "Software\\Classes\\AppUserModelId\\" + brand.APP_USER_MODEL_ID
 TASK_NAME = brand.TASK_NAME
@@ -600,16 +602,18 @@ def _remove_launchers() -> None:
         )
     except Exception:
         pass
-    try:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE
-        ) as k:
-            try:
-                winreg.DeleteValue(k, brand.RUN_VALUE_NAME)
-            except FileNotFoundError:
-                pass
-    except Exception:
-        pass
+    # The Run entry and Task Manager's on/off record for it.
+    for key in (RUN_KEY, STARTUP_APPROVED_KEY):
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE
+            ) as k:
+                try:
+                    winreg.DeleteValue(k, brand.RUN_VALUE_NAME)
+                except FileNotFoundError:
+                    pass
+        except Exception:
+            pass
 
 
 def _remove_registry_entries() -> None:
