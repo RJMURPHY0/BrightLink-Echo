@@ -37,6 +37,10 @@ import brand  # noqa: E402
 import install_layout  # noqa: E402
 
 SCRIPT = os.path.join(ROOT, "installer", "activate.ps1")
+# Start-Process gives a console Python its own visible window, which pops over
+# whatever Ryan is typing; the windowless pythonw runs the stand-in just the same.
+_PYW = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+LAUNCHER = _PYW if os.path.exists(_PYW) else sys.executable
 
 # The stand-in app. Its behaviour is chosen by the line after the marker.
 _APP = r'''# BEHAVIOUR={behaviour}
@@ -112,7 +116,7 @@ class ActivationTests(unittest.TestCase):
         shutil.copy(SCRIPT, copy)
         args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", copy,
                 "-InstallDir", self.dir, "-Version", version, "-Mode", mode,
-                "-LaunchWith", sys.executable, "-HealthTimeout", str(health_timeout),
+                "-LaunchWith", LAUNCHER, "-HealthTimeout", str(health_timeout),
                 "-Attempts", str(attempts)]
         if relaunch:
             args.append("-Relaunch")
