@@ -156,6 +156,9 @@ hiddenimports += [
     # Imported lazily inside functions (registration thread / --uninstall), so
     # spell it out rather than trusting bytecode scanning to find it.
     'app_install',
+    # Imported lazily on the dead-capture path and by the tray's
+    # "Restart Windows audio" item.
+    'audio_engine',
     'brand',
     # Imported lazily inside text_expansion._dm() for the vocabulary phonetic
     # net — bytecode scanning misses a function-level import, so name it here.

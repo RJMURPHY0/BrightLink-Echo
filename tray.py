@@ -94,11 +94,13 @@ class TrayApp:
         on_open_config: Optional[Callable] = None,
         on_sign_out: Optional[Callable] = None,
         on_open: Optional[Callable] = None,
+        on_restart_audio: Optional[Callable] = None,
     ):
         self.on_quit        = on_quit
         self.on_open_config = on_open_config
         self.on_sign_out    = on_sign_out
         self.on_open        = on_open
+        self.on_restart_audio = on_restart_audio
         self._icon: Optional[pystray.Icon] = None
         self._current_state = "idle"
         self._user_email: str = ""
@@ -125,6 +127,8 @@ class TrayApp:
         ))
         items.append(pystray.Menu.SEPARATOR)
         items.append(item("Open Settings", self._on_open_config))
+        if self.on_restart_audio:
+            items.append(item("Restart Windows audio", self._on_restart_audio))
 
         if self.on_sign_out:
             items.append(item("Sign Out", self._on_sign_out))
@@ -135,6 +139,10 @@ class TrayApp:
     def _on_open(self, _icon, _item) -> None:
         if self.on_open:
             self.on_open()
+
+    def _on_restart_audio(self, _icon, _item) -> None:
+        if self.on_restart_audio:
+            self.on_restart_audio()
 
     def _on_sign_out(self, _icon, _item) -> None:
         if self.on_sign_out:

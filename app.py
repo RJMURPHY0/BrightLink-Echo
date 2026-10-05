@@ -419,6 +419,7 @@ class WhisperFlowApp:
                 on_open_config=self._open_config,
                 on_sign_out=self._sign_out,
                 on_open=self.app_window.show,
+                on_restart_audio=self._restart_audio_engine,
             )
 
             # Late-bind the settings tab's device tools now the recorder exists.
@@ -991,6 +992,10 @@ class WhisperFlowApp:
             pass
         if error in self._EXPECTED_PIPELINE_ERRORS:
             return
+        if error == self._AUDIO_ENGINE_DOWN_MSG:
+            self.app_window.show_action_toast(
+                error, "Restart audio", self._restart_audio_engine)
+            return
         short = error if len(error) <= 200 else error[:200] + "…"
         try:
             def _notify():
@@ -1151,9 +1156,65 @@ class WhisperFlowApp:
         # PortAudio re-init can take seconds and must not hold the stop path.
         threading.Thread(target=self.recorder.restart_warm, daemon=True,
                          name="warm-restart-dead-capture").start()
-        self.feedback.error_occurred(
-            "Microphone stopped responding — reconnected. Please dictate again.")
+        # A second dead capture soon after the first means reopening our own
+        # stream did not help: the Windows audio engine itself is hung
+        # (2026-10-05). Same when Windows Audio is not running at all. Only a
+        # restart of the engine fixes that, so offer it as a button.
+        now = time.monotonic()
+        last = getattr(self, "_last_dead_capture_ts", 0.0)
+        self._last_dead_capture_ts = now
+        import audio_engine
+        repeated = bool(last) and now - last < self._DEAD_CAPTURE_REPEAT_SECONDS
+        if repeated or not audio_engine.service_running():
+            self.feedback.error_occurred(self._AUDIO_ENGINE_DOWN_MSG)
+        else:
+            self.feedback.error_occurred(
+                "Microphone stopped responding — reconnected. Please dictate again.")
         return True
+
+    _DEAD_CAPTURE_REPEAT_SECONDS = 300.0
+    _AUDIO_ENGINE_DOWN_MSG = "Windows audio has stopped responding."
+
+    def _restart_audio_engine(self) -> None:
+        """Kill the hung Windows audio engine and restart Windows Audio
+        (one UAC prompt), then reopen our mic stream. Safe from any thread;
+        the work runs on its own so neither the UI nor the tray menu blocks."""
+        if getattr(self, "_audio_restart_running", False):
+            return
+        self._audio_restart_running = True
+
+        def _run():
+            import audio_engine
+            try:
+                self.app_window.show_toast(
+                    "Restarting Windows audio. Click Yes on the Windows prompt.",
+                    8000)
+                code = audio_engine.restart()
+                with open(_startup_log_path(), "a", encoding="utf-8") as f:
+                    f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                            f"Audio engine restart: exit {code}\n")
+                self._log_error_event("audio_engine_restart", {"exit_code": code})
+                if code == audio_engine.RESTARTED:
+                    self._last_dead_capture_ts = 0.0
+                    self.recorder.restart_warm()
+                    self.app_window.show_toast(
+                        "Windows audio restarted. Dictate again.", 6000)
+                elif code == audio_engine.CANCELLED:
+                    self.app_window.show_action_toast(
+                        "Audio not restarted. Dictation stays off until it is.",
+                        "Restart audio", self._restart_audio_engine)
+                else:
+                    self.app_window.show_toast(
+                        "Couldn't restart Windows audio. Restart your PC.", 10000)
+            except Exception as e:
+                print(f"[App] Audio engine restart failed: {e}")
+                self.app_window.show_toast(
+                    "Couldn't restart Windows audio. Restart your PC.", 10000)
+            finally:
+                self._audio_restart_running = False
+
+        threading.Thread(target=_run, daemon=True,
+                         name="audio-engine-restart").start()
 
     def _set_hotkey_capture(self, active: bool) -> None:
         """Suspend every global bind while the dashboard records a new shortcut.

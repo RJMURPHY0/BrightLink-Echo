@@ -249,6 +249,54 @@ def show_toast(root: tk.Misc, message: str, duration_ms: int = 5000) -> None:
     toast.bind("<Button-1>", lambda _e: toast.destroy())
 
 
+def show_action_toast(root: tk.Misc, message: str, button_text: str,
+                      on_click: Callable[[], None],
+                      duration_ms: int = 30000) -> None:
+    """show_toast with one action button and an × to dismiss. The button runs
+    on_click and closes the toast. Must be called on the tkinter main thread."""
+    toast = tk.Toplevel(root)
+    toast.overrideredirect(True)
+    toast.attributes("-topmost", True)
+    toast.configure(bg=C["accent"])
+
+    inner = tk.Frame(toast, bg=C["surface"])
+    inner.pack(fill="both", expand=True, padx=1, pady=1)
+    row = tk.Frame(inner, bg=C["surface"])
+    row.pack(padx=(18, 10), pady=12)
+    tk.Label(row, text=message, fg=C["text"], bg=C["surface"],
+             font=("Segoe UI", 10), justify="left").pack(side="left")
+
+    def _close():
+        try:
+            toast.destroy()
+        except tk.TclError:
+            pass
+
+    def _act():
+        _close()
+        on_click()
+
+    RoundedButton(row, text=button_text, command=_act, fill=C["accent"],
+                  fg="#ffffff", font=("Segoe UI", 10, "bold"),
+                  bg=C["surface"]).pack(side="left", padx=(14, 6))
+    close = tk.Label(row, text="×", fg=C["subtext"], bg=C["surface"],
+                     font=("Segoe UI", 13), cursor="hand2")
+    close.pack(side="left")
+    close.bind("<Button-1>", lambda _e: _close())
+
+    toast.update_idletasks()
+    w, h = toast.winfo_reqwidth(), toast.winfo_reqheight()
+    _l, _t, _r, _b = _monitor_work_area(root)
+    toast.geometry(f"{w}x{h}+{_r - w - 16}+{_b - h - 16}")
+    toast.update_idletasks()
+    try:
+        from popup import _apply_popup_corners
+        _apply_popup_corners(toast.winfo_id())
+    except Exception:
+        pass
+    toast.after(duration_ms, _close)
+
+
 # ── Blit-free scroll pane ─────────────────────────────────────────────────────
 
 class ScrollPane(tk.Frame):
@@ -10403,6 +10451,15 @@ class AppWindow:
         if not self._root:
             return
         self._ui_after(0, lambda: show_toast(self._root, message, duration_ms))
+
+    def show_action_toast(self, message: str, button_text: str,
+                          on_click: Callable[[], None],
+                          duration_ms: int = 30000) -> None:
+        """Thread-safe toast with one action button (see show_action_toast)."""
+        if not self._root:
+            return
+        self._ui_after(0, lambda: show_action_toast(
+            self._root, message, button_text, on_click, duration_ms))
 
     def set_update_status(self, text: str) -> None:
         """Thread-safe update of the status label in the Settings version card."""
