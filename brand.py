@@ -47,6 +47,12 @@ SHORTCUT_DESCRIPTION = "Push-to-talk dictation for Windows"
 # "More information" and support links in Installed apps.
 WEBSITE_URL = "https://brightlink.io"
 
+# The BrightLink CRM. Its browser tab reads "<page> | BrightLink", and History
+# shows the favicon the live site sets for dictations into that tab, so a new
+# favicon there reaches every install without a release.
+CRM_NAME = "BrightLink"
+CRM_URL = "https://app.brightlink.io"
+
 # Every name the product has shipped under before, oldest first. Anything that
 # finds a shortcut, a launcher or a history row by name must accept these too.
 LEGACY_PRODUCT_NAMES = ("FTC Whisper",)

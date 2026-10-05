@@ -1,3 +1,7 @@
+import io
+import os
+import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -107,6 +111,104 @@ class AppIconTests(unittest.TestCase):
 
     def test_zen_is_recognized_as_a_browser(self):
         self.assertIn("zen", app_icons._BROWSERS)
+
+CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+CRM_HTML = ('<head><link id="app-favicon" rel="icon" type="image/png" href="/favicon.png" />'
+            '<link rel="apple-touch-icon" href="/touch.png" /><title>BrightLink</title></head>')
+
+
+class CrmFaviconTests(unittest.TestCase):
+    """History shows the live BrightLink CRM favicon for CRM tabs only."""
+
+    def setUp(self):
+        app_icons._site_state.update(fetching=False, last_attempt=0.0,
+                                     mtime_ns=0, stat_at=0.0)
+
+    def test_crm_tab_titles_resolve_to_the_crm_name(self):
+        for title in ("Contacts | BrightLink - Google Chrome", "BrightLink - Google Chrome"):
+            with mock.patch.object(app_icons, "_exe_path_for_hwnd", return_value=CHROME), \
+                 mock.patch.object(app_icons, "_window_title", return_value=title):
+                self.assertEqual(app_icons.brand.CRM_NAME,
+                                 app_icons.capture_app_info(1)["app_name"], title)
+
+    def test_a_page_about_brightlink_is_not_the_crm(self):
+        with mock.patch.object(app_icons, "_exe_path_for_hwnd", return_value=CHROME), \
+             mock.patch.object(app_icons, "_window_title",
+                               return_value="BrightLink - Google Search - Google Chrome"):
+            name = app_icons.capture_app_info(1)["app_name"]
+        self.assertFalse(app_icons.is_crm_tab(name, CHROME))
+
+    def test_only_a_browser_tab_named_brightlink_qualifies(self):
+        self.assertTrue(app_icons.is_crm_tab("BrightLink", CHROME))
+        self.assertTrue(app_icons.is_crm_tab(" brightlink ", r"C:\x\msedge.exe"))
+        self.assertFalse(app_icons.is_crm_tab("Claude", CHROME))
+        self.assertFalse(app_icons.is_crm_tab("BrightLink", r"C:\x\notepad.exe"))
+        self.assertFalse(app_icons.is_crm_tab("BrightLink", ""))
+
+    def test_other_rows_never_fetch(self):
+        with mock.patch.object(app_icons, "_refresh_site_favicon_if_due") as due:
+            self.assertIsNone(app_icons.get_site_icon("Claude", CHROME, "#111111"))
+        due.assert_not_called()
+
+    def test_the_favicon_link_is_read_from_the_page(self):
+        self.assertEqual("/favicon.png", app_icons._favicon_href(CRM_HTML))
+        self.assertEqual("/t.png", app_icons._favicon_href(
+            '<link rel="apple-touch-icon" href="/t.png">'))
+        self.assertEqual("/s.ico", app_icons._favicon_href(
+            '<link rel="shortcut icon" href="/s.ico">'))
+        self.assertEqual("/favicon.ico", app_icons._favicon_href("<title>x</title>"))
+
+    def test_refresh_runs_when_missing_or_stale_and_not_in_a_loop(self):
+        with mock.patch("threading.Thread") as thread:
+            app_icons._refresh_site_favicon_if_due(time.time() - 60)    # fresh
+            thread.assert_not_called()
+            app_icons._refresh_site_favicon_if_due(0)                   # missing
+            self.assertEqual(1, thread.call_count)
+            app_icons._site_state["fetching"] = False                   # it failed
+            app_icons._refresh_site_favicon_if_due(0)                   # retry waits
+            self.assertEqual(1, thread.call_count)
+            app_icons._site_state["last_attempt"] -= app_icons._SITE_RETRY_S + 1
+            app_icons._refresh_site_favicon_if_due(time.time() - app_icons._SITE_REFRESH_S - 1)
+            self.assertEqual(2, thread.call_count)
+
+    def test_download_saves_the_live_favicon_as_png(self):
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGBA", (64, 64), (243, 146, 0, 255)).save(buf, "PNG")
+        pages = {"https://app.brightlink.io/": CRM_HTML.encode(),
+                 "https://app.brightlink.io/favicon.png": buf.getvalue()}
+        seen = []
+
+        def fake_open(req, timeout):
+            seen.append(req.full_url)
+            resp = mock.MagicMock()
+            resp.__enter__.return_value.read = lambda n=-1: pages[req.full_url]
+            return resp
+
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "icons", "crm-favicon.png")
+            with mock.patch.object(app_icons, "_site_icon_path", return_value=out), \
+                 mock.patch("urllib.request.urlopen", side_effect=fake_open):
+                app_icons._site_state["fetching"] = True
+                app_icons._download_site_favicon()
+            self.assertEqual(list(pages), seen)
+            self.assertFalse(app_icons._site_state["fetching"])
+            with Image.open(out) as img:
+                self.assertEqual((64, 64), img.size)
+
+    def test_a_failed_download_keeps_the_last_good_favicon(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "crm-favicon.png")
+            with open(out, "wb") as f:
+                f.write(b"old")
+            with mock.patch.object(app_icons, "_site_icon_path", return_value=out), \
+                 mock.patch("urllib.request.urlopen", side_effect=OSError("offline")):
+                app_icons._download_site_favicon()
+            with open(out, "rb") as f:
+                self.assertEqual(b"old", f.read())
+
+    def test_the_bundled_mark_stands_in_before_the_first_download(self):
+        self.assertTrue(os.path.exists(app_icons._SITE_BUNDLED))
 
 
 if __name__ == "__main__":

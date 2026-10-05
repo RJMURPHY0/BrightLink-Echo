@@ -6,6 +6,8 @@ capture_app_info(hwnd)  — resolve a window handle to {app_name, app_exe} at
                           titles change constantly).
 get_app_icon(exe, bg)   — extract the exe's shell icon as a tk PhotoImage
                           composited onto the given row background. Cached.
+get_site_icon(name, exe, bg) — the live favicon of a BrightLink CRM tab;
+                          None for any other row.
 get_fallback_icon(bg)   — generic "text" tile for history rows recorded before
                           app capture existed.
 
@@ -593,44 +595,189 @@ def get_brand_icon(app_name: str, bg: str):
         return _brand_icon_cache[key]
     photo = None
     try:
-        from PIL import Image, ImageDraw, ImageChops, ImageTk
-        big = _ICON_SIZE * 4  # render 4x, downsample for smooth corners/edges
+        from PIL import Image
         src = Image.open(os.path.join(_BRAND_DIR, slug + ".png")).convert("RGBA")
-        # Two visually distinct favicon shapes need different handling so every
-        # row reads at a CONSISTENT optical size:
-        #   • full-bleed colour tile (Claude, Outlook, ChatGPT) → fill the cell
-        #     and round the corners (iOS/app-icon look).
-        #   • floating glyph on transparency (Antigravity, Gemini, Slack) →
-        #     trim to the mark, then scale it to a fixed fraction of the cell so
-        #     a tall mark (Antigravity's "A") no longer towers over the tiles.
-        alpha = src.split()[3]
-        opaque_frac = alpha.histogram()[255] / float(src.size[0] * src.size[1])
-        canvas = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-        if opaque_frac >= _BRAND_TILE_OPAQUE:
-            tile = src.resize((big, big), Image.LANCZOS)
-            mask = Image.new("L", (big, big), 0)
-            ImageDraw.Draw(mask).rounded_rectangle(
-                [0, 0, big - 1, big - 1], radius=int(big * _BRAND_RADIUS), fill=255)
-            r, g, b, a = tile.split()
-            tile.putalpha(ImageChops.multiply(a, mask))
-            canvas.alpha_composite(tile)
-        else:
-            bb = src.getbbox()
-            if bb:
-                src = src.crop(bb)
-            w, h = src.size
-            scale = (_BRAND_GLYPH_SCALE * big) / max(w, h)
-            nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
-            glyph = src.resize((nw, nh), Image.LANCZOS)
-            canvas.alpha_composite(glyph, ((big - nw) // 2, (big - nh) // 2))
-        icon = canvas.resize((_ICON_SIZE, _ICON_SIZE), Image.LANCZOS)
-        base = Image.new("RGBA", icon.size, bg)
-        base.alpha_composite(icon)
-        photo = ImageTk.PhotoImage(base.convert("RGB"))
+        photo = _brand_tile_photo(src, bg)
     except Exception:
         photo = None
     if photo is not None:
         _brand_icon_cache[key] = photo
+    return photo
+
+
+def _brand_tile_photo(src, bg: str):
+    """Render a favicon/logo (RGBA PIL image) as a row icon on bg. Raises on a
+    PIL failure; callers decide what a failure means."""
+    from PIL import Image, ImageDraw, ImageChops, ImageTk
+    big = _ICON_SIZE * 4  # render 4x, downsample for smooth corners/edges
+    # Two visually distinct favicon shapes need different handling so every
+    # row reads at a CONSISTENT optical size:
+    #   • full-bleed colour tile (Claude, Outlook, ChatGPT) → fill the cell
+    #     and round the corners (iOS/app-icon look).
+    #   • floating glyph on transparency (Antigravity, Gemini, Slack) →
+    #     trim to the mark, then scale it to a fixed fraction of the cell so
+    #     a tall mark (Antigravity's "A") no longer towers over the tiles.
+    alpha = src.split()[3]
+    opaque_frac = alpha.histogram()[255] / float(src.size[0] * src.size[1])
+    canvas = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    if opaque_frac >= _BRAND_TILE_OPAQUE:
+        tile = src.resize((big, big), Image.LANCZOS)
+        mask = Image.new("L", (big, big), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            [0, 0, big - 1, big - 1], radius=int(big * _BRAND_RADIUS), fill=255)
+        r, g, b, a = tile.split()
+        tile.putalpha(ImageChops.multiply(a, mask))
+        canvas.alpha_composite(tile)
+    else:
+        bb = src.getbbox()
+        if bb:
+            src = src.crop(bb)
+        w, h = src.size
+        scale = (_BRAND_GLYPH_SCALE * big) / max(w, h)
+        nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
+        glyph = src.resize((nw, nh), Image.LANCZOS)
+        canvas.alpha_composite(glyph, ((big - nw) // 2, (big - nh) // 2))
+    icon = canvas.resize((_ICON_SIZE, _ICON_SIZE), Image.LANCZOS)
+    base = Image.new("RGBA", icon.size, bg)
+    base.alpha_composite(icon)
+    return ImageTk.PhotoImage(base.convert("RGB"))
+
+
+# ── Live site favicons (the BrightLink CRM) ──────────────────────────────────
+# A dictation into a browser tab the CRM titled ("Contacts | BrightLink", so
+# app_name == brand.CRM_NAME) shows the favicon the live CRM sets, read from
+# its page's <link rel="icon">. Changing the CRM favicon therefore changes it
+# here too, with no Echo release. Any other page keeps the browser's icon.
+# The download runs on a daemon thread and only writes a file; Tk objects are
+# built on the render (main) thread from that file. Until the first download
+# lands, the bundled CRM mark stands in.
+_SITE_REFRESH_S = 6 * 3600     # re-read the live favicon this often
+_SITE_RETRY_S = 15 * 60        # after a failed download
+_SITE_MAX_BYTES = 2 * 1024 * 1024
+_SITE_BUNDLED = os.path.join(_BASE_DIR, "assets", "brand", "brightlink-mark.png")
+_site_icon_cache: dict = {}    # (path, mtime_ns, bg) -> PhotoImage
+_SITE_STAT_TTL_S = 5.0         # a render redraws every row; stat at most this often
+_site_state = {"fetching": False, "last_attempt": 0.0,
+               "mtime_ns": 0, "stat_at": 0.0}
+
+
+def _site_icon_path() -> str:
+    root = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(root, brand.DATA_DIR_NAME, "icons", "crm-favicon.png")
+
+
+def is_crm_tab(app_name: str, app_exe: str) -> bool:
+    """True for a row dictated into a browser tab showing the BrightLink CRM."""
+    if _stem_of(app_exe) not in _BROWSERS:
+        return False
+    return (app_name or "").strip().casefold() == brand.CRM_NAME.casefold()
+
+
+def _favicon_href(html: str) -> str:
+    """The page's favicon href: rel="icon" (or "shortcut icon") first, then
+    apple-touch-icon, else the conventional /favicon.ico."""
+    from html.parser import HTMLParser
+
+    found = {"icon": "", "touch": ""}
+
+    class _Links(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            if tag != "link":
+                return
+            a = {k.lower(): (v or "") for k, v in attrs}
+            rel = a.get("rel", "").lower().split()
+            href = a.get("href", "").strip()
+            if not href:
+                return
+            if "icon" in rel and not found["icon"]:
+                found["icon"] = href
+            elif "apple-touch-icon" in rel and not found["touch"]:
+                found["touch"] = href
+
+    _Links().feed(html)
+    return found["icon"] or found["touch"] or "/favicon.ico"
+
+
+def _download_site_favicon() -> None:
+    """Fetch the CRM's current favicon into _site_icon_path(). Thread body."""
+    import io
+    import urllib.parse
+    import urllib.request
+    try:
+        from PIL import Image
+        headers = {"User-Agent": brand.HTTP_USER_AGENT}
+        req = urllib.request.Request(brand.CRM_URL + "/", headers=headers)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            html = resp.read(512 * 1024).decode("utf-8", "replace")
+        url = urllib.parse.urljoin(brand.CRM_URL + "/", _favicon_href(html))
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = resp.read(_SITE_MAX_BYTES + 1)
+        if len(data) > _SITE_MAX_BYTES:
+            raise ValueError(f"favicon over {_SITE_MAX_BYTES} bytes: {url}")
+        img = Image.open(io.BytesIO(data))
+        img.load()
+        img = img.convert("RGBA")
+        path = _site_icon_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".part"
+        img.save(tmp, "PNG")
+        os.replace(tmp, path)
+        _site_state["stat_at"] = 0.0   # next render picks the new file up
+        print(f"[AppIcons] CRM favicon refreshed from {url}")
+    except Exception as e:
+        print(f"[AppIcons] CRM favicon refresh failed: {e}")
+    finally:
+        _site_state["fetching"] = False
+
+
+def _site_mtime_ns(path: str) -> int:
+    now = time.monotonic()
+    if now - _site_state["stat_at"] >= _SITE_STAT_TTL_S:
+        try:
+            _site_state["mtime_ns"] = os.stat(path).st_mtime_ns
+        except OSError:
+            _site_state["mtime_ns"] = 0
+        _site_state["stat_at"] = now
+    return _site_state["mtime_ns"]
+
+
+def _refresh_site_favicon_if_due(mtime: float) -> None:
+    now = time.time()
+    if _site_state["fetching"]:
+        return
+    fresh = mtime and now - mtime < _SITE_REFRESH_S
+    if fresh or now - _site_state["last_attempt"] < _SITE_RETRY_S:
+        return
+    import threading
+    _site_state["fetching"] = True
+    _site_state["last_attempt"] = now
+    threading.Thread(target=_download_site_favicon, name="crm-favicon",
+                     daemon=True).start()
+
+
+def get_site_icon(app_name: str, app_exe: str, bg: str):
+    """The live CRM favicon for a CRM tab row, composited onto bg. None for any
+    other row, so the browser's own icon shows. Caller keeps the reference."""
+    if not is_crm_tab(app_name, app_exe):
+        return None
+    path = _site_icon_path()
+    mtime_ns = _site_mtime_ns(path)
+    _refresh_site_favicon_if_due(mtime_ns / 1e9)
+    src_path = path if mtime_ns else _SITE_BUNDLED
+    key = (src_path, mtime_ns, bg)
+    if key in _site_icon_cache:
+        return _site_icon_cache[key]
+    photo = None
+    try:
+        from PIL import Image
+        photo = _brand_tile_photo(Image.open(src_path).convert("RGBA"), bg)
+    except Exception as e:
+        print(f"[AppIcons] CRM favicon render failed ({src_path}): {e}")
+    if photo is not None:
+        # Superseded favicons stay cached: a PhotoImage freed while a drawn row
+        # still shows it blanks that row. One 36px image per favicon change.
+        _site_icon_cache[key] = photo
     return photo
 
 

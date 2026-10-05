@@ -21,11 +21,12 @@ from typing import Callable, Optional
 import ctypes
 
 try:
-    from app_icons import (get_app_icon, get_brand_icon,
+    from app_icons import (get_app_icon, get_brand_icon, get_site_icon,
                            get_monogram_icon, get_fallback_icon)
 except Exception:
     get_app_icon = lambda *a, **k: None        # noqa: E731
     get_brand_icon = lambda *a, **k: None      # noqa: E731
+    get_site_icon = lambda *a, **k: None       # noqa: E731
     get_monogram_icon = lambda *a, **k: None   # noqa: E731
     get_fallback_icon = lambda *a, **k: None   # noqa: E731
 
@@ -6856,7 +6857,8 @@ class AppWindow:
     def _history_icon(self, item: dict, bg: str):
         app_name = item.get("app_name") or ""
         app_exe = item.get("app_exe") or ""
-        return (get_brand_icon(app_name, bg)
+        return (get_site_icon(app_name, app_exe, bg)
+                or get_brand_icon(app_name, bg)
                 or get_app_icon(app_exe, bg)
                 or get_monogram_icon(app_name, bg)
                 or get_fallback_icon(bg))
