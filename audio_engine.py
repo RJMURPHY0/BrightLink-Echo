@@ -35,6 +35,9 @@ if ($svc -and $svc.ProcessId -gt 0) {
   else { Stop-Service Audiosrv -Force -NoWait }
 }
 for ($i = 0; $i -lt 40 -and (Get-Service Audiosrv).Status -ne 'Stopped'; $i++) { Start-Sleep -Milliseconds 250 }
+# A service that never stopped was never restarted: it is still 'Running' below,
+# which would otherwise report success for a restart that did not happen.
+if ((Get-Service Audiosrv).Status -ne 'Stopped') { exit 3 }
 Start-Service Audiosrv
 for ($i = 0; $i -lt 40 -and (Get-Service Audiosrv).Status -ne 'Running'; $i++) { Start-Sleep -Milliseconds 250 }
 if ((Get-Service Audiosrv).Status -eq 'Running') { exit 0 } else { exit 2 }

@@ -14,3 +14,4 @@ Full history: docs/decisions/popup-pill.md, docs/decisions/settings-window-ui.md
 - `popup.set_upgrade_result()` must always be called with the `session=` stamp of the dictation the result belongs to
 - Never call tkinter widgets from a background thread directly — always `self._root.after(0, lambda: ...)`
 - Don't reintroduce a trailing-word-window truncation in `update_caption` — that's what made caption scrollback impossible
+- The recording pill has its own per-monitor DPI window (small, never rescaled): every `geometry()`/`update_idletasks()` on it runs inside `popup._RealPixels()` and its size stays pinned. The badge and refine panel keep the ordinary window and Windows' sizing (Ryan, 2026-10-06). See popup-pill.md 2026-10-06.

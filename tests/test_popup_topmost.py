@@ -216,7 +216,7 @@ class PositionNudgeTests(unittest.TestCase):
     def test_reposition_clamps_a_negative_offset_to_the_screen_not_the_work_area(self):
         # Clamping a deliberately-negative offset to the work area would
         # silently undo every press past 0 and the ▾ arrow would look broken.
-        src = inspect.getsource(FloatingPopup._reposition)
+        src = inspect.getsource(FloatingPopup._place_xy)
         self.assertIn("_monitor_bottom", src)
         self.assertIn("self._popup_offset < 0", src)
 
@@ -255,7 +255,7 @@ class PositionNudgeTests(unittest.TestCase):
     def test_reposition_lifts_the_fixed_popup_by_the_offset(self):
         # The offset is what clears the pill off the taskbar; it must be applied
         # to the fixed y (and the on-screen clamp below still protects the edge).
-        src = inspect.getsource(FloatingPopup._reposition)
+        src = inspect.getsource(FloatingPopup._place_xy)
         self.assertIn("y -= self._popup_offset", src)
 
     # ── Horizontal ◂ ▸ arrows ──────────────────────────────────────────────
@@ -285,7 +285,7 @@ class PositionNudgeTests(unittest.TestCase):
         self.assertEqual("right", p._popup_align)
 
     def test_reposition_places_the_popup_by_alignment(self):
-        src = inspect.getsource(FloatingPopup._reposition)
+        src = inspect.getsource(FloatingPopup._place_xy)
         self.assertIn('self._popup_align == "left"', src)
         self.assertIn('self._popup_align == "right"', src)
 

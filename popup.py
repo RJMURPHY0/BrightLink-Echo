@@ -85,8 +85,152 @@ def _monitor_user32():
         u32.GetMonitorInfoW.restype = ctypes.c_int
         u32.GetMonitorInfoW.argtypes = [ctypes.c_void_p,
                                         ctypes.POINTER(_MONITORINFO)]
+        u32.GetWindowRect.restype = ctypes.c_int
+        u32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(_RECT)]
+        try:  # Windows 10 1607+; absent means real pixels are unreadable
+            u32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+            u32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+            u32.GetWindowDpiAwarenessContext.restype = ctypes.c_void_p
+            u32.GetWindowDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+            u32.GetAwarenessFromDpiAwarenessContext.restype = ctypes.c_int
+            u32.GetAwarenessFromDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        except AttributeError:
+            pass
         _U32_MON = u32
     return _U32_MON
+
+
+# ── Real pixels for the popup ────────────────────────────────────────────────
+# The app is DPI-UNAWARE, so on a scaled monitor every Win32 coordinate it reads
+# (monitor rects, window rects, the cursor) is in Windows' scaled space: a 150%
+# 1920x1200 laptop reads as 1280x800. For a Tk BORDERLESS window, Windows then
+# decides from whichever app window was shown last whether to scale it, all
+# measured on Ryan's rig (2026-10-06): with the dashboard open on a 100% screen
+# a pill placed at (1443,1700) lands at real pixel (1443,1700) at 1x size; with
+# the dashboard hidden, or open on the laptop, it lands at (1690,2010) at 1.5x.
+# The dashboard's own dropdowns, tips and toasts open on the dashboard's screen,
+# so the two always agree for them. The pill opens on ANOTHER screen, so it
+# was placed in one space and drawn in the other: mid-window on the 150% laptop
+# while the dashboard sat on a 100% screen, and 1.5x size when it did land.
+# The popup is therefore a per-monitor DPI window placed in real pixels.
+_DPI_CTX_PER_MONITOR_V2 = -4
+
+
+class _RealPixels:
+    """Context manager: Win32 calls on this thread read real pixels. Restores
+    the thread's own DPI context on exit. A no-op where unsupported, which
+    leaves the old scaled numbers (correct on an unscaled monitor)."""
+
+    def __enter__(self):
+        self._prev = None
+        try:
+            fn = _monitor_user32().SetThreadDpiAwarenessContext
+            self._prev = fn(ctypes.c_void_p(_DPI_CTX_PER_MONITOR_V2))
+        except Exception:
+            self._prev = None
+        return self
+
+    def __exit__(self, *_exc):
+        if self._prev:
+            try:
+                _monitor_user32().SetThreadDpiAwarenessContext(
+                    ctypes.c_void_p(self._prev))
+            except Exception:
+                pass
+        return False
+
+
+class _NoContext:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def _rect_tuple(r) -> tuple:
+    return (int(r.left), int(r.top), int(r.right), int(r.bottom))
+
+
+class OverlayMonitor:
+    """One monitor seen two ways: `scaled` is its rect in the app's own
+    (DPI-scaled) coordinates, `real` its rect in real pixels, `work` its work
+    area (taskbar excluded) in real pixels. real_point/scaled_point convert
+    between the two spaces on this monitor."""
+
+    __slots__ = ("scaled", "real", "work")
+
+    def __init__(self, scaled: tuple, real: tuple, work: tuple):
+        self.scaled, self.real, self.work = scaled, real, work
+
+    def _ratio(self) -> tuple:
+        sw = self.scaled[2] - self.scaled[0]
+        sh = self.scaled[3] - self.scaled[1]
+        rw = self.real[2] - self.real[0]
+        rh = self.real[3] - self.real[1]
+        if sw <= 0 or sh <= 0 or rw <= 0 or rh <= 0:
+            return 1.0, 1.0
+        return rw / sw, rh / sh
+
+    def real_point(self, x: int, y: int) -> tuple:
+        fx, fy = self._ratio()
+        return (self.real[0] + round((x - self.scaled[0]) * fx),
+                self.real[1] + round((y - self.scaled[1]) * fy))
+
+    def scaled_point(self, x: int, y: int) -> tuple:
+        fx, fy = self._ratio()
+        return (self.scaled[0] + round((x - self.real[0]) / fx),
+                self.scaled[1] + round((y - self.real[1]) / fy))
+
+
+def _overlay_monitor_from_handle(hmon) -> Optional["OverlayMonitor"]:
+    if not hmon:
+        return None
+    u32 = _monitor_user32()
+    scaled = _MONITORINFO()
+    scaled.cbSize = ctypes.sizeof(_MONITORINFO)
+    if not u32.GetMonitorInfoW(hmon, ctypes.byref(scaled)):
+        return None
+    real = _MONITORINFO()
+    real.cbSize = ctypes.sizeof(_MONITORINFO)
+    with _RealPixels():
+        ok = u32.GetMonitorInfoW(hmon, ctypes.byref(real))
+    if not ok:
+        real = scaled
+    r = real.rcWork
+    if r.right <= r.left or r.bottom <= r.top:
+        return None
+    return OverlayMonitor(_rect_tuple(scaled.rcMonitor),
+                          _rect_tuple(real.rcMonitor), _rect_tuple(r))
+
+
+def overlay_monitor(x: int = 0, y: int = 0,
+                    hwnd: int = 0) -> Optional["OverlayMonitor"]:
+    """The monitor a borderless window belongs on: the one holding *hwnd* when
+    given, else the one nearest the app-coordinate point (x, y). None when
+    Win32 is unavailable (test doubles), so callers keep their old maths."""
+    try:
+        u32 = _monitor_user32()
+        if hwnd:
+            hmon = u32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+        else:
+            pt = _POINT()
+            pt.x, pt.y = int(x), int(y)
+            hmon = u32.MonitorFromPoint(pt, 2)
+        return _overlay_monitor_from_handle(hmon)
+    except Exception:
+        return None
+
+
+def real_window_rect(hwnd: int) -> Optional[tuple]:
+    """Where a window really is on screen, in real pixels."""
+    try:
+        r = _RECT()
+        with _RealPixels():
+            ok = _monitor_user32().GetWindowRect(hwnd, ctypes.byref(r))
+        return _rect_tuple(r) if ok else None
+    except Exception:
+        return None
 
 
 # ── Popup palette (light grey floating pill) ──────────────────────────────────
@@ -296,6 +440,10 @@ _STATUS_PAD_Y = 10
 # in-flight upgrade, or the pointer resting over the panel all count as
 # activity and restart the countdown.
 PANEL_IDLE_DISMISS_SECS = 45.0
+
+# How often an open popup checks whether its content changed size (its size
+# is pinned, see FloatingPopup._watch_pinned_size).
+_SIZE_WATCH_MS = 50
 
 
 def _apply_popup_corners(hwnd: int) -> bool:
@@ -690,12 +838,16 @@ class FloatingPopup:
             return
         try:
             WDA_NONE, WDA_EXCLUDEFROMCAPTURE = 0x0, 0x11
-            hw = self._top_hwnd()
-            if hw:
-                ctypes.windll.user32.SetWindowDisplayAffinity(
-                    hw,
-                    WDA_EXCLUDEFROMCAPTURE if self._capture_hidden
-                    else WDA_NONE)
+            wins = getattr(self, "_windows", None) or {}
+            children = [h for _w, h in wins.values()] or [self._popup_hwnd]
+            for child in children:
+                hw = (ctypes.windll.user32.GetAncestor(child, 2) or child
+                      if child else 0)
+                if hw:
+                    ctypes.windll.user32.SetWindowDisplayAffinity(
+                        hw,
+                        WDA_EXCLUDEFROMCAPTURE if self._capture_hidden
+                        else WDA_NONE)
         except Exception:
             pass
 
@@ -866,31 +1018,55 @@ class FloatingPopup:
     # ── Tkinter setup ──────────────────────────────────────────────────────────
 
     def initialize(self, main_root: tk.Tk) -> None:
-        """Create the popup Toplevel on the main thread. Call once after main Tk is running."""
+        """Create the popup Toplevels on the main thread. Call once after main Tk is running.
+
+        Two windows. The recording pill (recording and transcribing) lives in
+        a per-monitor DPI window (see _RealPixels): Windows never rescales it,
+        so it is the same small, crisp size on every screen and sits exactly
+        where _reposition puts it. The badge and the refine panel live in an
+        ordinary DPI-unaware window, sized by Windows exactly as before; only
+        their placement is measured and corrected (see _reposition)."""
         if self.root is not None:
             return
-        self.root = tk.Toplevel(main_root)
-        # Distinct title (never rendered — the window is borderless): a second
-        # window titled "FTC Whisper" made every FindWindowW-by-title lookup a
-        # coin flip between the dashboard and this popup.
-        self.root.title(f"{brand.PRODUCT_NAME} Overlay")
-        # Hide immediately and park far off-screen BEFORE anything else, so the
-        # freshly-created dark Toplevel can never flash as a little black box at
-        # the top-left (0,0) for a frame before it's positioned/withdrawn.
-        self.root.withdraw()
-        self.root.geometry("+-4000+-4000")
-        self.root.overrideredirect(True)
-        self.root.attributes("-topmost", True)
-        self.root.attributes("-alpha", 0.97)
-        self.root.attributes("-toolwindow", True)
-        self.root.configure(bg=CP["bg"])
-        self.root.withdraw()
+        pill = self._make_window(main_root, real_px=True)
+        main = self._make_window(main_root, real_px=False)
+        self._windows = {"pill": pill, "main": main}
 
-        self.root.update_idletasks()
-        self._popup_hwnd = self.root.winfo_id()
-        # Screenshot exclusion may have been requested before the window
-        # existed (config is pushed at startup) — apply it now that it does.
+        self.root, self._popup_hwnd = pill
+        self._popup_top_hwnd = 0
+        self._build_status_frame()
+        self.root, self._popup_hwnd = main
+        self._popup_top_hwnd = 0
+        self._build_icon_frame()
+        self._build_refinement_frame()
+
+        # Screenshot exclusion may have been requested before the windows
+        # existed (config is pushed at startup) — apply it now that they do.
         self._apply_capture_affinity()
+        self._start_watchdog()
+
+    def _make_window(self, main_root: tk.Tk, real_px: bool) -> tuple:
+        """One borderless popup Toplevel; returns (toplevel, winfo_id)."""
+        with (_RealPixels() if real_px else _NoContext()):
+            win = tk.Toplevel(main_root)
+            # Distinct title (never rendered — the window is borderless): a
+            # second window titled "FTC Whisper" made every FindWindowW-by-title
+            # lookup a coin flip between the dashboard and this popup.
+            win.title(f"{brand.PRODUCT_NAME} Overlay")
+            # Hide immediately and park far off-screen BEFORE anything else, so
+            # the freshly-created dark Toplevel can never flash as a little black
+            # box at the top-left (0,0) for a frame before it's
+            # positioned/withdrawn.
+            win.withdraw()
+            win.geometry("+-4000+-4000")
+            win.overrideredirect(True)
+            win.attributes("-topmost", True)
+            win.attributes("-alpha", 0.97)
+            win.attributes("-toolwindow", True)
+            win.configure(bg=CP["bg"])
+            win.withdraw()
+            win.update_idletasks()
+            hwnd = win.winfo_id()
 
         # WS_EX_NOACTIVATE: popup can never steal focus from the foreground app.
         # This is the critical fix for ChatGPT / browser inputs — without it the
@@ -901,21 +1077,48 @@ class FloatingPopup:
             GWL_EXSTYLE      = -20
             WS_EX_NOACTIVATE = 0x08000000
             u32 = ctypes.windll.user32
-            style = u32.GetWindowLongW(self._popup_hwnd, GWL_EXSTYLE)
-            u32.SetWindowLongW(self._popup_hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE)
+            style = u32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            u32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE)
         except Exception:
             pass
 
         # Apply Win11 DWM rounded corners once — no GDI region, no black artifacts.
-        _apply_popup_corners(self._popup_hwnd)
+        _apply_popup_corners(hwnd)
+        win.bind("<Configure>", self._on_popup_configure)
+        return win, hwnd
 
-        self._build_status_frame()
-        self._build_icon_frame()
-        self._build_refinement_frame()
+    def _use_window(self, name: str) -> None:
+        """Point self.root at window `name` ("pill" or "main"), hiding the
+        other one."""
+        wins = getattr(self, "_windows", None)
+        if not wins:
+            return
+        win, hwnd = wins[name]
+        if win is self.root:
+            return
+        try:
+            self.root.withdraw()
+        except tk.TclError:
+            pass
+        self.root, self._popup_hwnd = win, hwnd
+        self._popup_top_hwnd = 0
+        self._last_geometry = ""
 
-        self.root.bind("<Configure>", self._on_popup_configure)
-
-        self._start_watchdog()
+    def owned_hwnds(self) -> tuple:
+        """Every window handle the popup owns (both windows, tkinter's child
+        and the real top-level), so a foreground check can't miss either."""
+        out = []
+        wins = getattr(self, "_windows", None) or {}
+        pairs = list(wins.values()) or [(self.root, self._popup_hwnd)]
+        for _win, hwnd in pairs:
+            if not hwnd:
+                continue
+            out.append(int(hwnd))
+            try:
+                out.append(int(ctypes.windll.user32.GetAncestor(hwnd, 2) or 0))
+            except Exception:
+                pass
+        return tuple(h for h in out if h)
 
     def _start_watchdog(self) -> None:
         if self._watchdog_started or not self.root:
@@ -1694,6 +1897,7 @@ class FloatingPopup:
             frame.pack_forget()
 
     def _enter_status_mode(self, text: str, recording: bool = False) -> None:
+        self._use_window("pill")
         self._set_no_activate(True)
         self._status_entered = time.time()
         self._last_activity = time.time()
@@ -1854,6 +2058,7 @@ class FloatingPopup:
                 self._wave_canvas.itemconfigure(bid, fill=CP["bar_idle"])
 
     def _enter_icon_mode(self) -> None:
+        self._use_window("main")
         self._set_no_activate(True)
         self._stop_waveform()
         self._hide_all_frames()
@@ -1926,6 +2131,7 @@ class FloatingPopup:
         # target window would hide the panel the moment it opened.
         self._unregister_key_dismiss()
         self._stop_foreground_watch()
+        self._use_window("main")
         # Remove WS_EX_NOACTIVATE so the Entry widget can receive keyboard focus
         self._set_no_activate(False)
         # Pack the panel FIRST (and refresh its status after), so a failure in
@@ -2127,6 +2333,12 @@ class FloatingPopup:
         self._result_frame.pack_forget()
         self._hide_all_frames()
         self.root.withdraw()
+        for win, _hwnd in (getattr(self, "_windows", None) or {}).values():
+            if win is not self.root:
+                try:
+                    win.withdraw()
+                except tk.TclError:
+                    pass
 
     def clear_upgrading(self, session: int = 0) -> None:
         """Upgrade finished with nothing better to offer — stop showing
@@ -2536,6 +2748,10 @@ class FloatingPopup:
     def _get_monitor_workarea(
         self, x: int = 0, y: int = 0
     ) -> tuple[int, int, int, int]:
+        """Work area of the monitor the popup belongs on, in REAL pixels (the
+        space Tk places this borderless window in; see OverlayMonitor). The
+        monitor is picked in the app's scaled space, where the anchor lives."""
+        self._last_overlay = None
         try:
             MONITOR_DEFAULTTONEAREST = 2
             # PRIVATE typed instance — never the shared ctypes.windll.user32,
@@ -2560,13 +2776,11 @@ class FloatingPopup:
                 pt = _POINT()
                 u32.GetCursorPos(ctypes.byref(pt))
                 hmon = u32.MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
-            info = _MONITORINFO()
-            info.cbSize = ctypes.sizeof(_MONITORINFO)
-            if hmon and u32.GetMonitorInfoW(hmon, ctypes.byref(info)):
-                r = info.rcWork
-                if r.right > r.left and r.bottom > r.top:
-                    self._last_monitor_bottom = int(info.rcMonitor.bottom)
-                    return r.left, r.top, r.right, r.bottom
+            mon = _overlay_monitor_from_handle(hmon)
+            if mon is not None:
+                self._last_overlay = mon
+                self._last_monitor_bottom = mon.real[3]
+                return mon.work
         except Exception:
             pass
         self._last_monitor_bottom = None
@@ -2611,33 +2825,36 @@ class FloatingPopup:
             pass
         return 1.0, 1.0
 
-    def _reposition(self, cx: int = 0, cy: int = 0, near_cursor: bool = False) -> None:
-        self.root.update_idletasks()
-        w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
-
-        # Pick the monitor (multi-monitor aware — follows whichever screen the
-        # cursor is on) and convert its Win32 work-area to tkinter logical
-        # pixels. Keep the raw *physical* bounds too: the second-order guard
-        # below re-checks the real landing spot against them.
+    def _is_real_pixel_window(self) -> bool:
+        """True when the popup is the per-monitor DPI window initialize()
+        creates: placed and sized in real pixels, never rescaled by Windows.
+        False on Windows builds without per-thread DPI contexts (and for test
+        doubles), where _reposition falls back to measuring where it landed."""
         try:
-            left_p, top_p, right_p, bottom_p = self._get_monitor_workarea(cx, cy)
-            sx, sy = self._dpi_scale()
-            left   = round(left_p   * sx)
-            top    = round(top_p    * sy)
-            right  = round(right_p  * sx)
-            bottom = round(bottom_p * sy)
+            top = (ctypes.windll.user32.GetAncestor(self._popup_hwnd, 2)
+                   or self._popup_hwnd)
+            if not top:
+                return False
+            u32 = _monitor_user32()
+            ctx = u32.GetWindowDpiAwarenessContext(top)
+            return bool(ctx) and u32.GetAwarenessFromDpiAwarenessContext(ctx) == 2
         except Exception:
-            left_p, top_p = 0, 0
-            right_p  = self.root.winfo_screenwidth()
-            bottom_p = self.root.winfo_screenheight()
-            left, top, sx, sy = 0, 0, 1.0, 1.0
-            right, bottom = right_p, bottom_p
+            return False
 
+    def _place_xy(self, w: int, h: int, bounds: tuple, cx: int, cy: int,
+                  near_cursor: bool, sx: float, sy: float) -> tuple:
+        """Top-left for a w x h popup inside `bounds` (left, top, right,
+        bottom of the work area) by the placement settings."""
+        left, top, right, bottom = bounds
+        mon = getattr(self, "_last_overlay", None)
         if near_cursor and cx > 0 and cy > 0:
             gap = 28
-            x   = round(cx * sx) - w // 2
-            y_b = round(cy * sy) + gap
-            y   = y_b if y_b + h <= bottom else round(cy * sy) - h - gap
+            # The anchor is in the app's scaled space; the window goes in
+            # real pixels.
+            rcx, rcy = mon.real_point(cx, cy) if mon is not None else (cx, cy)
+            x   = round(rcx * sx) - w // 2
+            y_b = round(rcy * sy) + gap
+            y   = y_b if y_b + h <= bottom else round(rcy * sy) - h - gap
         else:
             # Fixed placement on whichever monitor the cursor is on. Horizontal
             # placement follows popup_align (◂ ▸ arrows); vertical follows the
@@ -2661,9 +2878,9 @@ class FloatingPopup:
             # work-area, so a large nudge can never push it off the top edge.
             y -= self._popup_offset
 
-        # First-order guard: keep the whole popup inside the work-area in Tk
-        # coordinates, so a stale width or an odd monitor origin can never push
-        # the fixed popup off an edge (the cut-off refine panel).
+        # First-order guard: keep the whole popup inside the work-area, so a
+        # stale width or an odd monitor origin can never push the fixed popup
+        # off an edge (the cut-off refine panel).
         #
         # A NEGATIVE popup_offset is the user deliberately pushing the pill down
         # into the taskbar strip with the ▾ arrow, so the bottom clamp for that
@@ -2679,45 +2896,124 @@ class FloatingPopup:
                 bottom_limit = bottom
         x = max(left, min(x, right - w))
         y = max(top, min(y, bottom_limit - h))
+        return x, y
+
+    def _reposition(self, cx: int = 0, cy: int = 0, near_cursor: bool = False) -> None:
+        real_px = self._is_real_pixel_window()
+        if real_px:
+            # Every geometry flush for this window runs in real pixels, or Tk
+            # reapplies its last position in scaled numbers.
+            with _RealPixels():
+                self.root.update_idletasks()
+        else:
+            self.root.update_idletasks()
+        w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
+
+        # Pick the monitor (multi-monitor aware — follows the anchor) and take
+        # its work area in REAL pixels, the space this borderless window lives
+        # in (see OverlayMonitor). Keep the raw bounds too: the second-order
+        # guard below re-checks the real landing spot against them.
+        try:
+            left_p, top_p, right_p, bottom_p = self._get_monitor_workarea(cx, cy)
+            sx, sy = self._dpi_scale()
+            left   = round(left_p   * sx)
+            top    = round(top_p    * sy)
+            right  = round(right_p  * sx)
+            bottom = round(bottom_p * sy)
+        except Exception:
+            left_p, top_p = 0, 0
+            right_p  = self.root.winfo_screenwidth()
+            bottom_p = self.root.winfo_screenheight()
+            left, top, sx, sy = 0, 0, 1.0, 1.0
+            right, bottom = right_p, bottom_p
+
+        mon = getattr(self, "_last_overlay", None)
+        x, y = self._place_xy(w, h, (left, top, right, bottom), cx, cy,
+                              near_cursor, sx, sy)
 
         pos_log(f"place mode={self._mode} in=({cx},{cy}) "
                 f"hwnd={self._target_hwnd:#x} "
-                f"wa=({left_p},{top_p},{right_p},{bottom_p}) xy=({x},{y})")
+                f"wa=({left_p},{top_p},{right_p},{bottom_p}) xy=({x},{y}) "
+                f"wh=({w},{h}) real_px={real_px} "
+                f"mon={(mon.scaled, mon.real) if mon is not None else None}")
 
         # Size counts as a move: the caption bar grows downward while the pill is
         # bottom-anchored, so a taller pill at the same y is still a blit.
         moved = f"{w}x{h}+{x}+{y}" != self._last_geometry
         self._last_geometry = f"{w}x{h}+{x}+{y}"
-        self.root.geometry(f"+{x}+{y}")
-        # Flush the position to the window BEFORE the caller deiconifies it, so it
-        # never maps at the old/0,0 spot for a frame (top-left black-box flash).
-        self.root.update_idletasks()
+        self._repos_args = (cx, cy, near_cursor)
+        if real_px:
+            # Size pinned along with the position. Left to itself Tk resizes
+            # the window from its idle loop whenever the content changes, and
+            # that resize reapplies the position in scaled numbers: on a 150%
+            # monitor the pill jumped half a screen away. _watch_pinned_size
+            # re-places it instead when the content changes size.
+            with _RealPixels():
+                self.root.geometry(f"{w}x{h}+{x}+{y}")
+                # Flush BEFORE the caller deiconifies it, so it never maps at
+                # the old/0,0 spot for a frame (top-left black-box flash).
+                self.root.update_idletasks()
+            self._pinned_size = (w, h)
+            self._pinned_root = self.root
+            self._start_size_watch()
+        else:
+            self.root.geometry(f"+{x}+{y}")
+            # Flush the position to the window BEFORE the caller deiconifies it, so it
+            # never maps at the old/0,0 spot for a frame (top-left black-box flash).
+            self.root.update_idletasks()
 
-        # Second-order guard: on a mixed-DPI multi-monitor rig tkinter's logical
-        # geometry can render the window off the monitor we targeted — so a popup
-        # that is fully on-screen in Tk maths still lands cut off physically
-        # (the user's "wrong place / cut off" bug, which the logical numbers
-        # alone never showed). Measure where it PHYSICALLY landed and, if it
-        # spills past the target monitor's physical work-area, nudge it back by
-        # the measured overflow. Empirical, so it corrects any coordinate-space
+        # Second-order guard: measure where the window REALLY landed and, if it
+        # spills past the target monitor's work area, nudge it back by the
+        # measured overflow. Empirical, so it corrects any coordinate-space
         # mismatch without having to model the DPI topology.
+        #
+        # It also covers a window Windows DPI-scales after all (the fallback
+        # when initialize() could not make it a per-monitor DPI window): Tk's
+        # numbers are then scaled ones and its size is scaled too, so the
+        # target is recomputed from the measured size and converted back.
         try:
             GA_ROOT = 2
             u32 = ctypes.windll.user32
             top_hwnd = u32.GetAncestor(self._popup_hwnd, GA_ROOT) or self._popup_hwnd
-            pr = _RECT()
-            if u32.GetWindowRect(top_hwnd, ctypes.byref(pr)):
-                pw, ph = pr.right - pr.left, pr.bottom - pr.top
-                nx = max(left_p, min(pr.left, right_p - pw))
-                ny = max(top_p, min(pr.top, bottom_p - ph))
-                ddx, ddy = nx - pr.left, ny - pr.top
-                if ddx or ddy:
-                    self.root.geometry(
-                        f"+{x + round(ddx * sx)}+{y + round(ddy * sy)}")
+            pr = real_window_rect(top_hwnd)
+            scaled_tk = False
+            if (not real_px and pr is not None and mon is not None
+                    and (pr[0], pr[1]) != (x, y)):
+                ex, ey = mon.real_point(x, y)
+                if abs(pr[0] - ex) <= 2 and abs(pr[1] - ey) <= 2:
+                    scaled_tk = True
+                    rx, ry = self._place_xy(pr[2] - pr[0], pr[3] - pr[1],
+                                            (left_p, top_p, right_p, bottom_p),
+                                            cx, cy, near_cursor, 1.0, 1.0)
+                    tx, ty = mon.scaled_point(rx, ry)
+                    self.root.geometry(f"+{tx}+{ty}")
                     self.root.update_idletasks()
+                    pos_log(f"place scaled-window mode={self._mode} "
+                            f"asked=({x},{y}) landed=({pr[0]},{pr[1]}) "
+                            f"re-placed=({tx},{ty})")
+                    moved = True
+                    self._last_geometry = ""
+                    pr = real_window_rect(top_hwnd)
+            if pr is not None:
+                pw, ph = pr[2] - pr[0], pr[3] - pr[1]
+                nx = max(left_p, min(pr[0], right_p - pw))
+                ny = max(top_p, min(pr[1], bottom_p - ph))
+                ddx, ddy = nx - pr[0], ny - pr[1]
+                if ddx or ddy:
+                    if real_px:
+                        with _RealPixels():
+                            self.root.geometry(f"{w}x{h}+{x + ddx}+{y + ddy}")
+                            self.root.update_idletasks()
+                    else:
+                        if scaled_tk:
+                            gx, gy = mon.scaled_point(nx, ny)
+                        else:
+                            gx, gy = x + round(ddx * sx), y + round(ddy * sy)
+                        self.root.geometry(f"+{gx}+{gy}")
+                        self.root.update_idletasks()
                     self._log_pos_anomaly(near_cursor, w, h, x, y,
                                           (left_p, top_p, right_p, bottom_p),
-                                          (pr.left, pr.top), (ddx, ddy))
+                                          (pr[0], pr[1]), (ddx, ddy))
                     moved = True
                     self._last_geometry = ""
         except Exception:
@@ -2739,6 +3035,33 @@ class FloatingPopup:
                     self.root.after(0, self._repaint_popup)
                 except tk.TclError:
                     pass
+
+    def _start_size_watch(self) -> None:
+        if getattr(self, "_size_watch_on", False):
+            return
+        self._size_watch_on = True
+        try:
+            self.root.after(_SIZE_WATCH_MS, self._watch_pinned_size)
+        except tk.TclError:
+            self._size_watch_on = False
+
+    def _watch_pinned_size(self) -> None:
+        """The popup's size is pinned (see _reposition), so content that grows
+        or shrinks without a reposition (a status label changing, a result
+        arriving) would be clipped or padded. Re-place it when the content's
+        size drifts from the pinned size. Runs while the popup is up."""
+        try:
+            if (not self.root or not self._mode
+                    or getattr(self, "_pinned_root", None) is not self.root):
+                self._size_watch_on = False
+                return
+            want = (self.root.winfo_reqwidth(), self.root.winfo_reqheight())
+            if want != getattr(self, "_pinned_size", want):
+                cx, cy, near = getattr(self, "_repos_args", (0, 0, False))
+                self._reposition(cx, cy, near_cursor=near)
+            self.root.after(_SIZE_WATCH_MS, self._watch_pinned_size)
+        except tk.TclError:
+            self._size_watch_on = False
 
     def _log_pos_anomaly(self, near_cursor, w, h, x, y, wa_phys, landed, delta):
         """Record only the anomalous placements — the ones the physical guard had

@@ -66,7 +66,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.8.2"
 
 
 class _RECT(ctypes.Structure):
@@ -3226,6 +3226,9 @@ class WhisperFlowApp:
         """Every window handle the popup owns (tkinter's child AND the real
         top-level wrapper), so a foreground check can't miss it."""
         try:
+            owned = getattr(self.popup, "owned_hwnds", None)
+            if owned is not None:
+                return owned()
             return (int(self.popup._popup_hwnd or 0),
                     int(self.popup._top_hwnd() or 0))
         except Exception:

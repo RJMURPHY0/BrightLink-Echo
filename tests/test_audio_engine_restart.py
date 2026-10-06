@@ -84,5 +84,45 @@ class ServiceQueryTests(unittest.TestCase):
             self.assertTrue(audio_engine.service_running())
 
 
+class ElevatedScriptTests(unittest.TestCase):
+    """Runs the real elevated script with the service cmdlets stubbed out
+    (PowerShell functions shadow cmdlets), so nothing touches Windows Audio."""
+
+    def _run(self, status_after_stop):
+        import shutil
+        import subprocess
+        if not shutil.which("powershell"):
+            raise unittest.SkipTest("PowerShell unavailable")
+        stubs = (
+            "$global:st = 'Running'\n"
+            "function Stop-Process { param([Parameter(ValueFromRemainingArguments)]$a) "
+            "$global:st = '" + status_after_stop + "' }\n"
+            "function Stop-Service { param([Parameter(ValueFromRemainingArguments)]$a) "
+            "$global:st = '" + status_after_stop + "' }\n"
+            "function Get-CimInstance { param([Parameter(ValueFromRemainingArguments)]$a) "
+            "[pscustomobject]@{ ProcessId = 1234 } }\n"
+            "function Get-Service { param([Parameter(ValueFromRemainingArguments)]$a) "
+            "[pscustomobject]@{ Status = $global:st } }\n"
+            "function Start-Service { param([Parameter(ValueFromRemainingArguments)]$a) "
+            "$global:st = 'Running' }\n"
+            "function Start-Sleep { param([Parameter(ValueFromRemainingArguments)]$a) }\n"
+        )
+        cmd = audio_engine._encoded(stubs + audio_engine._ELEVATED_SCRIPT)
+        return subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+             cmd], capture_output=True, timeout=60,
+            creationflags=audio_engine._NO_WINDOW).returncode
+
+    def test_a_real_restart_reports_success(self):
+        self.assertEqual(audio_engine.RESTARTED, self._run("Stopped"))
+
+    def test_a_service_that_never_stopped_is_not_reported_as_restarted(self):
+        # Codex review 2026-10-06: stop errors are silenced, the service stays
+        # 'Running', and the final check used to read that as a restart.
+        code = self._run("Running")
+        self.assertNotEqual(audio_engine.RESTARTED, code)
+        self.assertNotEqual(audio_engine.CANCELLED, code)
+
+
 if __name__ == "__main__":
     unittest.main()
