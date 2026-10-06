@@ -295,7 +295,7 @@ class RepaintOnMoveTests(unittest.TestCase):
         # RDW_UPDATENOW only validates Tk's update region — Tk turns WM_PAINT
         # into a queued Expose and paints later, so the after(0) twin is the one
         # that drains it.
-        src = inspect.getsource(FloatingPopup._reposition)
+        src = inspect.getsource(FloatingPopup._reposition_now)
         self.assertIn("_repaint_popup()", src)
         self.assertIn("after(0, self._repaint_popup)", src)
         self.assertIn("winfo_ismapped", src,

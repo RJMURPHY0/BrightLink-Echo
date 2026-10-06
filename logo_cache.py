@@ -85,12 +85,63 @@ def lockup_image(height: int = 46, echo_scale: float = 1.1):
     return img
 
 
-def badge_image(height: int = 28):
-    """The chain and Echo, for the small badge that pops up after dictation."""
+# The badge's "Echo" fades from white into the brand orange, left to right
+# (Ryan, 2026-10-06): it picks up the chain's white link and ends on its
+# orange one.
+ECHO_FADE_FROM = (255, 255, 255)
+ECHO_FADE_TO = (243, 146, 0)          # brand orange #f39200
+
+
+def _faded_badge(src):
+    """The badge with its "Echo" recoloured as a white-to-orange fade. The
+    word starts after the first fully clear column that follows the chain;
+    its own alpha (the letter shapes and their soft edges) is kept."""
+    from PIL import Image
+    alpha = src.getchannel("A")
+    w, h = src.size
+    seen_ink, split = False, None
+    for x in range(w):
+        ink = alpha.crop((x, 0, x + 1, h)).getbbox() is not None
+        if ink:
+            seen_ink = True
+        elif seen_ink:
+            split = x
+            break
+    if split is None:
+        return src
+    word = src.crop((split, 0, w, h))
+    box = word.getchannel("A").getbbox()
+    if box is None:
+        return src
+    x0, x1 = box[0], box[2]
+    ramp = Image.linear_gradient("L").rotate(90, expand=True)  # black left
+    # Full orange from about two-thirds along, so the "o" reads as brand
+    # orange at badge size rather than a pale peach.
+    mask = ramp.resize((max(1, x1 - x0), h)).point(
+        lambda v: min(255, round(v * 1.5)))
+    full = Image.new("L", word.size, 0)
+    full.paste(mask, (x0, 0))
+    full.paste(255, (x1, 0, word.width, h))
+    fade = Image.composite(Image.new("RGB", word.size, ECHO_FADE_TO),
+                           Image.new("RGB", word.size, ECHO_FADE_FROM), full)
+    fade.putalpha(word.getchannel("A"))
+    out = src.copy()
+    out.paste(fade, (split, 0))
+    return out
+
+
+def badge_image(height: int = 28, fade: bool = True):
+    """The chain and Echo, for the small badge that pops up after dictation.
+    `fade` gives "Echo" its white-to-orange fade."""
     from PIL import Image
     src = _asset(BADGE)
     if src is None:
         return None
+    if fade:
+        try:
+            src = _faded_badge(src)
+        except Exception as e:
+            print(f"[logo_cache] Echo fade skipped: {e}")
     return src.resize((max(1, round(src.width * height / src.height)), height),
                       Image.LANCZOS)
 

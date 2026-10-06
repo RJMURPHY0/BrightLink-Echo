@@ -118,7 +118,7 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(aw.count("get_lockup_photo(self._root, C[\"bg\"], height=42)"), 2)
         self.assertIn("get_lockup_photo(self._root, C[\"bg\"], height=42)",
                       _src("login_window.py"))
-        self.assertIn("get_badge_photo(self.root, CP[\"bg\"], height=28)",
+        self.assertIn("get_badge_photo(self.root, CP[\"bg\"], height=25)",
                       _src("popup.py"))
 
     def test_the_gear_does_not_push_the_lockup_off_centre(self):

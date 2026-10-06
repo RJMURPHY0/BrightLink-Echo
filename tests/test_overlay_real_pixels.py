@@ -188,7 +188,7 @@ class LivePopupPlacementTests(_LiveBase):
                 got = self._show_at(master, p, cx, cy)
                 self.assertTrue(p._is_real_pixel_window(),
                                 "the pill is not a per-monitor DPI window")
-                size = (p.root.winfo_reqwidth(), p.root.winfo_reqheight())
+                size = p._content_size()
                 self._assert_bottom_centre(got, popup_mod.overlay_monitor(cx, cy),
                                            size)
                 p._do_hide()
@@ -221,11 +221,10 @@ class LivePopupPlacementTests(_LiveBase):
         with mock.patch.object(popup_mod, "pos_log"):
             while _t.time() < deadline:
                 master.update()
-                if p._pinned_size == (p.root.winfo_reqwidth(),
-                                      p.root.winfo_reqheight()):
+                if p._pinned_size == p._content_size():
                     break
         hwnd = ctypes.WinDLL("user32").GetAncestor(W.HWND(p._popup_hwnd), 2)
-        size = (p.root.winfo_reqwidth(), p.root.winfo_reqheight())
+        size = p._content_size()
         self._assert_bottom_centre(popup_mod.real_window_rect(hwnd),
                                    popup_mod.overlay_monitor(cx, cy), size)
         p._do_hide()
@@ -258,6 +257,85 @@ class LiveBadgePlacementTests(_LiveBase):
                     W.HWND(p._popup_hwnd), 2)
                 self._assert_bottom_centre(popup_mod.real_window_rect(hwnd),
                                            popup_mod.overlay_monitor(cx, cy))
+                p._do_hide()
+                master.update()
+
+    def test_with_the_dashboard_shown(self):
+        master = self._master()
+        master.deiconify()
+        master.geometry("200x100+100+100")
+        master.update()
+        self._run(master)
+
+    def test_with_the_dashboard_hidden(self):
+        master = self._master()
+        master.withdraw()
+        master.update()
+        self._run(master)
+
+
+def _pill_pieces_off(p):
+    """Every mapped piece of the pill whose real rect differs from where Tk
+    laid it out (the black patches when Windows rescales a piece)."""
+    u32 = ctypes.WinDLL("user32")
+    u32.GetParent.restype = ctypes.c_void_p
+    u32.GetParent.argtypes = [ctypes.c_void_p]
+    u32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(W.RECT)]
+    u32.MapWindowPoints.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                    ctypes.POINTER(W.RECT), ctypes.c_uint]
+    off = []
+    with popup_mod._RealPixels():
+        stack = [p._status_frame]
+        while stack:
+            w = stack.pop()
+            if not w.winfo_ismapped():
+                continue
+            stack.extend(w.winfo_children())
+            r = W.RECT()
+            hwnd = w.winfo_id()
+            u32.GetWindowRect(hwnd, ctypes.byref(r))
+            u32.MapWindowPoints(None, u32.GetParent(hwnd), ctypes.byref(r), 2)
+            got = (r.left, r.top, r.right - r.left, r.bottom - r.top)
+            want = (w.winfo_x(), w.winfo_y(), w.winfo_width(), w.winfo_height())
+            if got != want:
+                off.append((w.winfo_class(), got, want))
+    return off
+
+
+class LivePillLayoutTests(_LiveBase):
+    """The pill's pieces stay where Tk drew them through a real dictation
+    (Starting, Recording, Transcribing, twice). On the 150% laptop the label
+    flip and the Transcribing layout made Windows rescale pieces 1.5x, which
+    showed as black patches (2026-10-06). The heal safety net is switched off
+    so it cannot hide a slip."""
+
+    def _pump(self, master, secs):
+        import time as _t
+        end = _t.time() + secs
+        while _t.time() < end:
+            master.update()
+            _t.sleep(0.01)
+
+    def _run(self, master):
+        p = FloatingPopup()
+        p.initialize(master)
+        for win, _h in p._windows.values():
+            self.addCleanup(win.destroy)
+        for (l, t, r, b) in _scaled_monitors():
+            cx, cy = (l + r) // 2, (t + b) // 2
+            with self.subTest(monitor=(l, t, r, b)),                     mock.patch.object(popup_mod, "pos_log"),                     mock.patch.object(FloatingPopup, "_heal_pill_layout",
+                                      lambda self: 0):
+                for _ in range(2):
+                    p.show_status("Starting…", recording=True,
+                                  cursor_x=cx, cursor_y=cy)
+                    self._pump(master, 0.2)
+                    p.set_status_text("Recording")
+                    self._pump(master, 0.3)
+                    self.assertEqual([], _pill_pieces_off(p), "recording")
+                    p.show_status("Transcribing…", recording=False,
+                                  cursor_x=cx, cursor_y=cy)
+                    self._pump(master, 0.3)
+                    self.assertEqual([], _pill_pieces_off(p), "transcribing")
                 p._do_hide()
                 master.update()
 

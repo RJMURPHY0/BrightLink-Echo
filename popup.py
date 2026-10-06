@@ -7,6 +7,7 @@ Three modes:
   refinement — full AI refinement panel
 """
 
+import contextlib
 import ctypes
 import ctypes.wintypes
 import math
@@ -85,8 +86,21 @@ def _monitor_user32():
         u32.GetMonitorInfoW.restype = ctypes.c_int
         u32.GetMonitorInfoW.argtypes = [ctypes.c_void_p,
                                         ctypes.POINTER(_MONITORINFO)]
+        try:
+            u32.GetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+            u32.GetThreadDpiAwarenessContext.argtypes = []
+        except AttributeError:
+            pass
         u32.GetWindowRect.restype = ctypes.c_int
         u32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(_RECT)]
+        u32.GetParent.restype = ctypes.c_void_p
+        u32.GetParent.argtypes = [ctypes.c_void_p]
+        u32.MapWindowPoints.restype = ctypes.c_int
+        u32.MapWindowPoints.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                        ctypes.POINTER(_RECT), ctypes.c_uint]
+        u32.MoveWindow.restype = ctypes.c_int
+        u32.MoveWindow.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, ctypes.c_int]
         try:  # Windows 10 1607+; absent means real pixels are unreadable
             u32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
             u32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
@@ -128,6 +142,33 @@ class _RealPixels:
             self._prev = fn(ctypes.c_void_p(_DPI_CTX_PER_MONITOR_V2))
         except Exception:
             self._prev = None
+        return self
+
+    def __exit__(self, *_exc):
+        if self._prev:
+            try:
+                _monitor_user32().SetThreadDpiAwarenessContext(
+                    ctypes.c_void_p(self._prev))
+            except Exception:
+                pass
+        return False
+
+
+class _ThreadDpi:
+    """Context manager: put this thread back in a saved DPI context (the
+    app's own, from _pill_edit) for the length of the block."""
+
+    def __init__(self, ctx):
+        self._ctx = ctx
+
+    def __enter__(self):
+        self._prev = None
+        if self._ctx:
+            try:
+                self._prev = _monitor_user32().SetThreadDpiAwarenessContext(
+                    ctypes.c_void_p(self._ctx))
+            except Exception:
+                self._prev = None
         return self
 
     def __exit__(self, *_exc):
@@ -812,14 +853,15 @@ class FloatingPopup:
         specs = getattr(self, "_arrow_place_specs", None)
         if not specs:
             return          # arrows not built yet (pre-initialize)
-        for canvas, spec in specs:
-            try:
-                if self._arrows_visible:
-                    canvas.place(**spec)
-                else:
-                    canvas.place_forget()
-            except tk.TclError:
-                pass
+        with self._pill_edit():
+            for canvas, spec in specs:
+                try:
+                    if self._arrows_visible:
+                        canvas.place(**spec)
+                    else:
+                        canvas.place_forget()
+                except tk.TclError:
+                    pass
 
     def set_capture_hidden(self, value) -> None:
         """Exclude (or re-include) the popup in screenshots and screen
@@ -932,7 +974,8 @@ class FloatingPopup:
                 return
             try:
                 if self._status_label.cget("text"):
-                    self._status_label.configure(text=text)
+                    with self._pill_edit():
+                        self._status_label.configure(text=text)
             except tk.TclError:
                 pass
 
@@ -1103,6 +1146,100 @@ class FloatingPopup:
         self.root, self._popup_hwnd = win, hwnd
         self._popup_top_hwnd = 0
         self._last_geometry = ""
+
+    def _content_size(self) -> tuple:
+        """The size the popup's content asks for. The pill's frame is placed
+        (see _enter_status_mode), which does not pass its size up to the
+        window, so the pill reads it off the frame."""
+        if self._is_pill_root():
+            f = self._status_frame
+            return f.winfo_reqwidth(), f.winfo_reqheight()
+        return self.root.winfo_reqwidth(), self.root.winfo_reqheight()
+
+    def _is_pill_root(self) -> bool:
+        wins = getattr(self, "_windows", None)
+        return bool(wins) and self.root is wins["pill"][0]
+
+    @contextlib.contextmanager
+    def _pill_edit(self):
+        """Wrap every change to the pill's contents.
+
+        The pill is a per-monitor DPI window but the app's thread is not, and
+        Windows rescales every move or resize Tk makes on the pill's inner
+        pieces from the app's context: on the 150% laptop each piece came out
+        1.5x the size Tk painted, and the unpainted part showed black (the
+        glitchy pill, measured 2026-10-06). Tk lays pieces out from its idle
+        queue, so the change and the flush must both happen in real pixels:
+        everything else pending is flushed first in the app's own context (so
+        the dashboard and the badge window are never laid out in real
+        pixels), then the pill is edited and laid out inside _RealPixels."""
+        if not self._is_pill_root() or getattr(self, "_pill_depth", 0):
+            yield
+            return
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            pass
+        try:
+            self._pill_app_ctx = (
+                _monitor_user32().GetThreadDpiAwarenessContext())
+        except Exception:
+            self._pill_app_ctx = None
+        self._pill_depth = 1
+        try:
+            with _RealPixels():
+                yield
+                try:
+                    self.root.update_idletasks()
+                except tk.TclError:
+                    pass
+        finally:
+            self._pill_depth = 0
+
+    def _heal_pill_layout(self) -> int:
+        """Safety net for _pill_edit: put back any pill piece Windows has
+        rescaled (a change that slipped past _pill_edit). Compares each mapped
+        piece's real rect with where Tk laid it out and moves it back.
+        Returns how many pieces it moved; logged, never silent."""
+        if not self._is_pill_root():
+            return 0
+        try:
+            u32 = _monitor_user32()
+        except Exception:
+            return 0
+        fixed = []
+        with _RealPixels():
+            stack = [self.root]
+            while stack:
+                w = stack.pop()
+                try:
+                    if not w.winfo_ismapped():
+                        continue
+                    kids = w.winfo_children()
+                    hwnd = int(w.winfo_id())
+                    if w is self.root:
+                        want = (0, 0, w.winfo_width(), w.winfo_height())
+                    else:
+                        want = (w.winfo_x(), w.winfo_y(),
+                                w.winfo_width(), w.winfo_height())
+                except tk.TclError:
+                    continue
+                stack.extend(kids)
+                r = _RECT()
+                if not u32.GetWindowRect(hwnd, ctypes.byref(r)):
+                    continue
+                parent = u32.GetParent(hwnd)
+                if not parent:
+                    continue
+                u32.MapWindowPoints(None, parent, ctypes.byref(r), 2)
+                got = (r.left, r.top, r.right - r.left, r.bottom - r.top)
+                if got != want and want[2] > 1 and want[3] > 1:
+                    u32.MoveWindow(hwnd, *want, 1)
+                    fixed.append(f"{w.winfo_class()}{got}->{want}")
+        if fixed:
+            pos_log(f"pill heal moved {len(fixed)}: " + " ".join(fixed[:6]))
+            self._repaint_popup()
+        return len(fixed)
 
     def owned_hwnds(self) -> tuple:
         """Every window handle the popup owns (both windows, tkinter's child
@@ -1615,12 +1752,13 @@ class FloatingPopup:
     # ── Icon frame ─────────────────────────────────────────────────────────────
 
     def _build_icon_frame(self) -> None:
-        self._icon_frame = tk.Frame(self.root, bg=CP["bg"], padx=8, pady=6)
+        # About 10% smaller than v1.8.2's (Ryan, 2026-10-06).
+        self._icon_frame = tk.Frame(self.root, bg=CP["bg"], padx=7, pady=5)
 
         from logo_cache import get_badge_photo
 
         # The chain and Echo: the product's own mark on the thing that pops up.
-        self._icon_photo = get_badge_photo(self.root, CP["bg"], height=28)
+        self._icon_photo = get_badge_photo(self.root, CP["bg"], height=25)
 
         if self._icon_photo:
             lbl = tk.Label(
@@ -1893,7 +2031,9 @@ class FloatingPopup:
     # ── Mode transitions ───────────────────────────────────────────────────────
 
     def _hide_all_frames(self) -> None:
-        for frame in (self._status_frame, self._icon_frame, self._refine_frame):
+        # The pill's frame is placed, not packed (see _content_size).
+        self._status_frame.place_forget()
+        for frame in (self._icon_frame, self._refine_frame):
             frame.pack_forget()
 
     def _enter_status_mode(self, text: str, recording: bool = False) -> None:
@@ -1905,58 +2045,64 @@ class FloatingPopup:
         self._stop_waveform()
         self._hide_all_frames()
 
-        # Always remove timer/canvas/caption from pack order first so we control placement
-        self._timer_lbl.pack_forget()
-        self._wave_canvas.pack_forget()
-        self._caption_wrap.pack_forget()
+        with self._pill_edit():
+            # Always remove timer/canvas/caption from pack order first so we control placement
+            self._timer_lbl.pack_forget()
+            self._wave_canvas.pack_forget()
+            self._caption_wrap.pack_forget()
 
-        if recording and self._captions_enabled:
-            # Live-caption mode: waveform centred at the top (timer at the far
-            # left), caption paragraph beneath — text starts at the left edge
-            # and reads naturally rightward, wrapping down to CAPTION_MAX_LINES
-            # before scrolling.
-            self._draw_bars_initial()  # fresh bars every session
-            self._timer_var.set("00:00.0")
-            self._rec_start = time.time()
-            self._timer_lbl.pack(side="left", before=self._status_label, padx=(0, 12))
-            # expand=True centres the waveform in the remaining row width so it
-            # sits top-middle above the caption text.
-            self._wave_canvas.pack(side="left", before=self._status_label,
-                                   expand=True)
-            self._status_label.configure(text="")
-            self._reset_caption_widget("Listening…")
-            self._caption_wrap.pack(side="top", anchor="w", pady=(10, 0))
-            # The waveform loop drives the timer and keeps _last_activity fresh.
-            self._start_waveform()
-        elif recording:
-            # Correct order: timer | waveform | label
-            self._draw_bars_initial()  # fresh bars every session
-            self._timer_var.set("00:00.0")
-            self._rec_start = time.time()
-            self._timer_lbl.pack(side="left", before=self._status_label, padx=(0, 12))
-            self._wave_canvas.pack(side="left", before=self._status_label, padx=(0, 12))
-            self._status_label.configure(text=text)
-            self._start_waveform()
-        else:
-            # Transcribing — just the label, no timer or waveform
-            self._rec_start = None
-            self._status_label.configure(text=text)
+            if recording and self._captions_enabled:
+                # Live-caption mode: waveform centred at the top (timer at the far
+                # left), caption paragraph beneath — text starts at the left edge
+                # and reads naturally rightward, wrapping down to CAPTION_MAX_LINES
+                # before scrolling.
+                self._draw_bars_initial()  # fresh bars every session
+                self._timer_var.set("00:00.0")
+                self._rec_start = time.time()
+                self._timer_lbl.pack(side="left", before=self._status_label, padx=(0, 12))
+                # expand=True centres the waveform in the remaining row width so it
+                # sits top-middle above the caption text.
+                self._wave_canvas.pack(side="left", before=self._status_label,
+                                       expand=True)
+                self._status_label.configure(text="")
+                self._reset_caption_widget("Listening…")
+                self._caption_wrap.pack(side="top", anchor="w", pady=(10, 0))
+                # The waveform loop drives the timer and keeps _last_activity fresh.
+                self._start_waveform()
+            elif recording:
+                # Correct order: timer | waveform | label
+                self._draw_bars_initial()  # fresh bars every session
+                self._timer_var.set("00:00.0")
+                self._rec_start = time.time()
+                self._timer_lbl.pack(side="left", before=self._status_label, padx=(0, 12))
+                self._wave_canvas.pack(side="left", before=self._status_label, padx=(0, 12))
+                self._status_label.configure(text=text)
+                self._start_waveform()
+            else:
+                # Transcribing — just the label, no timer or waveform
+                self._rec_start = None
+                self._status_label.configure(text=text)
 
-        self._status_frame.pack()
-        # Key-dismiss belongs to the post-insert badge ALONE. Starting a new
-        # dictation while the previous badge is still up left its hook live,
-        # so a space typed mid-recording hid the pill (and the badge's own
-        # auto-dismiss timer bails on a mode change, so nothing ever took it
-        # down). Every entry into status mode clears it. Now that ANY key
-        # dismisses, an orphaned hook would kill the recording pill on the
-        # first character the user typed — so this matters more, not less.
-        self._unregister_key_dismiss()
-        self._stop_foreground_watch()
-        self._mode = "status"
-        self.root.update_idletasks()  # force canvas render before animation
-        # Always position on the monitor where the cursor is
-        self._reposition(self._status_cx, self._status_cy)
-        self._show_no_activate()
+            # Placed at the corner, never packed: a packed frame is re-laid
+            # out by Tk when Windows reports the pill's new size, and that
+            # report is handled from the event loop outside real pixels, so
+            # Windows rescaled the frame (the black patches). A placed frame
+            # already sits where the report would put it, so nothing moves.
+            self._status_frame.place(x=0, y=0)
+            # Key-dismiss belongs to the post-insert badge ALONE. Starting a new
+            # dictation while the previous badge is still up left its hook live,
+            # so a space typed mid-recording hid the pill (and the badge's own
+            # auto-dismiss timer bails on a mode change, so nothing ever took it
+            # down). Every entry into status mode clears it. Now that ANY key
+            # dismisses, an orphaned hook would kill the recording pill on the
+            # first character the user typed — so this matters more, not less.
+            self._unregister_key_dismiss()
+            self._stop_foreground_watch()
+            self._mode = "status"
+            self.root.update_idletasks()  # force canvas render before animation
+            # Always position on the monitor where the cursor is
+            self._reposition(self._status_cx, self._status_cy)
+            self._show_no_activate()
 
     def _reset_caption_widget(self, text: str = "") -> None:
         """Reset the caption bar to a single-line-tall paragraph block (start of a
@@ -1978,6 +2124,10 @@ class FloatingPopup:
         Runs on the UI thread via root.after()."""
         if self._mode != "status" or not self._captions_enabled:
             return
+        with self._pill_edit():
+            self._update_caption_now(text)
+
+    def _update_caption_now(self, text: str) -> None:
         try:
             self._caption_text.configure(state="normal")
             self._caption_text.delete("1.0", "end")
@@ -2899,6 +3049,17 @@ class FloatingPopup:
         return x, y
 
     def _reposition(self, cx: int = 0, cy: int = 0, near_cursor: bool = False) -> None:
+        # The pill's layout runs in real pixels (see _pill_edit; a no-op for
+        # the badge and refine panel window), but the placement maths reads
+        # monitors and the cursor in the app's own context, so that part is
+        # put back in it.
+        with self._pill_edit():
+            app_ctx = (getattr(self, "_pill_app_ctx", None)
+                       if getattr(self, "_pill_depth", 0) else None)
+            with _ThreadDpi(app_ctx):
+                self._reposition_now(cx, cy, near_cursor)
+
+    def _reposition_now(self, cx: int, cy: int, near_cursor: bool) -> None:
         real_px = self._is_real_pixel_window()
         if real_px:
             # Every geometry flush for this window runs in real pixels, or Tk
@@ -2907,7 +3068,7 @@ class FloatingPopup:
                 self.root.update_idletasks()
         else:
             self.root.update_idletasks()
-        w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
+        w, h = self._content_size()
 
         # Pick the monitor (multi-monitor aware — follows the anchor) and take
         # its work area in REAL pixels, the space this borderless window lives
@@ -3055,10 +3216,11 @@ class FloatingPopup:
                     or getattr(self, "_pinned_root", None) is not self.root):
                 self._size_watch_on = False
                 return
-            want = (self.root.winfo_reqwidth(), self.root.winfo_reqheight())
+            want = self._content_size()
             if want != getattr(self, "_pinned_size", want):
                 cx, cy, near = getattr(self, "_repos_args", (0, 0, False))
                 self._reposition(cx, cy, near_cursor=near)
+            self._heal_pill_layout()
             self.root.after(_SIZE_WATCH_MS, self._watch_pinned_size)
         except tk.TclError:
             self._size_watch_on = False
