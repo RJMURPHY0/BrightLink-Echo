@@ -522,6 +522,21 @@ class ActivationContractTests(unittest.TestCase):
         with open(SCRIPT, "r", encoding="utf-8") as f:
             self.src = f.read()
 
+    def test_every_native_call_that_can_write_stderr_is_inside_a_try(self):
+        # ErrorActionPreference Stop + Windows PowerShell 5.1: a native
+        # command's stderr line is a terminating error even when redirected
+        # to $null. An unguarded `schtasks /query` for a task that does not
+        # exist ended activation with exit 1 (CI self-test, 2026-10-07).
+        lines = self.src.splitlines()
+        for i, line in enumerate(lines):
+            s = line.strip()
+            if not ("& " in s and ".exe" in s and "2>" in s):
+                continue
+            window = "\n".join(lines[max(0, i - 3):i + 1])
+            with self.subTest(line=i + 1):
+                self.assertTrue(s.startswith("try {") or "try {" in window,
+                                f"unguarded native call: {s}")
+
     def test_names_are_the_frozen_ones(self):
         self.assertIn(f"$ExeName = '{brand.CANONICAL_EXE_NAME}'", self.src)
         self.assertIn(f"$DirName = '{brand.DATA_DIR_NAME}'", self.src)

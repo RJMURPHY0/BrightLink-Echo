@@ -499,8 +499,15 @@ if ($script:PrevHomeLegacy -and -not $NoSystemChanges) {
     # legacy exe. If the machine sleeps or shuts down before then, the next
     # sign-in must still start the app and every pin must still open it.
     Retarget-Links (Join-Path $LegacyDir $LegacyExeName) $script:Canonical
-    & schtasks.exe /query /tn $LegacyTaskName 2>$null | Out-Null
-    $legacyTask = ($LASTEXITCODE -eq 0)
+    # In Windows PowerShell 5.1 with ErrorActionPreference Stop, a native
+    # command's stderr line is a terminating error even when redirected: a
+    # machine with no legacy task ("cannot find the file") ended the whole
+    # activation here with exit 1 (CI self-test, 2026-10-07).
+    $legacyTask = $false
+    try {
+        & schtasks.exe /query /tn $LegacyTaskName 2>$null | Out-Null
+        $legacyTask = ($LASTEXITCODE -eq 0)
+    } catch { $legacyTask = $false }
     $legacyRun = $null -ne (Get-ItemProperty -LiteralPath $RunKey -Name $LegacyRunValueName -ErrorAction SilentlyContinue)
     if ($legacyTask -or $legacyRun) {
         try {
