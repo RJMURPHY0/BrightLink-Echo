@@ -206,6 +206,10 @@ function Stop-Ours {
 function Move-Retry([string]$from, [string]$to, [int]$tries = $Attempts) {
     for ($i = 0; $i -lt $tries; $i++) {
         try {
+            # An undo puts items back into a legacy folder Adopt-Folder may
+            # have removed once it was empty.
+            $parent = [System.IO.Path]::GetDirectoryName($to)
+            if ($parent -and -not (Test-Path -LiteralPath $parent)) { [void][System.IO.Directory]::CreateDirectory($parent) }
             if (Test-Path -LiteralPath $from -PathType Container) { [System.IO.Directory]::Move($from, $to) }
             else { [System.IO.File]::Move($from, $to) }
             return $true
@@ -239,6 +243,13 @@ function Adopt-Folder([string]$legacy, [string]$new) {
         if (-not (Record-Move $item.FullName $dest)) { return $false }
     }
     Log "Moved the contents of $legacy into $new."
+    # The emptied legacy folder goes too, or %APPDATA%\FTC Whisper stays on
+    # every machine whose new folder existed first. A folder still holding
+    # something we kept is left alone.
+    if (@(Get-ChildItem -LiteralPath $legacy -Force -ErrorAction SilentlyContinue).Count -eq 0) {
+        try { [System.IO.Directory]::Delete($legacy); Log "Removed the empty $legacy." }
+        catch { Log "Could not remove the empty ${legacy}: $($_.Exception.Message)" }
+    }
     return $true
 }
 function Write-Marker {

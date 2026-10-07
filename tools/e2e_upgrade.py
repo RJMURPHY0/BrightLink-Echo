@@ -172,6 +172,10 @@ def model_listing() -> dict:
     out = {}
     for dirpath, _d, names in os.walk(root):
         for n in names:
+            # The checksum record the app writes the first time it verifies
+            # the model: new after an update, and not a re-download.
+            if n == ".verified.json":
+                continue
             p = os.path.join(dirpath, n)
             out[os.path.relpath(p, root)] = (os.path.getsize(p), int(os.path.getmtime(p)))
     return out
@@ -213,7 +217,9 @@ def check_migrated(rep: Report, version: str, label: str):
               os.listdir(data_paths.legacy_local_dir())
               if os.path.isdir(data_paths.legacy_local_dir()) else "")
     rep.check(f"{label}: legacy roaming folder gone",
-              not os.path.exists(data_paths.legacy_roaming_dir()))
+              wait_for(lambda: not os.path.exists(data_paths.legacy_roaming_dir()), 30),
+              os.listdir(data_paths.legacy_roaming_dir())
+              if os.path.isdir(data_paths.legacy_roaming_dir()) else "")
     rep.check(f"{label}: no logon task under the legacy name",
               not task_exists(brand.LEGACY_TASK_NAME))
 
@@ -346,7 +352,11 @@ def scenario_faults(rep: Report, work: str, assets: str, version: str):
         shutil.copy(os.path.join(assets, brand.UPDATE_ASSET), bridge)
         subprocess.Popen([bridge], cwd=dl)
         rep.check("bridge installed and running",
-                  wait_for(lambda: ping_version() == version and os.path.exists(canonical()), 240))
+                  wait_for(lambda: ping_version() == version and os.path.exists(canonical())
+                           # the copy at the canonical path writes its config
+                           # on first run; seeding before that raced it
+                           and os.path.exists(os.path.join(il.install_dir(), "config.json")),
+                           240))
         models = seed_user_data()
 
         for fault in ("bad-digest", "truncate"):
