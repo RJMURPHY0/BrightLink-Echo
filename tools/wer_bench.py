@@ -2,8 +2,8 @@
 engine versions and score the results.
 
 Data comes from what the app already keeps on this machine:
-  audio      %APPDATA%\\FTC Whisper\\audio\\<created_at digits>.wav
-  reference  %APPDATA%\\FTC Whisper\\history.json (transcribed_text per row)
+  audio      %APPDATA%\\BrightLink Echo\\audio\\<created_at digits>.wav
+  reference  %APPDATA%\\BrightLink Echo\\history.json (transcribed_text per row)
 
 The reference is the shipped engine's own accepted output, so WER against it
 is a consistency score, not ground truth. Engine-vs-engine decisions come from
@@ -55,8 +55,8 @@ def wer(ref: list[str], hyp: list[str]) -> float:
 
 
 def load_references() -> dict[str, str]:
-    path = os.path.join(os.environ.get("APPDATA", ""), "FTC Whisper",
-                        "history.json")
+    import data_paths
+    path = os.path.join(data_paths.roaming_dir(), "history.json")
     refs: dict[str, str] = {}
     try:
         with open(path, "r", encoding="utf-8") as f:

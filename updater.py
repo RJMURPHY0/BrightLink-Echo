@@ -1,5 +1,5 @@
 """
-FTC Whisper — auto-update helpers.
+BrightLink Echo — auto-update helpers.
 
 All network errors are swallowed silently; updating is best-effort and
 should never crash or block the main application.
@@ -7,6 +7,7 @@ should never crash or block the main application.
 
 import json
 import brand
+import data_paths
 import install_layout
 import os
 import subprocess
@@ -42,8 +43,11 @@ _RUN_LOCK = threading.Lock()
 _run_active = False
 _apply_now = threading.Event()
 
-_DOWNLOAD_PREFIX = "FTC-Whisper-new"
-_SETUP_PREFIX = "FTC-Whisper-Setup-new"
+_DOWNLOAD_PREFIX = brand.FILE_SLUG + "-new"
+_SETUP_PREFIX = brand.FILE_SLUG + "-setup-new"
+# What v1.8.4 and older named the same downloads: still swept when stale.
+_LEGACY_PREFIXES = (brand.UPDATE_ASSET[:-4] + "-new",
+                    brand.LEGACY_SETUP_UPDATE_ASSET[:-4] + "-new")
 _STALE_DOWNLOAD_SECS = 3600
 
 # The installer is an Inno Setup exe, not a PyInstaller one: no archive marker
@@ -57,11 +61,8 @@ _MIGRATION_ATTEMPTS = 3
 
 
 def _app_data_dir() -> str:
-    """Per-user data dir shared with app.py (%LOCALAPPDATA%\\FTC Whisper)."""
-    base = os.environ.get("LOCALAPPDATA") or os.path.join(
-        os.path.expanduser("~"), "AppData", "Local"
-    )
-    d = os.path.join(base, brand.DATA_DIR_NAME)
+    """Per-user local data dir shared with app.py (data_paths.local_dir)."""
+    d = data_paths.local_dir()
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:
@@ -231,6 +232,14 @@ def parse_release(data: dict) -> Optional[dict]:
         "setup": _asset(assets, brand.SETUP_UPDATE_ASSET),
         "rollout": _asset(assets, brand.ROLLOUT_ASSET),
     }
+
+
+def manual_download_url() -> str:
+    """What a person downloads by hand when the in-app update cannot run: the
+    latest installer, which installs into the right folder from any version.
+    Never the onefile bridge, which only an updater should ever fetch."""
+    return (f"https://github.com/{brand.GITHUB_REPO}/releases/latest/download/"
+            f"{brand.DOWNLOAD_ASSET}")
 
 
 def fetch_rollout(rollout: dict) -> Optional[dict]:
@@ -429,8 +438,10 @@ def stage_installer(setup: str, version: str, timeout: float = _STAGE_TIMEOUT_SE
     import pyi_runtime
     root = root or install_layout.install_dir()
     log = os.path.join(root, f"setup-{version.lstrip('vV')}.log")
+    # Always name the folder: an installer run with /STAGEONLY and no /DIR
+    # takes it for a v1.8.0 to v1.8.4 updater and stages in the legacy folder.
     cmd = [setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/STAGEONLY",
-           f"/LOG={log}"]
+           f"/DIR={root}", f"/LOG={log}"]
     proc = subprocess.Popen(cmd, creationflags=_launch_flags(),
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, env=pyi_runtime.clean_launch_env())
@@ -546,9 +557,9 @@ def spawn_swap_script(new_exe: str, current_exe: str, pid: int,
     cur_ps  = current_exe.replace("'", "''")
     want = (sha256 or "").lower().replace("'", "")
     launch_flag = "$true" if launch else "$false"
-    ps_file = ps_file or os.path.join(tempfile.gettempdir(), "ftc_whisper_update.ps1")
+    ps_file = ps_file or os.path.join(tempfile.gettempdir(), f"{brand.FILE_SLUG}_update.ps1")
     log_file = (log_file or os.path.join(tempfile.gettempdir(),
-                                         "ftc_whisper_update.log")).replace("'", "''")
+                                         f"{brand.FILE_SLUG}_update.log")).replace("'", "''")
     script = f"""
 $NewExe = '{new_ps}'
 $CurExe = '{cur_ps}'
@@ -735,7 +746,7 @@ def _sweep_stale_downloads(keep: str = "") -> None:
         return
     now = time.time()
     for name in names:
-        if not (name.startswith((_DOWNLOAD_PREFIX, _SETUP_PREFIX))
+        if not (name.startswith((_DOWNLOAD_PREFIX, _SETUP_PREFIX) + _LEGACY_PREFIXES)
                 and name.lower().endswith(".exe")):
             continue
         path = os.path.join(d, name)

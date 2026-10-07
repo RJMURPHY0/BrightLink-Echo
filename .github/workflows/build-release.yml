@@ -11,15 +11,18 @@ name: Build and publish Windows installer
 # 3-day workflow artifact. That is how a release gets tested without touching
 # the live one.
 #
-# Every release (v1.8.0 on) carries four files from ONE build:
-#   FTC-Whisper.exe           UPDATE_ASSET: the onefile "bridge". Every pre-1.8
-#                             updater installs exactly this name. Frozen forever.
-#   FTC-Whisper-Setup.exe     SETUP_UPDATE_ASSET: the installer, as installed
-#                             copies' updaters fetch it. Frozen.
-#   BrightLink-Echo.exe       DOWNLOAD_ASSET: the same installer, under the name
-#                             every existing download link already uses.
-#   FTC-Whisper-rollout.json  ROLLOUT_ASSET: how much of the fleet the bridge may
-#                             migrate (rollout.json in the repo).
+# Every release (v1.8.5 on) carries six files from ONE build:
+#   FTC-Whisper.exe               UPDATE_ASSET: the onefile "bridge". Every pre-1.8
+#                                 updater installs exactly this name. Frozen forever.
+#   BrightLink-Echo-Setup.exe     SETUP_UPDATE_ASSET: the installer, as v1.8.5+
+#                                 updaters fetch it.
+#   FTC-Whisper-Setup.exe         LEGACY_SETUP_UPDATE_ASSET: the same installer,
+#                                 under the name v1.8.0 to v1.8.4 copies fetch.
+#   BrightLink-Echo.exe           DOWNLOAD_ASSET: the same installer, under the
+#                                 name every download link uses.
+#   BrightLink-Echo-rollout.json  ROLLOUT_ASSET: how much of the fleet the bridge
+#                                 may migrate (rollout.json in the repo).
+#   FTC-Whisper-rollout.json      LEGACY_ROLLOUT_ASSET: the same, for v1.8.0 to v1.8.4 bridges.
 on:
   push:
     branches:
@@ -136,12 +139,12 @@ jobs:
         run: |
           $v = python -c "import re; print(re.search(r'APP_VERSION = \x22(.+?)\x22', open('app.py').read()).group(1))"
           echo "VERSION=$v" >> $env:GITHUB_OUTPUT
-          python -c "import brand; print('PRODUCT_NAME=' + brand.PRODUCT_NAME); print('DIST_EXE=' + brand.EXE_BASENAME + '.exe'); print('DIST_DIR=' + brand.EXE_BASENAME); print('DOWNLOAD_ASSET=' + brand.DOWNLOAD_ASSET); print('UPDATE_ASSET=' + brand.UPDATE_ASSET); print('SETUP_ASSET=' + brand.SETUP_UPDATE_ASSET); print('ROLLOUT_ASSET=' + brand.ROLLOUT_ASSET); print('SIGNER=' + brand.SIGNER_SUBJECT)" >> $env:GITHUB_OUTPUT
+          python -c "import brand; print('PRODUCT_NAME=' + brand.PRODUCT_NAME); print('DIST_EXE=' + brand.EXE_BASENAME + '.exe'); print('DIST_DIR=' + brand.EXE_BASENAME); print('DOWNLOAD_ASSET=' + brand.DOWNLOAD_ASSET); print('UPDATE_ASSET=' + brand.UPDATE_ASSET); print('SETUP_ASSET=' + brand.SETUP_UPDATE_ASSET); print('ROLLOUT_ASSET=' + brand.ROLLOUT_ASSET); print('LEGACY_SETUP_ASSET=' + brand.LEGACY_SETUP_UPDATE_ASSET); print('LEGACY_ROLLOUT_ASSET=' + brand.LEGACY_ROLLOUT_ASSET); print('SIGNER=' + brand.SIGNER_SUBJECT)" >> $env:GITHUB_OUTPUT
 
-      # One Analysis, two outputs: dist\FTC Whisper.exe (onefile bridge) and
-      # dist\FTC Whisper\ (the installed layout, app-<version>\ inside).
+      # One Analysis, two outputs: dist\<EXE_BASENAME>.exe (onefile bridge) and
+      # dist\<EXE_BASENAME>\ (the installed layout, app-<version>\ inside).
       - name: Build executable
-        run: pyinstaller --noconfirm --clean "ftc_whisper.spec"
+        run: pyinstaller --noconfirm --clean "echo.spec"
 
       - name: Install Inno Setup (pinned)
         id: inno
@@ -203,7 +206,7 @@ jobs:
           # on a subscription, and signing needs no subscription context.
           allow-no-subscriptions: true
 
-      # Signs dist\FTC Whisper.exe (the onefile bridge) in place. The action
+      # Signs dist\<EXE_BASENAME>.exe (the onefile bridge) in place. The action
       # is NOT recursive, which is why the installed layout's exe and the
       # installer each get a step of their own below. The action uses the
       # Azure CLI session from the login step above, so no client secret
@@ -222,7 +225,7 @@ jobs:
           timestamp-digest: SHA256
           description: ${{ steps.version.outputs.PRODUCT_NAME }}
 
-      # dist\FTC Whisper\FTC Whisper.exe only: its folder holds nothing else
+      # dist\<EXE_BASENAME>\<EXE_BASENAME>.exe only: its folder holds nothing else
       # at the top level (the bundled third-party DLLs are in app-<version>\
       # and are deliberately NOT signed with our certificate; see
       # docs/decisions/release-updater.md, 2026-09-29).
@@ -283,11 +286,13 @@ jobs:
           timestamp-digest: SHA256
           description: ${{ steps.version.outputs.PRODUCT_NAME }}
 
-      # Four names, one signed build (a copy keeps the embedded signature):
-      #   UPDATE_ASSET    the onefile bridge every pre-1.8 updater fetches. Frozen.
-      #   SETUP_ASSET     the installer, for installed copies' updaters. Frozen.
-      #   DOWNLOAD_ASSET  the same installer, for people and every existing link.
-      #   ROLLOUT_ASSET   rollout.json: the bridge's migration switch.
+      # Six names, one signed build (a copy keeps the embedded signature):
+      #   UPDATE_ASSET          the onefile bridge every pre-1.8 updater fetches. Frozen.
+      #   SETUP_ASSET           the installer, for v1.8.5+ updaters.
+      #   LEGACY_SETUP_ASSET    the same installer, for v1.8.0 to v1.8.4 updaters. Frozen.
+      #   DOWNLOAD_ASSET        the same installer, for people and every existing link.
+      #   ROLLOUT_ASSET         rollout.json: the bridge's migration switch.
+      #   LEGACY_ROLLOUT_ASSET  the same, for v1.8.0 to v1.8.4 bridges. Frozen.
       - name: Name the release assets
         shell: pwsh
         env:
@@ -296,14 +301,18 @@ jobs:
           SETUP_ASSET: ${{ steps.version.outputs.SETUP_ASSET }}
           DOWNLOAD_ASSET: ${{ steps.version.outputs.DOWNLOAD_ASSET }}
           ROLLOUT_ASSET: ${{ steps.version.outputs.ROLLOUT_ASSET }}
+          LEGACY_SETUP_ASSET: ${{ steps.version.outputs.LEGACY_SETUP_ASSET }}
+          LEGACY_ROLLOUT_ASSET: ${{ steps.version.outputs.LEGACY_ROLLOUT_ASSET }}
         run: |
           Copy-Item "dist\$env:DIST_EXE" "dist\$env:UPDATE_ASSET" -Force
           Copy-Item "dist\installer\$env:SETUP_ASSET" "dist\$env:SETUP_ASSET" -Force
+          Copy-Item "dist\installer\$env:SETUP_ASSET" "dist\$env:LEGACY_SETUP_ASSET" -Force
           Copy-Item "dist\installer\$env:SETUP_ASSET" "dist\$env:DOWNLOAD_ASSET" -Force
           $r = Get-Content "rollout.json" -Raw | ConvertFrom-Json
           if ($null -eq $r.migrate_percent) { throw "rollout.json has no migrate_percent" }
           Copy-Item "rollout.json" "dist\$env:ROLLOUT_ASSET" -Force
-          foreach ($n in @($env:UPDATE_ASSET, $env:SETUP_ASSET, $env:DOWNLOAD_ASSET, $env:ROLLOUT_ASSET)) {
+          Copy-Item "rollout.json" "dist\$env:LEGACY_ROLLOUT_ASSET" -Force
+          foreach ($n in @($env:UPDATE_ASSET, $env:SETUP_ASSET, $env:LEGACY_SETUP_ASSET, $env:DOWNLOAD_ASSET, $env:ROLLOUT_ASSET, $env:LEGACY_ROLLOUT_ASSET)) {
             $f = Get-Item "dist\$n"
             Write-Host "$n  $($f.Length) bytes  $((Get-FileHash $f.FullName).Hash)"
           }
@@ -317,11 +326,12 @@ jobs:
           UPDATE_ASSET: ${{ steps.version.outputs.UPDATE_ASSET }}
           SETUP_ASSET: ${{ steps.version.outputs.SETUP_ASSET }}
           DOWNLOAD_ASSET: ${{ steps.version.outputs.DOWNLOAD_ASSET }}
+          LEGACY_SETUP_ASSET: ${{ steps.version.outputs.LEGACY_SETUP_ASSET }}
           DIST_DIR: ${{ steps.version.outputs.DIST_DIR }}
           DIST_EXE: ${{ steps.version.outputs.DIST_EXE }}
           SIGNER: ${{ steps.version.outputs.SIGNER }}
         run: |
-          foreach ($f in @("dist\$env:UPDATE_ASSET", "dist\$env:SETUP_ASSET", "dist\$env:DOWNLOAD_ASSET", "dist\$env:DIST_DIR\$env:DIST_EXE")) {
+          foreach ($f in @("dist\$env:UPDATE_ASSET", "dist\$env:SETUP_ASSET", "dist\$env:LEGACY_SETUP_ASSET", "dist\$env:DOWNLOAD_ASSET", "dist\$env:DIST_DIR\$env:DIST_EXE")) {
             $sig = Get-AuthenticodeSignature $f
             Write-Host "$f  status: $($sig.Status)  signer: $($sig.SignerCertificate.Subject)"
             if ($sig.Status -ne 'Valid') { throw "Signature invalid on ${f}: $($sig.Status)" }
@@ -351,7 +361,7 @@ jobs:
       - name: Cache the speech model
         uses: actions/cache@v4
         with:
-          path: ~\AppData\Local\FTC Whisper\models
+          path: ~\AppData\Local\BrightLink Echo\models
           key: parakeet-${{ hashFiles('asr_engine.py') }}
 
       - name: Install and self-test
@@ -391,6 +401,8 @@ jobs:
             dist/${{ steps.version.outputs.SETUP_ASSET }}
             dist/${{ steps.version.outputs.DOWNLOAD_ASSET }}
             dist/${{ steps.version.outputs.ROLLOUT_ASSET }}
+            dist/${{ steps.version.outputs.LEGACY_SETUP_ASSET }}
+            dist/${{ steps.version.outputs.LEGACY_ROLLOUT_ASSET }}
             dist/selftest/
           retention-days: 3
 
@@ -399,7 +411,7 @@ jobs:
       - name: Check the release has every asset
         shell: pwsh
         env:
-          FILES: "${{ steps.version.outputs.UPDATE_ASSET }}|${{ steps.version.outputs.SETUP_ASSET }}|${{ steps.version.outputs.DOWNLOAD_ASSET }}|${{ steps.version.outputs.ROLLOUT_ASSET }}"
+          FILES: "${{ steps.version.outputs.UPDATE_ASSET }}|${{ steps.version.outputs.SETUP_ASSET }}|${{ steps.version.outputs.LEGACY_SETUP_ASSET }}|${{ steps.version.outputs.DOWNLOAD_ASSET }}|${{ steps.version.outputs.ROLLOUT_ASSET }}|${{ steps.version.outputs.LEGACY_ROLLOUT_ASSET }}"
         run: |
           foreach ($n in $env:FILES.Split('|')) {
             if (-not (Test-Path "dist\$n")) { throw "missing release asset $n" }
@@ -411,6 +423,10 @@ jobs:
         with:
           tag_name: v${{ steps.version.outputs.VERSION }}
           name: ${{ steps.version.outputs.PRODUCT_NAME }} v${{ steps.version.outputs.VERSION }}
+          body: |
+            **[Download ${{ steps.version.outputs.PRODUCT_NAME }} for Windows](https://github.com/${{ github.repository }}/releases/latest/download/${{ steps.version.outputs.DOWNLOAD_ASSET }})**
+
+            Installed copies update themselves. The other files below are what they download.
           prerelease: false
           make_latest: true
           files: |
@@ -418,5 +434,36 @@ jobs:
             dist/${{ steps.version.outputs.SETUP_ASSET }}
             dist/${{ steps.version.outputs.DOWNLOAD_ASSET }}
             dist/${{ steps.version.outputs.ROLLOUT_ASSET }}
+            dist/${{ steps.version.outputs.LEGACY_SETUP_ASSET }}
+            dist/${{ steps.version.outputs.LEGACY_ROLLOUT_ASSET }}
           overwrite_files: true
+
+      # The release page shows an asset's label in place of its file name. Every
+      # updater ever shipped finds its file by name and never reads the label,
+      # so the update-only files get a plain label and the old product name
+      # never shows on the page. The download URLs keep the file names.
+      - name: Label the release assets
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.version.outputs.VERSION }}
+          PRODUCT_NAME: ${{ steps.version.outputs.PRODUCT_NAME }}
+          DOWNLOAD_ASSET: ${{ steps.version.outputs.DOWNLOAD_ASSET }}
+        run: |
+          $assets = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:TAG" --jq '.assets[] | "\(.id) \(.name)"'
+          if ($LASTEXITCODE -ne 0) { throw "could not read the release assets" }
+          $n = 0
+          foreach ($line in $assets) {
+            $id, $name = $line -split ' ', 2
+            if ($name -eq $env:DOWNLOAD_ASSET) {
+              $label = "$env:PRODUCT_NAME for Windows (install this)"
+            } else {
+              $n++
+              $label = "Auto-update file $n (installed copies only)"
+            }
+            gh api -X PATCH "repos/$env:GITHUB_REPOSITORY/releases/assets/$id" -f "label=$label" --silent
+            if ($LASTEXITCODE -ne 0) { throw "could not label $name" }
+            Write-Host "$name  ->  $label"
+          }
           generate_release_notes: true

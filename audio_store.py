@@ -2,7 +2,7 @@
 Local per-dictation audio storage.
 
 Each dictation's captured audio is saved as a 16-bit PCM mono WAV in
-%APPDATA%\\FTC Whisper\\audio, named by the digits of the history row's
+%APPDATA%\\BrightLink Echo\\audio, named by the digits of the history row's
 created_at timestamp — the same value that is the durable local/remote
 identity in supabase_client, so a history row maps to its recording with
 no schema change and the link survives remote merges.
@@ -16,6 +16,7 @@ Files are pruned oldest-first past a count/size cap.
 """
 
 import brand
+import data_paths
 import os
 import re
 import threading
@@ -31,8 +32,7 @@ _write_lock = threading.Lock()
 
 
 def audio_dir() -> str:
-    app_data = os.environ.get("APPDATA") or os.path.expanduser("~")
-    folder = os.path.join(app_data, brand.DATA_DIR_NAME, "audio")
+    folder = os.path.join(data_paths.roaming_dir(), "audio")
     os.makedirs(folder, exist_ok=True)
     return folder
 

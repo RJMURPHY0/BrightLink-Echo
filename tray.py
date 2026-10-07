@@ -181,7 +181,7 @@ class TrayApp:
         self._icon.run()
 
     def notify(self, message: str, title: Optional[str] = None) -> bool:
-        """Show a native Windows notification from the FTC Whisper tray icon.
+        """Show a native Windows notification from the app's tray icon.
 
         This is owned by the tray icon, so it's clearly attributed to FTC
         Whisper and never floats over whatever app is in the foreground (unlike

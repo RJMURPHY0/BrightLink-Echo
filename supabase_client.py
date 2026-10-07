@@ -1,11 +1,12 @@
 """
-Supabase integration for FTC Whisper.
+Supabase integration for BrightLink Echo.
 Logs transcriptions and AI refinements. All calls are fire-and-forget
 on a background thread — a Supabase outage will never block the app.
 """
 
 import json
 import brand
+import data_paths
 import os
 import threading
 import datetime
@@ -59,8 +60,7 @@ def _is_missing_column_error(exc, *column_names: str) -> bool:
 
 
 def _local_history_path() -> str:
-    app_data = os.environ.get("APPDATA") or os.path.expanduser("~")
-    folder = os.path.join(app_data, brand.DATA_DIR_NAME)
+    folder = data_paths.roaming_dir()
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, "history.json")
 

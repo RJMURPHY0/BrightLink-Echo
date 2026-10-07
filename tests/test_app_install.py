@@ -366,5 +366,46 @@ class AppWiringTests(unittest.TestCase):
         )
 
 
+
+class LegacyRegistrationTests(unittest.TestCase):
+    """v1.8.5 moved the on-disk names: what older versions registered under
+    the legacy ones is removed once, and every link to the legacy exe is
+    pointed at the current one."""
+
+    def test_links_to_the_legacy_exe_are_retargeted_and_nothing_else(self):
+        ps = app_install.retarget_script(
+            [r"C:\Users\a\Desktop", r"C:\Users\a\Pinned\TaskBar"],
+            [r"C:\Users\a\AppData\Local\Old Name\Old Name.exe"],
+            r"C:\Users\a\AppData\Local\New Name\New Name.exe")
+        self.assertIn("$old -contains $l.TargetPath", ps)
+        self.assertIn(r"'C:\Users\a\Pinned\TaskBar'", ps)
+        self.assertIn(r"$l.TargetPath = 'C:\Users\a\AppData\Local\New Name\New Name.exe'", ps)
+        # It never creates, renames or deletes a link.
+        for verb in ("Remove-Item", "Rename-Item", "Move-Item", "New-Item"):
+            self.assertNotIn(verb, ps)
+
+    def test_pins_are_among_the_folders_checked(self):
+        dirs = [d.lower() for d in app_install.pinned_link_dirs()]
+        self.assertTrue(any(d.endswith("user pinned\\taskbar") for d in dirs), dirs)
+        self.assertTrue(any(d.endswith("user pinned\\startmenu") for d in dirs), dirs)
+
+    def test_the_legacy_keys_are_not_the_current_ones(self):
+        self.assertNotEqual(app_install.LEGACY_UNINSTALL_KEY.lower(), app_install.UNINSTALL_KEY.lower())
+        self.assertNotEqual(app_install.LEGACY_APP_PATHS_KEY.lower(), app_install.APP_PATHS_KEY.lower())
+
+    def test_the_clean_up_is_latched_per_exe(self):
+        src = inspect.getsource(app_install.register)
+        self.assertIn('state.get("legacy_cleared_for") != exe or legacy_entry_present()', src)
+        self.assertIn("legacy_cleared_for=exe", src)
+
+    def test_the_uninstaller_can_delete_either_folder(self):
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": r"C:\L", "APPDATA": r"C:\R"}):
+            import brand
+            for base in (r"C:\L", r"C:\R"):
+                for name in (brand.DATA_DIR_NAME, brand.LEGACY_DATA_DIR_NAME):
+                    self.assertTrue(app_install.safe_to_delete(os.path.join(base, name)))
+            self.assertFalse(app_install.safe_to_delete(r"C:\L\Something Else"))
+
+
 if __name__ == "__main__":
     unittest.main()

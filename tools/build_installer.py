@@ -1,6 +1,6 @@
 """Build the BrightLink Echo installer from the onedir build.
 
-    python tools/build_installer.py [--dist "dist\\FTC Whisper"] [--out dist\\installer]
+    python tools/build_installer.py [--dist "dist\\BrightLink Echo"] [--out dist\\installer]
                                     [--iscc path\\to\\ISCC.exe] [--print]
 
 Every name comes from brand.py and the version from app.py, passed to
@@ -75,6 +75,10 @@ def defines(dist: str, out: str, wizard: str, small: str, version: str = "") -> 
         "Copyright": f"Copyright {time.localtime().tm_year} {brand.COMPANY_NAME}",
         "DataDir": brand.DATA_DIR_NAME,
         "ExeName": brand.CANONICAL_EXE_NAME,
+        "LegacyDataDir": brand.LEGACY_DATA_DIR_NAME,
+        "LegacyExeName": brand.LEGACY_CANONICAL_EXE_NAME,
+        "SetupMutex": brand.SETUP_MUTEX,
+        "LegacySetupMutex": brand.LEGACY_SETUP_MUTEX,
         "ContentsDir": install_layout.contents_dir_name(version),
         "PendingDir": install_layout.pending_dir_name(version),
         "PendingPrefix": brand.PENDING_DIR_PREFIX,

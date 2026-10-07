@@ -7,7 +7,7 @@ desktop CPU it transcribes ~20x realtime with punctuation and capitalisation
 built in, and — unlike Whisper — its cost scales with audio length (no 30s
 encoder padding), so short tails transcribe in ~0.1-0.3s.
 
-Model files (~660 MB) are downloaded once to %LOCALAPPDATA%\\FTC Whisper\\models
+Model files (~660 MB) are downloaded once to %LOCALAPPDATA%\\BrightLink Echo\\models
 using plain HTTPS downloads with atomic renames. The HuggingFace cache is NOT
 used: hf_hub's symlink-based cache raises WinError 1314 on stock Windows
 (no Developer Mode), which would kill the engine on most installs.
@@ -17,6 +17,7 @@ the faster-whisper pipeline — this engine is strictly additive.
 """
 
 import brand
+import data_paths
 import os
 import re
 import threading
@@ -83,8 +84,7 @@ _TOTAL_DOWNLOAD_BYTES = 680_000_000  # rough, for progress reporting
 
 
 def models_dir(version: str = DEFAULT_MODEL_VERSION) -> str:
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    return os.path.join(base, brand.DATA_DIR_NAME, "models",
+    return os.path.join(data_paths.local_dir(), "models",
                         f"parakeet-tdt-0.6b-{version}-onnx")
 
 
@@ -253,7 +253,7 @@ def download_model(
         if error_out is not None:
             error_out.append(f"{type(e).__name__}: {e}"[:300])
         if progress:
-            progress(0.0, "Speech model download failed — using Whisper")
+            progress(0.0, "Speech model download failed — using the backup engine")
         return False
 
 

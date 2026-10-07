@@ -343,6 +343,9 @@ class LaunchContractTests(unittest.TestCase):
             updater.stage_installer(r"C:\x\setup.exe", "1.8.0", root=tmp)
         for switch in ("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/STAGEONLY"):
             self.assertIn(switch, captured["cmd"])
+        # Always the folder: without /DIR the installer stages in the legacy
+        # folder, which is where only a v1.8.0 updater looks.
+        self.assertIn(f"/DIR={tmp}", captured["cmd"])
         self.assertEqual("1", captured["kw"]["env"]["PYINSTALLER_RESET_ENVIRONMENT"])
         self.assertFalse([k for k in captured["kw"]["env"] if k.upper().startswith("_PYI_")])
 

@@ -312,6 +312,209 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual("0", out.stdout.strip(), out.stdout + out.stderr)
 
 
+@unittest.skipUnless(sys.platform == "win32" and shutil.which("powershell"),
+                     "the activation script is PowerShell")
+class MigrationTests(unittest.TestCase):
+    """v1.8.5: the legacy folders become the current ones during activation,
+    and go back exactly as they were when anything fails. Runs the real script
+    against a fake %LOCALAPPDATA% and %APPDATA% in a temp folder."""
+
+    OLD, NEW = "1.8.0", "1.8.1"
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="echo-migrate-")
+        self.local = os.path.join(self.base, "Local")
+        self.roaming = os.path.join(self.base, "Roaming")
+        self.legacy = os.path.join(self.local, brand.LEGACY_DATA_DIR_NAME)
+        self.new = os.path.join(self.local, brand.DATA_DIR_NAME)
+        self.legacy_roam = os.path.join(self.roaming, brand.LEGACY_DATA_DIR_NAME)
+        self.new_roam = os.path.join(self.roaming, brand.DATA_DIR_NAME)
+        os.makedirs(self.legacy_roam)
+        with open(os.path.join(self.legacy_roam, "history.json"), "w") as f:
+            f.write('["kept"]')
+        self._helper = ActivationTests()
+
+    def tearDown(self):
+        for _ in range(10):
+            shutil.rmtree(self.base, ignore_errors=True)
+            if not os.path.exists(self.base):
+                return
+            time.sleep(0.5)
+
+    def _legacy_install(self, stage_in: str = "", behaviour: str = "healthy") -> None:
+        """v1.8.0 as it is on disk: the legacy exe on app-1.8.0, the model, and
+        v1.8.5 staged by the installer (in the legacy folder, where a v1.8.0
+        updater asks for it, unless *stage_in* says otherwise)."""
+        self._helper._layout(self.legacy, self.OLD)
+        os.replace(os.path.join(self.legacy, brand.CANONICAL_EXE_NAME),
+                   os.path.join(self.legacy, brand.LEGACY_CANONICAL_EXE_NAME))
+        os.makedirs(os.path.join(self.legacy, "models"))
+        with open(os.path.join(self.legacy, "models", "encoder.onnx"), "wb") as f:
+            f.write(b"model" * 1000)
+        pending = os.path.join(stage_in or self.legacy,
+                               install_layout.pending_dir_name(self.NEW))
+        self._helper._layout(pending, self.NEW, behaviour)
+        # The copy v1.8.0's own check hashes, under the name it knows.
+        shutil.copy(os.path.join(pending, brand.CANONICAL_EXE_NAME),
+                    os.path.join(pending, brand.LEGACY_CANONICAL_EXE_NAME))
+
+    def _run(self, install_dir: str, *extra, mode: str = "Update",
+             relaunch: bool = True, attempts: int = 30) -> int:
+        copy = os.path.join(install_dir, f"activate-{self.NEW}.ps1")
+        shutil.copy(SCRIPT, copy)
+        args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", copy,
+                "-InstallDir", install_dir, "-Version", self.NEW, "-Mode", mode,
+                "-LaunchWith", sys.executable, "-HealthTimeout", "20",
+                "-Attempts", str(attempts), "-NoSystemChanges"]
+        if relaunch:
+            args.append("-Relaunch")
+        args += list(extra)
+        env = dict(os.environ, APPDATA=self.roaming, LOCALAPPDATA=self.local)
+        # Started from inside the folder it moves, as the v1.8.0 to v1.8.4 updater is.
+        r = subprocess.run(args, capture_output=True, text=True, timeout=240,
+                           env=env, cwd=install_dir)
+        return r.returncode
+
+    def _version_of(self, exe: str) -> str:
+        with open(exe, "r", encoding="utf-8") as f:
+            return f.read().split('ver = "', 1)[1].split('"', 1)[0]
+
+    def _log(self) -> str:
+        out = []
+        for d in (self.new, self.legacy):
+            try:
+                with open(os.path.join(d, install_layout.UPDATE_LOG), encoding="utf-8",
+                          errors="replace") as f:
+                    out.append(f.read())
+            except OSError:
+                pass
+        return "\n".join(out)
+
+    def _wait(self, path: str, secs: float = 15) -> bool:
+        deadline = time.time() + secs
+        while time.time() < deadline:
+            if os.path.exists(path):
+                return True
+            time.sleep(0.2)
+        return False
+
+    def _assert_legacy_intact(self):
+        exe = os.path.join(self.legacy, brand.LEGACY_CANONICAL_EXE_NAME)
+        self.assertEqual(self.OLD, self._version_of(exe), self._log())
+        self.assertTrue(os.path.isdir(os.path.join(self.legacy, "app-" + self.OLD)))
+        self.assertTrue(os.path.exists(os.path.join(self.legacy, "models", "encoder.onnx")))
+        self.assertTrue(os.path.exists(os.path.join(self.legacy_roam, "history.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.new, brand.MIGRATED_MARKER)))
+
+    def test_an_update_from_the_legacy_folder_moves_everything(self):
+        self._legacy_install()
+        self.assertEqual(0, self._run(self.legacy), self._log())
+        exe = os.path.join(self.new, brand.CANONICAL_EXE_NAME)
+        self.assertEqual(self.NEW, self._version_of(exe))
+        self.assertFalse(os.path.exists(self.legacy), "the legacy folder is gone")
+        self.assertFalse(os.path.exists(self.legacy_roam))
+        # The model and the user's history came along; nothing is re-downloaded.
+        self.assertTrue(os.path.exists(os.path.join(self.new, "models", "encoder.onnx")))
+        with open(os.path.join(self.new_roam, "history.json")) as f:
+            self.assertEqual('["kept"]', f.read())
+        self.assertTrue(os.path.exists(os.path.join(self.new, brand.MIGRATED_MARKER)))
+        self.assertTrue(os.path.exists(os.path.join(self.new, "launched-" + self.NEW + ".txt")))
+        # Nothing under a legacy name is left in the new folder.
+        left = [n for n in os.listdir(self.new) if brand.LEGACY_EXE_BASENAME in n]
+        self.assertEqual([], left)
+        self.assertFalse(os.path.exists(os.path.join(self.new, "pending-" + self.NEW)))
+
+    def test_a_version_that_dies_at_start_goes_back_to_the_legacy_folder(self):
+        self._legacy_install(behaviour="crash")
+        self.assertEqual(5, self._run(self.legacy), self._log())
+        self._assert_legacy_intact()
+        self.assertFalse(os.path.exists(os.path.join(self.new, brand.CANONICAL_EXE_NAME)))
+        self.assertFalse(os.path.exists(self.new_roam))
+        # Remembered as bad where the previous version looks for it.
+        self.assertEqual(self.NEW, install_layout.read_bad_version(self.legacy))
+        self.assertTrue(self._wait(os.path.join(self.legacy, "launched-" + self.OLD + ".txt")),
+                        self._log())
+
+    def test_a_locked_roaming_file_undoes_the_local_move(self):
+        self._legacy_install()
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = ctypes.c_void_p
+        # Held open without FILE_SHARE_DELETE, as an indexer or AV scan may:
+        # its folder cannot be renamed while it is open.
+        h = k32.CreateFileW(os.path.join(self.legacy_roam, "history.json"),
+                            0x80000000, 1, None, 3, 0x80, None)
+        self.assertNotEqual(h, ctypes.c_void_p(-1).value)
+        try:
+            code = self._run(self.legacy, attempts=2)
+        finally:
+            k32.CloseHandle(ctypes.c_void_p(h))
+        self.assertEqual(6, code, self._log())
+        self._assert_legacy_intact()
+        # Not the version's fault: the updater may try it again.
+        self.assertEqual("", install_layout.read_bad_version(self.legacy))
+        self.assertTrue(self._wait(os.path.join(self.legacy, "launched-" + self.OLD + ".txt")),
+                        self._log())
+        # And the retry, once nothing holds the file, succeeds.
+        self.assertEqual(0, self._run(self.legacy), self._log())
+        self.assertFalse(os.path.exists(self.legacy))
+
+    def test_an_install_over_the_legacy_folder_adopts_its_data(self):
+        os.makedirs(self.new)
+        self._legacy_install(stage_in=self.new)
+        self.assertEqual(0, self._run(self.new, mode="Install", relaunch=False), self._log())
+        self.assertEqual(self.NEW, self._version_of(os.path.join(self.new, brand.CANONICAL_EXE_NAME)))
+        self.assertTrue(os.path.exists(os.path.join(self.new, "registered.json")))
+        self.assertTrue(os.path.exists(os.path.join(self.new, "models", "encoder.onnx")))
+        self.assertTrue(os.path.exists(os.path.join(self.new_roam, "history.json")))
+        self.assertFalse(os.path.exists(self.legacy))
+        self.assertTrue(os.path.exists(os.path.join(self.new, brand.MIGRATED_MARKER)))
+
+    def _moved_install(self, behaviour: str = "healthy") -> None:
+        """A machine already on the current folder (v1.8.0 here stands for any
+        installed version), with a stray legacy folder beside it: an old exe
+        run from Downloads unpacks into it."""
+        self._helper._layout(self.new, self.OLD)
+        with open(os.path.join(self.new, brand.MIGRATED_MARKER), "w") as f:
+            f.write("{}")
+        os.makedirs(os.path.join(self.legacy, "runtime", "_MEI1"))
+        pending = os.path.join(self.new, install_layout.pending_dir_name(self.NEW))
+        self._helper._layout(pending, self.NEW, behaviour)
+
+    def test_a_failed_update_on_a_moved_machine_leaves_the_legacy_folder_alone(self):
+        self._moved_install(behaviour="crash")
+        self.assertEqual(5, self._run(self.new), self._log())
+        exe = os.path.join(self.new, brand.CANONICAL_EXE_NAME)
+        self.assertEqual(self.OLD, self._version_of(exe), self._log())
+        self.assertEqual(self.NEW, install_layout.read_bad_version(self.new))
+        self.assertTrue(os.path.exists(os.path.join(self.new, brand.MIGRATED_MARKER)))
+        self.assertFalse(os.path.exists(os.path.join(self.legacy, brand.LEGACY_CANONICAL_EXE_NAME)))
+        self.assertTrue(self._wait(os.path.join(self.new, "launched-" + self.OLD + ".txt")),
+                        self._log())
+
+    def test_an_update_on_a_moved_machine_clears_a_stray_legacy_folder(self):
+        self._moved_install()
+        self.assertEqual(0, self._run(self.new), self._log())
+        self.assertEqual(self.NEW, self._version_of(os.path.join(self.new, brand.CANONICAL_EXE_NAME)))
+        self.assertFalse(os.path.exists(self.legacy))
+        # The user's roaming data was never the stray's to take.
+        self.assertTrue(os.path.exists(os.path.join(self.legacy_roam, "history.json"))
+                        or os.path.exists(os.path.join(self.new_roam, "history.json")))
+
+    def test_a_fresh_install_is_marked_as_home(self):
+        shutil.rmtree(self.legacy_roam)
+        pending = os.path.join(self.new, install_layout.pending_dir_name(self.NEW))
+        self._helper._layout(pending, self.NEW)
+        self.assertEqual(0, self._run(self.new, mode="Install", relaunch=False), self._log())
+        self.assertTrue(os.path.exists(os.path.join(self.new, brand.MIGRATED_MARKER)))
+
+    def test_a_failed_install_over_the_legacy_folder_gives_it_back(self):
+        os.makedirs(self.new)
+        self._legacy_install(stage_in=self.new, behaviour="noregister")
+        self.assertEqual(4, self._run(self.new, mode="Install", relaunch=False), self._log())
+        self._assert_legacy_intact()
+
+
 class ActivationContractTests(unittest.TestCase):
     """What the script and the Python side must agree on, without running it."""
 
@@ -321,7 +524,17 @@ class ActivationContractTests(unittest.TestCase):
 
     def test_names_are_the_frozen_ones(self):
         self.assertIn(f"$ExeName = '{brand.CANONICAL_EXE_NAME}'", self.src)
-        self.assertIn(f'$Contents = "{brand.CONTENTS_DIR_PREFIX}$Version"', self.src)
+        self.assertIn(f"$DirName = '{brand.DATA_DIR_NAME}'", self.src)
+        self.assertIn(f"$LegacyExeName = '{brand.LEGACY_CANONICAL_EXE_NAME}'", self.src)
+        self.assertIn(f"$LegacyDirName = '{brand.LEGACY_DATA_DIR_NAME}'", self.src)
+        self.assertIn(f"$MarkerName = '{brand.MIGRATED_MARKER}'", self.src)
+        self.assertIn(f"$TaskName = '{brand.TASK_NAME}'", self.src)
+        self.assertIn(f"$RunValueName = '{brand.RUN_VALUE_NAME}'", self.src)
+        self.assertIn(f"$LegacyTaskName = '{brand.LEGACY_TASK_NAME}'", self.src)
+        self.assertIn(f"$LegacyRunValueName = '{brand.LEGACY_RUN_VALUE_NAME}'", self.src)
+        self.assertIn(f"$UninstallKeyName = '{brand.UNINSTALL_KEY_NAME}'", self.src)
+        self.assertIn(f"$UrlScheme = '{brand.URL_SCHEME}'", self.src)
+        self.assertIn(f'Contents = "{brand.CONTENTS_DIR_PREFIX}$Version"', self.src)
         self.assertIn(f'"{brand.PENDING_DIR_PREFIX}$Version"', self.src)
         self.assertIn(f"'{install_layout.HEALTH_FILE}'", self.src)
         self.assertIn(f"'{install_layout.BAD_VERSION_FILE}'", self.src)
@@ -332,7 +545,8 @@ class ActivationContractTests(unittest.TestCase):
     def test_the_exe_swap_is_file_replace_with_a_backup(self):
         # The primitive the onefile updater proved; never a plain copy over
         # the installed exe (that installed a 21 MB prefix and said success).
-        self.assertIn("[System.IO.File]::Replace($PendingExe, $Canonical, $Backup)", self.src)
+        self.assertIn("[System.IO.File]::Replace($script:PendingExe, $script:Canonical, "
+                      "$script:Backup)", self.src)
         self.assertNotIn("Copy-Item", self.src)
 
     def test_processes_elsewhere_are_found_by_their_own_name_only_on_request(self):
@@ -340,7 +554,30 @@ class ActivationContractTests(unittest.TestCase):
         # stop an unrelated copy (or, in this suite, the developer's own Echo).
         self.assertNotIn("Get-Process -Name", self.src)
         self.assertIn("if (-not $ours -and $KillCopiesElsewhere)", self.src)
-        self.assertIn("OriginalFilename -eq $ExeName", self.src)
+        self.assertIn("($orig -eq $ExeName) -or ($orig -eq $LegacyExeName)", self.src)
+
+    def test_start_with_windows_crosses_the_migration_as_it_was(self):
+        import app_install
+        # The bridge launches like every sign-in launcher, and a Task Manager
+        # disable under the legacy name moves to the current one.
+        bridge = self.src[self.src.index("$legacyTask = "):self.src.index("# 6. Register")]
+        self.assertIn('--startup"', bridge)
+        self.assertIn("-Name $LegacyRunValueName", bridge)
+        self.assertIn("New-ItemProperty -LiteralPath $ApprovedKey -Name $RunValueName", bridge)
+        self.assertIn("-PropertyType Binary", bridge)
+        # A rollback takes the new pair away again.
+        undo = self.src[self.src.index("function Remove-NewRegistrations"):
+                        self.src.index("function Retarget-Links")]
+        self.assertIn("foreach ($k in @($RunKey, $ApprovedKey))", undo)
+        for key, var in ((app_install.RUN_KEY, "$RunKey"),
+                         (app_install.STARTUP_APPROVED_KEY, "$ApprovedKey")):
+            self.assertIn(f"{var} = 'HKCU:\\{key}'", self.src)
+
+    def test_the_folders_move_only_after_leaving_them(self):
+        # The v1.8.0 to v1.8.4 updater starts this script inside the legacy folder; a
+        # folder that is any process's current directory cannot be renamed.
+        self.assertLess(self.src.index("SetCurrentDirectory"),
+                        self.src.index("Adopt-Folder $LegacyDir $NewDir"))
 
 
 if __name__ == "__main__":

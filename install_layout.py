@@ -1,10 +1,11 @@
 """
 The installed layout (v1.8.0 on): what is on disk, and whether it is whole.
 
-    %LOCALAPPDATA%\\FTC Whisper\\
-        FTC Whisper.exe        the canonical exe: a PyInstaller ONEDIR bootloader
-        app-1.8.0\\             its files (contents_directory), with manifest.json
-        pending-1.8.1\\         an update laid out in full before it is switched in
+    %LOCALAPPDATA%\\BrightLink Echo\\  (data_paths.local_dir(); the legacy name
+                                      until activate.ps1 moved the machine)
+        BrightLink Echo.exe    the canonical exe: a PyInstaller ONEDIR bootloader
+        app-1.8.1\\             its files (contents_directory), with manifest.json
+        pending-1.8.2\\         an update laid out in full before it is switched in
 
 Until v1.7.x the canonical exe was a ONEFILE build that unpacked 5,334 files
 (291 MB) into runtime\\_MEIxxxx on every start. The contents folder is named
@@ -31,6 +32,7 @@ import sys
 import time
 
 import brand
+import data_paths
 
 MANIFEST_NAME = "manifest.json"
 HEALTH_FILE = "health.json"
@@ -47,14 +49,15 @@ _TAIL_SEARCH = 1024 * 1024
 
 
 def install_dir() -> str:
-    """%LOCALAPPDATA%\\FTC Whisper (the frozen folder name, never the product's)."""
-    base = os.environ.get("LOCALAPPDATA") or os.path.join(
-        os.path.expanduser("~"), "AppData", "Local")
-    return os.path.join(base, brand.DATA_DIR_NAME)
+    """The local data folder: data_paths.local_dir(), which stays the legacy
+    one until installer/activate.ps1 has moved this machine."""
+    return data_paths.local_dir()
 
 
 def canonical_exe(root: str = "") -> str:
-    return os.path.join(root or install_dir(), brand.CANONICAL_EXE_NAME)
+    """The exe that runs *root*'s layout: the legacy folder keeps its legacy
+    exe name; every other folder (the new one, a dist build) the current one."""
+    return data_paths.canonical_exe(root or install_dir())
 
 
 def contents_dir_name(version: str) -> str:
@@ -362,4 +365,12 @@ def stale_paths(root: str, own_contents: str) -> list:
                 out.append(os.path.join(runtime, name))
     except OSError:
         pass
+    # What activate.ps1 could not delete after moving the legacy folder here
+    # (a file that was in use). The marker says this folder replaced it, so
+    # nothing in it is needed any more. The roaming folder is never touched.
+    if (os.path.basename(root).lower() == brand.DATA_DIR_NAME.lower()
+            and os.path.isfile(os.path.join(root, brand.MIGRATED_MARKER))):
+        legacy = os.path.join(os.path.dirname(root), brand.LEGACY_DATA_DIR_NAME)
+        if os.path.isdir(legacy):
+            out.append(legacy)
     return out

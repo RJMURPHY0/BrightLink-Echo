@@ -65,7 +65,7 @@ Don't undo these — each one exists to keep the detection rate down:
 - **No UPX / no packer** (`upx=False`) on every build. Packed exes trigger
   *more* heuristics.
 - **The onefile bridge unpacks outside `%TEMP%`** (`runtime_tmpdir` in
-  `ftc_whisper.spec`). Unpacking DLLs into `%TEMP%\_MEIxxxxxx` looks exactly
+  `echo.spec`). Unpacking DLLs into `%TEMP%\_MEIxxxxxx` looks exactly
   like malware staging, and several products block the DLL loads *even after
   the user allows the exe*. It unpacks to `%LOCALAPPDATA%\FTC Whisper\runtime\`,
   a **stable path** an admin can exclude once. The installed layout empties

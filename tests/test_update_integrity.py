@@ -202,7 +202,7 @@ class RunTests(unittest.TestCase):
 
         def is_idle():
             if not polls:                         # someone rewrites the file
-                dest = [n for n in os.listdir(self.dir) if n.startswith("FTC-Whisper-new")][0]
+                dest = [n for n in os.listdir(self.dir) if n.startswith(updater._DOWNLOAD_PREFIX)][0]
                 with open(os.path.join(self.dir, dest), "r+b") as f:
                     f.truncate(len(self.data) // 5)
             polls.append(1)

@@ -1,5 +1,5 @@
 """
-FTC Whisper — main entry point.
+BrightLink Echo — main entry point.
 
 Architecture
 ------------
@@ -37,11 +37,12 @@ if sys.platform == "win32":
 if getattr(sys, "frozen", False) and sys.platform == "win32":
     import pyi_runtime
     import brand  # constants only, imports nothing: safe ahead of the guard
+    import data_paths  # stdlib and brand only: safe ahead of the guard
     pyi_runtime.relaunch_if_foreign_runtime(log_path=os.path.join(
-        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
-        brand.DATA_DIR_NAME, "startup-error.log"))
+        data_paths.local_dir(), "startup-error.log"))
 
 import brand
+import data_paths
 import install_layout
 from config import Config
 # Recorder / Transcriber / asr_engine / StreamingSession / Injector / TrayApp
@@ -2627,9 +2628,7 @@ class WhisperFlowApp:
         both engines and the LLM fix. Best-effort: cached locally for offline,
         silently absent when signed out or the table isn't reachable."""
         import json as _json
-        cache_path = os.path.join(
-            os.environ.get("APPDATA") or os.path.expanduser("~"),
-            brand.DATA_DIR_NAME, "estate-vocab.json")
+        cache_path = os.path.join(data_paths.roaming_dir(), "estate-vocab.json")
         if not getattr(self, "_estate_vocab", ""):
             try:
                 with open(cache_path, "r", encoding="utf-8") as f:
@@ -3553,7 +3552,7 @@ _INSTALL_COPY_LOCK = threading.Lock()  # serialises _ensure_installed_copy acros
 def _start_local_server(app_window, version: str) -> None:
     """
     Tiny localhost-only HTTP server so the FTC web app can detect whether
-    FTC Whisper is running and surface its window without needing a custom
+    the app is running and surface its window without needing a custom
     URL protocol registration.  Binds to 127.0.0.1 only — not reachable
     from the network.
 
@@ -3622,7 +3621,8 @@ def _start_local_server(app_window, version: str) -> None:
                         threading.Thread(target=_update_now, daemon=True, name="in-app-update").start()
                     else:
                         import webbrowser
-                        webbrowser.open(info["download_url"])
+                        from updater import manual_download_url
+                        webbrowser.open(manual_download_url())
                 else:
                     self.send_response(200)
                     self._cors()
@@ -3659,6 +3659,11 @@ def _ensure_single_instance() -> None:
     kernel32 = ctypes.windll.kernel32
     mutex = kernel32.CreateMutexW(None, True, MUTEX_NAME)
     err = kernel32.GetLastError()
+    # Also hold the name v1.8.4 and older use, so an old copy (a stale
+    # shortcut, a leftover exe) and this one never run side by side.
+    legacy = kernel32.CreateMutexW(None, True, brand.LEGACY_MUTEX_NAME)
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        err = ERROR_ALREADY_EXISTS
 
     if err == ERROR_ALREADY_EXISTS and _launched_at_sign_in():
         # The other sign-in launcher got there first: nothing to show.
@@ -3691,7 +3696,7 @@ def _ensure_single_instance() -> None:
         os._exit(0)
 
     # We are the first instance — hold the mutex for the process lifetime.
-    _SINGLETON_MUTEX = mutex
+    _SINGLETON_MUTEX = (mutex, legacy)
 
 
 TASK_NAME = brand.TASK_NAME
@@ -3699,10 +3704,7 @@ TASK_NAME = brand.TASK_NAME
 
 def _app_data_dir() -> str:
     """Stable per-user data dir (logs + the canonical installed exe copy)."""
-    base = os.environ.get("LOCALAPPDATA") or os.path.join(
-        os.path.expanduser("~"), "AppData", "Local"
-    )
-    d = os.path.join(base, brand.DATA_DIR_NAME)
+    d = data_paths.local_dir()
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:
@@ -3713,8 +3715,8 @@ def _app_data_dir() -> str:
 def _clean_stale_runtime_dirs() -> None:
     """Remove leftover onefile unpack folders.
 
-    The build unpacks into %LOCALAPPDATA%\\FTC Whisper\\runtime rather than
-    %TEMP% (see ftc_whisper.spec — temp-folder execution is a major AV
+    The build unpacks into %LOCALAPPDATA%\\BrightLink Echo\\runtime rather than
+    %TEMP% (see echo.spec — temp-folder execution is a major AV
     heuristic). The bootloader deletes its own folder on a clean exit, but a
     crash or a kill leaves one behind, and unlike %TEMP% nothing else ever
     cleans this location. Only touches _MEI* folders that are not ours and are
@@ -3781,13 +3783,14 @@ def _startup_log_path() -> str:
 
 
 def _stable_exe_path() -> str:
-    return os.path.join(_app_data_dir(), brand.CANONICAL_EXE_NAME)
+    # The legacy folder (not migrated yet) keeps the legacy exe name.
+    return data_paths.canonical_exe(_app_data_dir())
 
 
 def _ensure_installed_copy() -> str:
     """
     Frozen builds only: keep a canonical copy of the exe at a STABLE path
-    (%LOCALAPPDATA%\\FTC Whisper) and return that path.
+    (%LOCALAPPDATA%\\BrightLink Echo) and return that path.
 
     Auto-launch must never point at the volatile location the user happened to
     double-click from (Downloads, a temp dir, a USB stick). If the running exe
@@ -3966,7 +3969,7 @@ def _startup_command() -> str:
     return f'"{target}" "{os.path.abspath(__file__)}" {_STARTUP_ARG}'
 
 
-def _startup_registry_state():
+def _startup_registry_state(name: str = brand.RUN_VALUE_NAME):
     """Start with Windows as Task Manager's Startup apps shows it: True
     (enabled), False (disabled there) or None (no Run entry yet: a first run,
     or an install from before the Run entry was added)."""
@@ -3974,16 +3977,29 @@ def _startup_registry_state():
     from app_install import RUN_KEY as _RUN_KEY, STARTUP_APPROVED_KEY as _APPROVED_KEY
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
-            winreg.QueryValueEx(k, brand.RUN_VALUE_NAME)
+            winreg.QueryValueEx(k, name)
     except OSError:
         return None
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _APPROVED_KEY) as k:
-            data, _ = winreg.QueryValueEx(k, brand.RUN_VALUE_NAME)
+            data, _ = winreg.QueryValueEx(k, name)
     except OSError:
         return True  # no approval record: Windows runs it
     # Task Manager's encoding: an odd first byte means disabled.
     return not (data and data[0] & 1)
+
+
+def _task_manager_startup_state():
+    """_startup_registry_state(), carrying a disable over from the legacy
+    name. The first launch after the v1.8.5 rename finds no Run entry under
+    the current name yet; if the person had switched the legacy one off in
+    Task Manager, Start with Windows stays off. Read before
+    app_install.register() deletes the legacy values."""
+    state = _startup_registry_state()
+    if (state is None and brand.LEGACY_RUN_VALUE_NAME != brand.RUN_VALUE_NAME
+            and _startup_registry_state(brand.LEGACY_RUN_VALUE_NAME) is False):
+        return False
+    return state
 
 
 def _sync_startup(enabled: bool) -> None:
@@ -4127,9 +4143,10 @@ def _remove_logon_task() -> None:
 def _startup_setting_at_launch(config) -> bool:
     """Task Manager can switch the entry on or off while the app is closed.
     Its choice wins, and the saved setting is updated so Settings agrees.
-    With no entry yet, the saved setting is applied as it is."""
+    With no entry yet, the saved setting is applied as it is, unless the
+    legacy-named entry was disabled (see _task_manager_startup_state)."""
     try:
-        state = _startup_registry_state()
+        state = _task_manager_startup_state()
     except Exception as e:
         print(f"[App] Could not read Start with Windows from the registry: {e}")
         state = None
@@ -4185,9 +4202,19 @@ def _run_silent_install() -> int:
         _log_startup_error(RuntimeError(f"install failed: no intact copy at {target}"))
         return 1
     _apply_installer_choices()
+    # Before _register_application(), which deletes the legacy-named Run
+    # entry: with no tick passed, a disable made in Task Manager under the
+    # legacy name holds. A tick passed by the installer is a choice made now.
+    enabled = _installed_start_with_windows()
+    if _install_option("start-with-windows") is None:
+        try:
+            if _task_manager_startup_state() is False:
+                enabled = False
+        except Exception as e:
+            print(f"[App] Could not read Start with Windows from the registry: {e}")
     _register_application()
     _register_url_protocol()
-    _sync_startup(_installed_start_with_windows())
+    _sync_startup(enabled)
     print(f"[App] Installed at {target}")
     return 0
 
@@ -4340,8 +4367,9 @@ def _reconcile_legacy_launchers() -> None:
 
 def _register_url_protocol() -> None:
     """
-    Register ftcwhisper:// as a Windows URL protocol so browsers can launch the app.
-    Runs each startup so the path stays current after an update or move.
+    Register our URL protocols so browsers can launch the app: the current
+    scheme and the legacy one the CRM still opens. Runs each startup so the
+    path stays current after an update or move.
     """
     import winreg
 
@@ -4352,18 +4380,19 @@ def _register_url_protocol() -> None:
         script = os.path.abspath(__file__)
         cmd    = f'"{target}" "{script}" "%1"'
 
-    try:
-        # The scheme is frozen (the CRM opens ftcwhisper://launch); only the
-        # friendly name a browser shows in "Open ...?" follows the brand.
-        base = "Software\\Classes\\" + brand.URL_SCHEME
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base) as k:
-            winreg.SetValueEx(k, "",             0, winreg.REG_SZ, f"URL:{brand.PRODUCT_NAME}")
-            winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\shell\open\command") as k:
-            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, cmd)
-        print("[App] Registered ftcwhisper:// URL protocol handler.")
-    except Exception as e:
-        print(f"[App] Could not register URL protocol: {e}")
+    # The CRM opens the legacy scheme until the fleet is on v1.8.5+; only the
+    # friendly name a browser shows in "Open ...?" follows the brand.
+    for scheme in (brand.URL_SCHEME, brand.LEGACY_URL_SCHEME):
+        try:
+            base = "Software\\Classes\\" + scheme
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base) as k:
+                winreg.SetValueEx(k, "",             0, winreg.REG_SZ, f"URL:{brand.PRODUCT_NAME}")
+                winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\shell\open\command") as k:
+                winreg.SetValueEx(k, "", 0, winreg.REG_SZ, cmd)
+            print(f"[App] Registered {scheme}:// URL protocol handler.")
+        except Exception as e:
+            print(f"[App] Could not register {scheme}:// URL protocol: {e}")
 
 
 def _log_startup_error(exc: BaseException) -> None:
@@ -4426,7 +4455,7 @@ def main() -> None:
 
 
 def _selftest(args: list) -> int:
-    """`FTC Whisper.exe --selftest <wav> <report.json>`: prove the PACKAGED
+    """`BrightLink Echo.exe --selftest <wav> <report.json>`: prove the PACKAGED
     engine works without a microphone, a hotkey or the UI.
 
     Unit tests run from source and cannot see the frozen bundle. v1.6.79
@@ -4492,7 +4521,7 @@ def _main() -> None:
         # app disabled (it only governs the Run entry), so check first.
         if _launched_at_sign_in():
             try:
-                if _startup_registry_state() is False:
+                if _task_manager_startup_state() is False:
                     os._exit(0)
             except Exception as e:
                 print(f"[App] Could not read Start with Windows: {e}")
