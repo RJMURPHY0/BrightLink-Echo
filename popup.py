@@ -450,7 +450,7 @@ _ONTOP_INTERVAL_MS = 500
 # taskbar icons instead of hugging them; the ▴▾ arrows on the pill move it by
 # _OFFSET_STEP per click and the result is saved. Clamped to _OFFSET_MAX so it
 # can never be parked off the top of the work-area.
-_POPUP_OFFSET_DEFAULT = 30
+_POPUP_OFFSET_DEFAULT = 8   # logical px, scaled to the display; = config.POPUP_OFFSET_DEFAULT
 _OFFSET_STEP          = 18
 _OFFSET_MAX           = 400
 # ▾ can now go BELOW the tier baseline (negative offset), because offset 0 was a
@@ -2965,26 +2965,20 @@ class FloatingPopup:
             raise RuntimeError("monitor rect unavailable")
         return bottom
 
-    def _dpi_scale(self) -> tuple[float, float]:
-        """
-        Scale factors (sx, sy) from Win32 physical pixels → tkinter logical pixels.
+    @staticmethod
+    def _gap_scale(real_px: bool, mon) -> tuple:
+        """(px, py) turning the app's logical gaps and offset into the units
+        the window is placed in: the monitor's own scale for a real-pixel
+        window, 1.0 for a scaled one (or with no monitor).
 
-        Win32 GetMonitorInfoW / GetCursorPos return physical pixels for DPI-aware
-        processes and logical pixels for non-DPI-aware ones.  tkinter geometry()
-        always uses logical pixels.  Comparing SM_CXSCREEN (Win32 physical) with
-        winfo_screenwidth() (tkinter logical) gives the scale factor; if the
-        process is non-DPI-aware the two match and (1.0, 1.0) is returned.
-        """
-        try:
-            phys_w = ctypes.windll.user32.GetSystemMetrics(0)  # SM_CXSCREEN physical
-            phys_h = ctypes.windll.user32.GetSystemMetrics(1)  # SM_CYSCREEN physical
-            tk_w   = self.root.winfo_screenwidth()
-            tk_h   = self.root.winfo_screenheight()
-            if phys_w > 0 and phys_h > 0:
-                return tk_w / phys_w, tk_h / phys_h
-        except Exception:
-            pass
-        return 1.0, 1.0
+        Scales come from the monitor itself, never from GetSystemMetrics
+        against winfo_screenwidth: those two answer in different DPI contexts,
+        and on a 150% laptop their ratio scaled real-pixel bounds by 1.5 a
+        second time, so the pill opened three quarters of the way across the
+        screen and was dragged back up from below it (2026-10-07)."""
+        if mon is None or not real_px:
+            return 1.0, 1.0
+        return mon._ratio()
 
     def _is_real_pixel_window(self) -> bool:
         """True when the popup is the per-monitor DPI window initialize()
@@ -3003,41 +2997,44 @@ class FloatingPopup:
             return False
 
     def _place_xy(self, w: int, h: int, bounds: tuple, cx: int, cy: int,
-                  near_cursor: bool, sx: float, sy: float) -> tuple:
+                  near_cursor: bool, real_units: bool, py: float) -> tuple:
         """Top-left for a w x h popup inside `bounds` (left, top, right,
-        bottom of the work area) by the placement settings."""
+        bottom of the work area), all in the units the window is placed in:
+        real pixels when `real_units`, else the app's scaled ones. `py` turns
+        the app's logical gaps and offset into those units, so the pill sits
+        the same distance above the taskbar at every display scale."""
         left, top, right, bottom = bounds
         mon = getattr(self, "_last_overlay", None)
         if near_cursor and cx > 0 and cy > 0:
-            gap = 28
-            # The anchor is in the app's scaled space; the window goes in
-            # real pixels.
-            rcx, rcy = mon.real_point(cx, cy) if mon is not None else (cx, cy)
-            x   = round(rcx * sx) - w // 2
-            y_b = round(rcy * sy) + gap
-            y   = y_b if y_b + h <= bottom else round(rcy * sy) - h - gap
+            gap = round(28 * py)
+            # The anchor is in the app's scaled space.
+            rcx, rcy = (mon.real_point(cx, cy)
+                        if real_units and mon is not None else (cx, cy))
+            x   = rcx - w // 2
+            y_b = rcy + gap
+            y   = y_b if y_b + h <= bottom else rcy - h - gap
         else:
             # Fixed placement on whichever monitor the cursor is on. Horizontal
             # placement follows popup_align (◂ ▸ arrows); vertical follows the
             # popup_height preference, so it can sit out of the way of a chatbot's
             # input box (low, default) or up above the chat window (high).
             if self._popup_align == "left":
-                x = left + 8
+                x = left + round(8 * py)
             elif self._popup_align == "right":
-                x = right - w - 8
+                x = right - w - round(8 * py)
             else:
                 x = left + (right - left - w) // 2
             if self._popup_height == "high":
-                y = top + 90
+                y = top + round(90 * py)
             elif self._popup_height == "medium":
                 y = top + (bottom - top - h) // 2
             else:  # "low" (default) — hug the taskbar, clear of chat inputs
-                y = bottom - h - 6
+                y = bottom - h - round(6 * py)
             # Fine-nudge saved from the pill's ▴▾ arrows — lifts the popup clear
             # of the taskbar (a couple mm by default) and sticks wherever the
             # user parks it. The first-order guard below re-clamps into the
             # work-area, so a large nudge can never push it off the top edge.
-            y -= self._popup_offset
+            y -= round(self._popup_offset * py)
 
         # First-order guard: keep the whole popup inside the work-area, so a
         # stale width or an odd monitor origin can never push the fixed popup
@@ -3052,7 +3049,9 @@ class FloatingPopup:
         if not near_cursor and self._popup_offset < 0:
             try:
                 mb_p = self._monitor_bottom(cx, cy)
-                bottom_limit = max(bottom, round(mb_p * sy))
+                if not real_units and mon is not None:
+                    mb_p = mon.scaled_point(mon.real[0], mb_p)[1]
+                bottom_limit = max(bottom, mb_p)
             except Exception:
                 bottom_limit = bottom
         x = max(left, min(x, right - w))
@@ -3087,21 +3086,25 @@ class FloatingPopup:
         # guard below re-checks the real landing spot against them.
         try:
             left_p, top_p, right_p, bottom_p = self._get_monitor_workarea(cx, cy)
-            sx, sy = self._dpi_scale()
-            left   = round(left_p   * sx)
-            top    = round(top_p    * sy)
-            right  = round(right_p  * sx)
-            bottom = round(bottom_p * sy)
         except Exception:
+            self._last_overlay = None
             left_p, top_p = 0, 0
             right_p  = self.root.winfo_screenwidth()
             bottom_p = self.root.winfo_screenheight()
-            left, top, sx, sy = 0, 0, 1.0, 1.0
-            right, bottom = right_p, bottom_p
-
         mon = getattr(self, "_last_overlay", None)
+        # The work area is in real pixels when a monitor was found. A
+        # real-pixel window is placed in those; any other window in the app's
+        # scaled space, so its bounds are converted corner by corner (a plain
+        # ratio would also scale a second monitor's origin).
+        real_units = real_px or mon is None
+        if real_units:
+            left, top, right, bottom = left_p, top_p, right_p, bottom_p
+        else:
+            left, top = mon.scaled_point(left_p, top_p)
+            right, bottom = mon.scaled_point(right_p, bottom_p)
+        _px, py = self._gap_scale(real_px, mon)
         x, y = self._place_xy(w, h, (left, top, right, bottom), cx, cy,
-                              near_cursor, sx, sy)
+                              near_cursor, real_units, py)
 
         pos_log(f"place mode={self._mode} in=({cx},{cy}) "
                 f"hwnd={self._target_hwnd:#x} "
@@ -3150,22 +3153,31 @@ class FloatingPopup:
             pr = real_window_rect(top_hwnd)
             scaled_tk = False
             if (not real_px and pr is not None and mon is not None
-                    and (pr[0], pr[1]) != (x, y)):
+                    and mon.scaled != mon.real):
+                # Placed in scaled units above. Windows either scaled the
+                # window (it landed at the real spot for those numbers) or
+                # took the numbers raw: either way, place it again from its
+                # MEASURED real size in real pixels, converted back to the
+                # units it takes.
                 ex, ey = mon.real_point(x, y)
-                if abs(pr[0] - ex) <= 2 and abs(pr[1] - ey) <= 2:
-                    scaled_tk = True
+                scaled_tk = abs(pr[0] - ex) <= 2 and abs(pr[1] - ey) <= 2
+                raw = abs(pr[0] - x) <= 2 and abs(pr[1] - y) <= 2
+                if scaled_tk or raw:
                     rx, ry = self._place_xy(pr[2] - pr[0], pr[3] - pr[1],
                                             (left_p, top_p, right_p, bottom_p),
-                                            cx, cy, near_cursor, 1.0, 1.0)
-                    tx, ty = mon.scaled_point(rx, ry)
-                    self.root.geometry(f"+{tx}+{ty}")
-                    self.root.update_idletasks()
-                    pos_log(f"place scaled-window mode={self._mode} "
-                            f"asked=({x},{y}) landed=({pr[0]},{pr[1]}) "
-                            f"re-placed=({tx},{ty})")
-                    moved = True
-                    self._last_geometry = ""
-                    pr = real_window_rect(top_hwnd)
+                                            cx, cy, near_cursor, True,
+                                            mon._ratio()[1])
+                    tx, ty = mon.scaled_point(rx, ry) if scaled_tk else (rx, ry)
+                    if (tx, ty) != (x, y):
+                        self.root.geometry(f"+{tx}+{ty}")
+                        self.root.update_idletasks()
+                        pos_log(f"place {'scaled' if scaled_tk else 'raw'}-window "
+                                f"mode={self._mode} asked=({x},{y}) "
+                                f"landed=({pr[0]},{pr[1]}) re-placed=({tx},{ty})")
+                        moved = True
+                        self._last_geometry = ""
+                        x, y = tx, ty
+                        pr = real_window_rect(top_hwnd)
             if pr is not None:
                 pw, ph = pr[2] - pr[0], pr[3] - pr[1]
                 nx = max(left_p, min(pr[0], right_p - pw))
@@ -3180,7 +3192,7 @@ class FloatingPopup:
                         if scaled_tk:
                             gx, gy = mon.scaled_point(nx, ny)
                         else:
-                            gx, gy = x + round(ddx * sx), y + round(ddy * sy)
+                            gx, gy = x + ddx, y + ddy
                         self.root.geometry(f"+{gx}+{gy}")
                         self.root.update_idletasks()
                     self._log_pos_anomaly(near_cursor, w, h, x, y,

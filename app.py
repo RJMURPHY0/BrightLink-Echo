@@ -269,7 +269,7 @@ class WhisperFlowApp:
         self.popup = FloatingPopup()
         self.popup.set_ai_refiner(self.ai_refiner)
         self.popup.set_popup_height(getattr(self.config, "popup_height", "low"))
-        self.popup.set_popup_offset(getattr(self.config, "popup_offset", 30))
+        self.popup.set_popup_offset(getattr(self.config, "popup_offset", 8))
         self.popup.set_popup_align(getattr(self.config, "popup_align", "centre"))
         self.popup.set_pill_arrows(getattr(self.config, "show_pill_arrows", True))
         self.popup.set_badge_dismiss_on_key(
