@@ -34,6 +34,12 @@ if sys.platform == "win32":
 # bootloader environment is running on that process's unpacked native
 # libraries. Relaunch on our own (see pyi_runtime — v1.6.79 lost every
 # dictation to exactly this after an auto-update).
+if sys.platform == "win32":
+    import pyi_runtime
+    # Every powershell.exe we start (update signature and hash checks, the
+    # swap script, install registration) must load Windows PowerShell's own
+    # modules, even when Echo was started from a PowerShell 7 window.
+    pyi_runtime.use_windows_powershell_modules()
 if getattr(sys, "frozen", False) and sys.platform == "win32":
     import pyi_runtime
     import brand  # constants only, imports nothing: safe ahead of the guard

@@ -51,6 +51,41 @@ def clean_launch_env(base=None) -> dict:
     return env
 
 
+def windows_powershell_module_path(value: str) -> str:
+    """*value* (a PSModulePath) without PowerShell 7's module folders.
+
+    A process started from a PowerShell 7 window inherits pwsh's
+    PSModulePath. Every powershell.exe (5.1) we start then loads pwsh's
+    Security and Utility modules, which it cannot use: Get-AuthenticodeSignature
+    read every installer as "no signer" (the update refused), Get-FileHash
+    returned nothing (an old swap script refused the bridge) and the Cert:
+    drive was missing (CI migration test, 2026-10-07). Windows PowerShell's own
+    folders all say WindowsPowerShell; pwsh's say PowerShell."""
+    keep = []
+    for part in (value or "").split(os.pathsep):
+        low = part.replace("/", "\\").lower().rstrip("\\")
+        if not part.strip():
+            continue
+        if "\\powershell\\" in low + "\\" and "\\windowspowershell" not in low:
+            continue
+        keep.append(part)
+    return os.pathsep.join(keep)
+
+
+def use_windows_powershell_modules(environ=None) -> None:
+    """Make every powershell.exe this process starts load Windows
+    PowerShell's own modules (see windows_powershell_module_path)."""
+    env = os.environ if environ is None else environ
+    value = env.get("PSModulePath")
+    if value is None:
+        return
+    cleaned = windows_powershell_module_path(value)
+    if cleaned:
+        env["PSModulePath"] = cleaned
+    else:
+        env.pop("PSModulePath", None)
+
+
 def _norm(path: str) -> str:
     try:
         return os.path.normcase(os.path.realpath(path))

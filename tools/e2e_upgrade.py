@@ -482,6 +482,11 @@ def scenario_next(rep: Report, work: str, assets: str, next_assets: str, version
 
 
 def main(argv=None) -> int:
+    # The CI step is pwsh: without this every app under test, and every
+    # powershell.exe it starts, inherits PowerShell 7's PSModulePath, which a
+    # real user's PC never hands an old version (see pyi_runtime).
+    import pyi_runtime
+    pyi_runtime.use_windows_powershell_modules()
     ap = argparse.ArgumentParser()
     ap.add_argument("scenario", choices=("seed-model", "upgrade", "installed", "faults", "next"))
     ap.add_argument("--assets", default="", help="folder with a dry run's release files")

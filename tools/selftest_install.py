@@ -239,6 +239,11 @@ def startup_entry(name: str = brand.RUN_VALUE_NAME) -> str:
 
 
 def main(argv=None) -> int:
+    # The CI step is pwsh: without this the app under test, and every
+    # powershell.exe it starts, inherits PowerShell 7's PSModulePath (see
+    # pyi_runtime.use_windows_powershell_modules).
+    import pyi_runtime
+    pyi_runtime.use_windows_powershell_modules()
     ap = argparse.ArgumentParser()
     ap.add_argument("--setup", required=True)
     ap.add_argument("--onefile", required=True)
