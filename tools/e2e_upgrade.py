@@ -112,9 +112,11 @@ class FakeGitHub:
             "-keyout", f"{w}\\srv.key", "-out", f"{w}\\srv.csr")
         run("x509", "-req", "-in", f"{w}\\srv.csr", "-CA", f"{w}\\ca.crt", "-CAkey", f"{w}\\ca.key",
             "-CAcreateserial", "-days", "2", "-extfile", ext, "-out", f"{w}\\srv.crt")
-        subprocess.run(["powershell", "-NoProfile", "-Command",
-                        f"Import-Certificate -FilePath '{w}\\ca.crt' "
-                        "-CertStoreLocation Cert:\\LocalMachine\\Root | Out-Null"], check=True)
+        # certutil, not Import-Certificate: a Windows PowerShell child of a
+        # pwsh step inherits PowerShell 7's PSModulePath, loads the wrong
+        # Security module and has no Cert: drive (DriveNotFound on the runner).
+        subprocess.run(["certutil", "-f", "-addstore", "Root", f"{w}\\ca.crt"],
+                       check=True, capture_output=True, creationflags=NO_WIN)
         return f"{w}\\srv.crt", f"{w}\\srv.key"
 
     @staticmethod
