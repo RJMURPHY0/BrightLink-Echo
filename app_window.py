@@ -3506,6 +3506,35 @@ class AppWindow:
         # (The old note about grid_remove re-mapping as black regions applied
         # only under WS_EX_COMPOSITED, which is gone for good — see
         # _apply_dark_titlebar.)
+        def _refresh_chrome_and_page():
+            # Inside the swap's freeze: the tab highlight, the gear and the
+            # page's own refresh land in the SAME frame as the page. Done after
+            # the present, each was a second frame (a stale list, then the new
+            # one; the old tab lit over the new page): the split-second glitch
+            # on a page change.
+            # Settings has no tab of its own (the gear lights instead), so the
+            # strip shows none lit there rather than a stale one.
+            self._tab_strip.set_active(self._TAB_OF_PAGE.get(name, name))
+            is_settings = (name == "settings")
+            self._gear_btn.configure(
+                fg=C["accent"] if is_settings else C["subtext"])
+            if name == "settings":
+                # The session can finish restoring after these widgets were built.
+                self._apply_auth_ui()
+                if hasattr(self, "_update_check_btn") and hasattr(self, "_do_update_check"):
+                    # Don't clobber an in-flight check — resetting the label here
+                    # both swallowed the pending result and re-armed the button for
+                    # overlapping checks.
+                    if self._update_check_btn.cget("text") != "Checking...":
+                        self._update_check_btn.configure(
+                            text="Check for Updates", fg=C["accent"], cursor="hand2")
+                        self._update_check_btn.bind("<Button-1>", self._do_update_check)
+            elif name == "learning":
+                self._refresh_library_counts()
+            elif name in self._LIB_SPECS:
+                # Its own _atomic_ui joins this freeze (see _atomic_ui).
+                self._render_library(name)
+
         if name in tab_frames:
             def _swap():
                 for n, f in tab_frames.items():
@@ -3513,6 +3542,10 @@ class AppWindow:
                         f.grid_remove()
                 tab_frames[name].grid()
                 tab_frames[name].tkraise()
+                # The page's widths are real before it redraws (a page never
+                # shown before has width 1 until laid out).
+                self._root.update_idletasks()
+                _refresh_chrome_and_page()
 
             # Freeze, swap, present — the same single-frame contract the
             # login/dashboard swap uses. The old code did the map/unmap live and
@@ -3527,13 +3560,8 @@ class AppWindow:
             except tk.TclError:
                 pass
 
-        # Settings has no tab of its own (the gear lights instead), so the
-        # strip shows none lit there rather than a stale one.
-        self._tab_strip.set_active(self._TAB_OF_PAGE.get(name, name))
-
-        # Gear icon highlight
-        is_settings = (name == "settings")
-        self._gear_btn.configure(fg=C["accent"] if is_settings else C["subtext"])
+        else:
+            _refresh_chrome_and_page()
 
         # History is stale-while-revalidate: its already-drawn cache remains on
         # screen, and a repeat click on the active tab is intentionally a no-op.
@@ -3543,21 +3571,6 @@ class AppWindow:
                 self._root.after(16, self._render_history)
             if previous != "history":
                 self._load_history()
-        elif name == "settings":
-            # The session can finish restoring after these widgets were built.
-            self._apply_auth_ui()
-            if hasattr(self, "_update_check_btn") and hasattr(self, "_do_update_check"):
-                # Don't clobber an in-flight check — resetting the label here
-                # both swallowed the pending result and re-armed the button for
-                # overlapping checks.
-                if self._update_check_btn.cget("text") != "Checking...":
-                    self._update_check_btn.configure(
-                        text="Check for Updates", fg=C["accent"], cursor="hand2")
-                    self._update_check_btn.bind("<Button-1>", self._do_update_check)
-        elif name == "learning":
-            self._refresh_library_counts()
-        elif name in self._LIB_SPECS:
-            self._render_library(name)
 
         # Spacing edit: the gaps on screen changed with the page.
         if getattr(self, "_spacing_edit", False):
@@ -3629,6 +3642,12 @@ class AppWindow:
         map leaves the on-screen bits and Tk's idea of what it has drawn out of
         sync — the intermittent ghost on the returning-user path, where a fast
         restore promotes the dashboard microseconds after deiconify()."""
+        if getattr(self, "_in_atomic", False):
+            # Nested (a page redrawing itself inside a tab swap): join the
+            # outer freeze. Running the full cycle here would switch redraw
+            # back on and present half-way through the outer change.
+            fn()
+            return
         u32 = None
         hwnd = 0
         froze = False

@@ -1090,6 +1090,17 @@ class FloatingPopup:
 
     def _make_window(self, main_root: tk.Tk, real_px: bool) -> tuple:
         """One borderless popup Toplevel; returns (toplevel, winfo_id)."""
+        if real_px:
+            # update_idletasks() below flushes EVERY window's pending work, not
+            # just this one's. A dashboard resize still pending here (the saved
+            # window size, a page swap) was applied in real pixels: on the 150%
+            # laptop the dashboard jumped and shrank to 2/3, its pages clipped
+            # with black beyond (measured 2026-10-07). Flush it in the app's
+            # own context first, so only the new window's work runs inside.
+            try:
+                main_root.update_idletasks()
+            except tk.TclError:
+                pass
         with (_RealPixels() if real_px else _NoContext()):
             win = tk.Toplevel(main_root)
             # Distinct title (never rendered — the window is borderless): a

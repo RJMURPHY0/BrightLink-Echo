@@ -395,5 +395,45 @@ class LiveFallbackPlacementTests(_LiveBase):
         self._check(master)
 
 
+class DashboardUntouchedByPopupStartTests(_LiveBase):
+    """update_idletasks() flushes every window's pending work. The popup's
+    start-up ran it inside _RealPixels, so a dashboard resize still pending
+    (the saved window size, a page swap) was applied in real pixels: on the
+    150% laptop the dashboard jumped and shrank to 2/3, pages clipped with
+    black beyond (2026-10-07)."""
+
+    def test_make_window_flushes_the_app_before_real_pixels(self):
+        import inspect
+        src = inspect.getsource(FloatingPopup._make_window)
+        self.assertLess(src.index("main_root.update_idletasks()"),
+                        src.index("_RealPixels()"))
+
+    def test_pending_dashboard_resize_survives_popup_start(self):
+        scaled = []
+        for (l, t, r, b) in _scaled_monitors():
+            mon = popup_mod.overlay_monitor((l + r) // 2, (t + b) // 2)
+            if mon is not None and mon.scaled != mon.real:
+                scaled.append((l, t))
+        if not scaled:
+            raise unittest.SkipTest("no scaled monitor on this machine")
+        master = self._master()
+        for (l, t) in scaled:
+            with self.subTest(monitor=(l, t)):
+                master.deiconify()
+                master.geometry(f"420x600+{l + 100}+{t + 100}")
+                master.update()
+                master.geometry("460x640")      # still pending, as at start-up
+                p = FloatingPopup()
+                p.initialize(master)
+                for win, _h in p._windows.values():
+                    self.addCleanup(win.destroy)
+                for _ in range(5):
+                    master.update()
+                self.assertEqual((master.winfo_width(), master.winfo_height()),
+                                 (460, 640), "dashboard resized in real pixels")
+                self.assertEqual((master.winfo_x(), master.winfo_y()),
+                                 (l + 100, t + 100), "dashboard jumped")
+
+
 if __name__ == "__main__":
     unittest.main()

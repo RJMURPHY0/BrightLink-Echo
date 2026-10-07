@@ -45,6 +45,49 @@ class SourceInvariantTests(unittest.TestCase):
         self.assertIn("_atomic_ui",
                       inspect.getsource(AppWindow._render_library))
 
+    def test_a_page_change_is_one_frame(self):
+        # The tab highlight, the gear and the page's own refresh (a library
+        # list redraw) run inside the swap's freeze. Run after the present,
+        # each was a second frame: the split-second glitch on a page change.
+        src = inspect.getsource(AppWindow._switch_dash_tab)
+        swap = src[src.index("def _swap():"):src.index("self._atomic_ui(_swap)")]
+        self.assertIn("_refresh_chrome_and_page()", swap)
+        refresh = src[src.index("def _refresh_chrome_and_page"):
+                      src.index("if name in tab_frames:")]
+        for call in ("self._tab_strip.set_active(", "self._gear_btn.configure(",
+                     "self._render_library(name)", "self._apply_auth_ui()"):
+            self.assertIn(call, refresh)
+
+    def test_a_nested_atomic_change_joins_the_outer_freeze(self):
+        # _render_library's own _atomic_ui runs inside the tab swap's. Before,
+        # the inner one ended the freeze (redraw on, present) half-way through.
+        stub = types.SimpleNamespace(_in_atomic=False, _root=None)
+        seen = []
+
+        def outer():
+            AppWindow._atomic_ui(stub, lambda: seen.append(stub._in_atomic))
+            seen.append(stub._in_atomic)
+
+        class Root:
+            def winfo_ismapped(self):
+                return True
+
+            def update_idletasks(self):
+                pass
+
+            def geometry(self, *_a):
+                pass
+
+            def after(self, *_a):
+                pass
+
+        stub._root = Root()
+        stub._top_hwnd = lambda: 0
+        stub._repaint_all = lambda *a, **k: None
+        AppWindow._atomic_ui(stub, outer)
+        self.assertEqual(seen, [True, True])
+        self.assertFalse(stub._in_atomic)
+
     def test_both_pages_are_registered_as_swappable_frames(self):
         src = inspect.getsource(AppWindow._switch_dash_tab)
         self.assertIn('"vocabulary": self._vocabulary_frame', src)
