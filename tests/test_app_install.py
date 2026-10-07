@@ -200,6 +200,19 @@ class UninstallEntryTests(unittest.TestCase):
             dict(current, Publisher="Someone Else"), "1.6.81"))
         self.assertFalse(app_install.entry_is_current({}, "1.6.81"))
 
+    def test_an_entry_that_uninstalls_through_another_exe_is_rewritten(self):
+        # The onefile bridge registers the entry from the legacy folder; the
+        # migration then moves the exe at the same version. Same version, name
+        # and publisher must not keep the stale uninstall path.
+        new = r"C:\x\BrightLink Echo\BrightLink Echo.exe"
+        old = r"C:\x\FTC Whisper\FTC Whisper.exe"
+        current = {"DisplayVersion": "1.8.5", "DisplayName": brand.PRODUCT_NAME,
+                   "Publisher": brand.COMPANY_NAME,
+                   "UninstallString": f'"{old}" --uninstall'}
+        self.assertFalse(app_install.entry_is_current(current, "1.8.5", new))
+        current["UninstallString"] = f'"{new}" --uninstall'
+        self.assertTrue(app_install.entry_is_current(current, "1.8.5", new))
+
     def test_uninstall_string_is_quoted_and_runnable(self):
         v = self._values()
         # The install path contains a space; an unquoted command runs

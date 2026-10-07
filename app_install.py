@@ -373,7 +373,7 @@ def uninstall_values(exe: str, version: str, install_dir: str,
     ]
 
 
-_ENTRY_FIELDS = ("DisplayVersion", "DisplayName", "Publisher")
+_ENTRY_FIELDS = ("DisplayVersion", "DisplayName", "Publisher", "UninstallString")
 
 
 def _registered_entry() -> dict:
@@ -394,13 +394,18 @@ def _registered_entry() -> dict:
     return found
 
 
-def entry_is_current(registered: dict, version: str) -> bool:
-    """False when Installed apps shows a different version, name or publisher.
-    Checking the version alone would leave a renamed product listed under its
-    old name until some later release happened to bump the version."""
+def entry_is_current(registered: dict, version: str, exe: str = "") -> bool:
+    """False when Installed apps shows a different version, name or publisher,
+    or (given *exe*) uninstalls through a different exe. Checking the version
+    alone would leave a renamed product listed under its old name until some
+    later release happened to bump the version; checking the exe catches a
+    copy that moved folders at the same version (the v1.8.5 migration, after
+    the onefile bridge had registered the entry from the legacy folder)."""
     return (registered.get("DisplayVersion") == version
             and registered.get("DisplayName") == brand.PRODUCT_NAME
-            and registered.get("Publisher") == brand.COMPANY_NAME)
+            and registered.get("Publisher") == brand.COMPANY_NAME
+            and (not exe or (registered.get("UninstallString") or "").lower()
+                 == f'"{exe}" --uninstall'.lower()))
 
 
 def _write_uninstall_entry(exe: str, version: str, install_dir: str) -> None:
@@ -637,7 +642,7 @@ def register(exe: str, version: str) -> None:
         print(f"[Install] Shortcut registration skipped: {e}")
 
     try:
-        if not entry_is_current(_registered_entry(), version):
+        if not entry_is_current(_registered_entry(), version, exe):
             _write_uninstall_entry(exe, version, install_dir)
     except Exception as e:
         print(f"[Install] Installed-apps registration skipped: {e}")

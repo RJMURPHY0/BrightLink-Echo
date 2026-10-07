@@ -217,12 +217,19 @@ def task_exists(name: str = brand.TASK_NAME) -> bool:
 
 
 def model_listing(root: str) -> dict:
+    """Every model file with its size and mtime: a re-download changes the
+    mtime. The checksum record (asr_engine._VERIFIED_MARKER) is left out: the
+    installed app writes it the first time it verifies the moved model."""
+    import asr_engine
     base = os.path.join(root, "models")
     out = {}
     for dirpath, _d, names in os.walk(base):
         for n in names:
+            if n == asr_engine._VERIFIED_MARKER:
+                continue
             p = os.path.join(dirpath, n)
-            out[os.path.relpath(p, base)] = os.path.getsize(p)
+            st = os.stat(p)
+            out[os.path.relpath(p, base)] = (st.st_size, st.st_mtime_ns)
     return out
 
 
