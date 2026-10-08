@@ -466,4 +466,3 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "could not label $name" }
             Write-Host "$name  ->  $label"
           }
-          generate_release_notes: true
