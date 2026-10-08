@@ -363,6 +363,15 @@ def scenario_faults(rep: Report, work: str, assets: str, version: str):
         bridge = os.path.join(dl, brand.UPDATE_ASSET)
         shutil.copy(os.path.join(assets, brand.UPDATE_ASSET), bridge)
         subprocess.Popen([bridge], cwd=dl)
+        # Real machines only ever run the bridge from the canonical path (an
+        # old updater swaps it in there and starts it). The Downloads copy puts
+        # it there; restart so that copy is the one running, with its config
+        # beside it. Seeding settings beside the Downloads copy tested nothing.
+        rep.check("bridge copied itself to the canonical path",
+                  wait_for(lambda: ping_version() == version and os.path.exists(canonical()), 240),
+                  canonical())
+        restart()
+
         def bridge_state():
             return {"ping": ping_version(), "canonical": canonical(),
                     "canonical_exists": os.path.exists(canonical()),

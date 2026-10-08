@@ -169,6 +169,30 @@ class ShortcutRenameTests(unittest.TestCase):
         self.assertLess(src.index("rename_shortcuts("), src.index("shortcuts_needed("))
         self.assertIn('new_state["shortcut_name"] = brand.PRODUCT_NAME', src)
 
+    def test_registry_and_legacy_clean_up_come_before_powershell(self):
+        # The shortcut steps start PowerShell, which a busy or antivirus-scanned
+        # machine can hold for minutes; the legacy Installed apps entry and
+        # logon task must already be gone by then (v1.8.5 CI, 2026-10-07).
+        calls = []
+        with tempfile.TemporaryDirectory() as d:
+            exe = os.path.join(d, brand.CANONICAL_EXE_NAME)
+            rec = lambda name, ret=None: (lambda *a, **k: (calls.append(name), ret)[1])  # noqa: E731
+            with mock.patch.object(app_install.sys, "platform", "win32"), \
+                    mock.patch.object(app_install, "_registered_entry", return_value={}), \
+                    mock.patch.object(app_install, "_write_uninstall_entry", rec("entry")), \
+                    mock.patch.object(app_install, "_write_app_paths", rec("app_paths")), \
+                    mock.patch.object(app_install, "legacy_entry_present", return_value=True), \
+                    mock.patch.object(app_install, "remove_legacy_registrations", rec("legacy", [])), \
+                    mock.patch.object(app_install, "start_menu_link", return_value=os.path.join(d, "s.lnk")), \
+                    mock.patch.object(app_install, "desktop_link", return_value=os.path.join(d, "d.lnk")), \
+                    mock.patch.object(app_install, "_write_shortcuts", rec("shortcuts", True)), \
+                    mock.patch.object(app_install, "retarget_legacy_links", rec("retarget", [])), \
+                    mock.patch.object(app_install, "_note"):
+                app_install.register(exe, "1.8.5")
+            self.assertEqual(["entry", "app_paths", "legacy", "shortcuts", "retarget"], calls)
+            # Done once per exe: the next launch skips the legacy steps.
+            self.assertEqual(exe, app_install.load_state(d).get("legacy_cleared_for"))
+
 
 class UninstallEntryTests(unittest.TestCase):
     def _values(self):

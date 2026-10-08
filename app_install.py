@@ -627,31 +627,10 @@ def register(exe: str, version: str) -> None:
     state = load_state(install_dir)
     old_names = previous_names(state)
 
-    try:
-        start_lnk, desk_lnk = start_menu_link(), desktop_link()
-        # A rename first, so an existing shortcut keeps its place (and a
-        # deleted one stays deleted) before deciding what still needs writing.
-        for step in rename_shortcuts([start_lnk, desk_lnk], old_names):
-            print(f"[Install] Shortcut {step}")
-        wanted = shortcuts_needed(state, exe, start_lnk, desk_lnk)
-        if not wanted or _write_shortcuts(wanted, exe):
-            new_state = dict(state)
-            new_state["exe"] = exe
-            new_state["shortcut_name"] = brand.PRODUCT_NAME
-            # Latch on a shortcut that is merely PRESENT too (an upgrading user
-            # already has one from the old installer). Without this the flag
-            # never sticks for them, and the day they delete the shortcut we
-            # put it straight back.
-            new_state["desktop_shortcut"] = bool(
-                state.get("desktop_shortcut")
-                or desk_lnk in wanted
-                or os.path.exists(desk_lnk)
-            )
-            if new_state != state:
-                save_state(install_dir, new_state)
-    except Exception as e:
-        print(f"[Install] Shortcut registration skipped: {e}")
-
+    # Registry first: a few milliseconds, no child processes. The shortcut
+    # steps below start PowerShell, which antivirus or a busy machine can hold
+    # for minutes (CI 2026-10-07: the legacy Installed apps entry and logon
+    # task outlived the whole update check because they came after them).
     try:
         if not entry_is_current(_registered_entry(), version, exe):
             _write_uninstall_entry(exe, version, install_dir)
@@ -671,16 +650,50 @@ def register(exe: str, version: str) -> None:
     # re-run whenever the legacy Installed apps entry is back: a rolled-back
     # migration hands the machine to a legacy-named version, which registers
     # it again on its next launch.
-    state = load_state(install_dir)
-    if state.get("legacy_cleared_for") != exe or legacy_entry_present():
+    legacy_todo = state.get("legacy_cleared_for") != exe or legacy_entry_present()
+    legacy_ok = True
+    if legacy_todo:
         try:
-            steps = remove_legacy_registrations() + retarget_legacy_links(exe)
+            for step in remove_legacy_registrations():
+                _note(step)
+        except Exception as e:
+            legacy_ok = False
+            _note(f"Legacy clean-up skipped: {e}")
+
+    try:
+        start_lnk, desk_lnk = start_menu_link(), desktop_link()
+        # A rename first, so an existing shortcut keeps its place (and a
+        # deleted one stays deleted) before deciding what still needs writing.
+        for step in rename_shortcuts([start_lnk, desk_lnk], old_names):
+            print(f"[Install] Shortcut {step}")
+        wanted = shortcuts_needed(state, exe, start_lnk, desk_lnk)
+        if not wanted or _write_shortcuts(wanted, exe):
+            new_state = dict(load_state(install_dir))
+            new_state["exe"] = exe
+            new_state["shortcut_name"] = brand.PRODUCT_NAME
+            # Latch on a shortcut that is merely PRESENT too (an upgrading user
+            # already has one from the old installer). Without this the flag
+            # never sticks for them, and the day they delete the shortcut we
+            # put it straight back.
+            new_state["desktop_shortcut"] = bool(
+                state.get("desktop_shortcut")
+                or desk_lnk in wanted
+                or os.path.exists(desk_lnk)
+            )
+            if new_state != load_state(install_dir):
+                save_state(install_dir, new_state)
+    except Exception as e:
+        print(f"[Install] Shortcut registration skipped: {e}")
+
+    if legacy_todo:
+        try:
+            steps = retarget_legacy_links(exe)
             for step in steps:
                 _note(step)
-            if not any(step.startswith("could not") for step in steps):
-                save_state(install_dir, dict(state, legacy_cleared_for=exe))
+            if legacy_ok and not any(step.startswith("could not") for step in steps):
+                save_state(install_dir, dict(load_state(install_dir), legacy_cleared_for=exe))
         except Exception as e:
-            _note(f"Legacy clean-up skipped: {e}")
+            _note(f"Shortcut retarget skipped: {e}")
 
 
 # ── Uninstall ────────────────────────────────────────────────────────────────
