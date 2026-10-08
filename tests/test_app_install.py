@@ -169,6 +169,30 @@ class ShortcutRenameTests(unittest.TestCase):
         self.assertLess(src.index("rename_shortcuts("), src.index("shortcuts_needed("))
         self.assertIn('new_state["shortcut_name"] = brand.PRODUCT_NAME', src)
 
+    def test_registry_and_legacy_clean_up_come_before_powershell(self):
+        # The shortcut steps start PowerShell, which a busy or antivirus-scanned
+        # machine can hold for minutes; the legacy Installed apps entry and
+        # logon task must already be gone by then (v1.8.5 CI, 2026-10-07).
+        calls = []
+        with tempfile.TemporaryDirectory() as d:
+            exe = os.path.join(d, brand.CANONICAL_EXE_NAME)
+            rec = lambda name, ret=None: (lambda *a, **k: (calls.append(name), ret)[1])  # noqa: E731
+            with mock.patch.object(app_install.sys, "platform", "win32"), \
+                    mock.patch.object(app_install, "_registered_entry", return_value={}), \
+                    mock.patch.object(app_install, "_write_uninstall_entry", rec("entry")), \
+                    mock.patch.object(app_install, "_write_app_paths", rec("app_paths")), \
+                    mock.patch.object(app_install, "legacy_entry_present", return_value=True), \
+                    mock.patch.object(app_install, "remove_legacy_registrations", rec("legacy", [])), \
+                    mock.patch.object(app_install, "start_menu_link", return_value=os.path.join(d, "s.lnk")), \
+                    mock.patch.object(app_install, "desktop_link", return_value=os.path.join(d, "d.lnk")), \
+                    mock.patch.object(app_install, "_write_shortcuts", rec("shortcuts", True)), \
+                    mock.patch.object(app_install, "retarget_legacy_links", rec("retarget", [])), \
+                    mock.patch.object(app_install, "_note"):
+                app_install.register(exe, "1.8.5")
+            self.assertEqual(["entry", "app_paths", "legacy", "shortcuts", "retarget"], calls)
+            # Done once per exe: the next launch skips the legacy steps.
+            self.assertEqual(exe, app_install.load_state(d).get("legacy_cleared_for"))
+
 
 class UninstallEntryTests(unittest.TestCase):
     def _values(self):
@@ -199,6 +223,19 @@ class UninstallEntryTests(unittest.TestCase):
         self.assertFalse(app_install.entry_is_current(
             dict(current, Publisher="Someone Else"), "1.6.81"))
         self.assertFalse(app_install.entry_is_current({}, "1.6.81"))
+
+    def test_an_entry_that_uninstalls_through_another_exe_is_rewritten(self):
+        # The onefile bridge registers the entry from the legacy folder; the
+        # migration then moves the exe at the same version. Same version, name
+        # and publisher must not keep the stale uninstall path.
+        new = r"C:\x\BrightLink Echo\BrightLink Echo.exe"
+        old = r"C:\x\FTC Whisper\FTC Whisper.exe"
+        current = {"DisplayVersion": "1.8.5", "DisplayName": brand.PRODUCT_NAME,
+                   "Publisher": brand.COMPANY_NAME,
+                   "UninstallString": f'"{old}" --uninstall'}
+        self.assertFalse(app_install.entry_is_current(current, "1.8.5", new))
+        current["UninstallString"] = f'"{new}" --uninstall'
+        self.assertTrue(app_install.entry_is_current(current, "1.8.5", new))
 
     def test_uninstall_string_is_quoted_and_runnable(self):
         v = self._values()
@@ -364,6 +401,47 @@ class AppWiringTests(unittest.TestCase):
             src.index("_ensure_single_instance()"),
             "the resident instance would kill the uninstaller",
         )
+
+
+
+class LegacyRegistrationTests(unittest.TestCase):
+    """v1.8.5 moved the on-disk names: what older versions registered under
+    the legacy ones is removed once, and every link to the legacy exe is
+    pointed at the current one."""
+
+    def test_links_to_the_legacy_exe_are_retargeted_and_nothing_else(self):
+        ps = app_install.retarget_script(
+            [r"C:\Users\a\Desktop", r"C:\Users\a\Pinned\TaskBar"],
+            [r"C:\Users\a\AppData\Local\Old Name\Old Name.exe"],
+            r"C:\Users\a\AppData\Local\New Name\New Name.exe")
+        self.assertIn("$old -contains $l.TargetPath", ps)
+        self.assertIn(r"'C:\Users\a\Pinned\TaskBar'", ps)
+        self.assertIn(r"$l.TargetPath = 'C:\Users\a\AppData\Local\New Name\New Name.exe'", ps)
+        # It never creates, renames or deletes a link.
+        for verb in ("Remove-Item", "Rename-Item", "Move-Item", "New-Item"):
+            self.assertNotIn(verb, ps)
+
+    def test_pins_are_among_the_folders_checked(self):
+        dirs = [d.lower() for d in app_install.pinned_link_dirs()]
+        self.assertTrue(any(d.endswith("user pinned\\taskbar") for d in dirs), dirs)
+        self.assertTrue(any(d.endswith("user pinned\\startmenu") for d in dirs), dirs)
+
+    def test_the_legacy_keys_are_not_the_current_ones(self):
+        self.assertNotEqual(app_install.LEGACY_UNINSTALL_KEY.lower(), app_install.UNINSTALL_KEY.lower())
+        self.assertNotEqual(app_install.LEGACY_APP_PATHS_KEY.lower(), app_install.APP_PATHS_KEY.lower())
+
+    def test_the_clean_up_is_latched_per_exe(self):
+        src = inspect.getsource(app_install.register)
+        self.assertIn('state.get("legacy_cleared_for") != exe or legacy_entry_present()', src)
+        self.assertIn("legacy_cleared_for=exe", src)
+
+    def test_the_uninstaller_can_delete_either_folder(self):
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": r"C:\L", "APPDATA": r"C:\R"}):
+            import brand
+            for base in (r"C:\L", r"C:\R"):
+                for name in (brand.DATA_DIR_NAME, brand.LEGACY_DATA_DIR_NAME):
+                    self.assertTrue(app_install.safe_to_delete(os.path.join(base, name)))
+            self.assertFalse(app_install.safe_to_delete(r"C:\L\Something Else"))
 
 
 if __name__ == "__main__":

@@ -83,35 +83,110 @@ def _popup(root, offset=30, align="centre", height="low"):
     p._popup_height = height
     p._popup_offset = offset
     p._last_geometry = ""
-    p._dpi_scale = lambda: (1.0, 1.0)
     return p
 
 
+# The GIGABYTE laptop alone at 150% (2026-10-07, %TEMP%\ftc_pos_debug.log):
+# the pill was asked for (1774,2199) and dragged back up to y=1472.
+GIGABYTE = OverlayMonitor(scaled=(0, 0, 1707, 1067),
+                          real=(0, 0, 2560, 1600),
+                          work=(0, 0, 2560, 1528))
+
+
 class RepositionRealPixelTests(unittest.TestCase):
-    def _place(self, p, *args, **kw):
+    def _place(self, p, *args, mon=LAPTOP, **kw):
         with mock.patch.object(popup_mod, "_overlay_monitor_from_handle",
-                               return_value=LAPTOP), \
+                               return_value=mon), \
+             mock.patch.object(FloatingPopup, "_is_real_pixel_window",
+                               lambda self: True), \
+             mock.patch.object(popup_mod, "_RealPixels",
+                               popup_mod.contextlib.nullcontext), \
              mock.patch.object(popup_mod, "pos_log"):
+            p._start_size_watch = lambda: None
             FloatingPopup._reposition(p, *args, **kw)
         return p.root.geometries[-1]
+
+    def _xy(self, g):
+        x, y = g.split("+")[1:]
+        return int(x), int(y)
 
     def test_pill_sits_bottom_centre_of_the_laptop_in_real_pixels(self):
         p = _popup(_FakeRoot())
         g = self._place(p, 1522, 1780)
-        # centre: 949 + (1920 - 291) // 2; low: 2208 - 56 - 6 - 30
-        self.assertEqual("+1763+2116", g)
+        # centre: 949 + (1920 - 291) // 2; low: 2208 - 56 - 6*1.5 - 30*1.5
+        self.assertEqual("291x56+1763+2098", g)
+
+    def test_pill_is_centred_on_the_150_percent_laptop_on_its_own(self):
+        # Shipped: x=1774, three quarters of the way across, because the
+        # real-pixel work area was multiplied by 1.5 a second time.
+        p = _popup(_FakeRoot(), offset=popup_mod._POPUP_OFFSET_DEFAULT)
+        x, y = self._xy(self._place(p, 919, 961, mon=GIGABYTE))
+        self.assertEqual((2560 - 291) // 2, x)
+        self.assertEqual(1528 - 56 - 9 - 12, y)
+
+    def test_every_display_scale_centres_and_keeps_the_same_gap(self):
+        for scale in (1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 3.0):
+            for rw, rh in ((1366, 768), (1920, 1080), (2560, 1600),
+                           (3840, 2160), (1280, 1024)):
+                sw, sh = round(rw / scale), round(rh / scale)
+                bar = round(48 * scale)
+                mon = OverlayMonitor((0, 0, sw, sh), (0, 0, rw, rh),
+                                     (0, 0, rw, rh - bar))
+                with self.subTest(scale=scale, size=(rw, rh)):
+                    p = _popup(_FakeRoot(),
+                               offset=popup_mod._POPUP_OFFSET_DEFAULT)
+                    x, y = self._xy(self._place(p, sw // 2, sh // 2, mon=mon))
+                    self.assertLessEqual(abs(x + 291 / 2 - rw / 2), 1)
+                    gap_logical = (rh - bar - (y + 56)) / (rh / sh)
+                    self.assertAlmostEqual(
+                        6 + popup_mod._POPUP_OFFSET_DEFAULT, gap_logical,
+                        delta=1.5)
+
+    def test_placement_never_reads_system_metrics(self):
+        # GetSystemMetrics and winfo_screenwidth answer in different DPI
+        # contexts; their ratio is what shoved the pill off-centre.
+        import inspect
+        for fn in (FloatingPopup._reposition_now, FloatingPopup._place_xy):
+            self.assertNotIn("GetSystemMetrics", inspect.getsource(fn))
 
     def test_the_pill_keeps_its_unscaled_size(self):
         # Ryan likes the pill's size as it is: placement must not resize it.
         p = _popup(_FakeRoot())
-        self._place(p, 1522, 1780)
-        self.assertFalse(any("x" in g for g in p.root.geometries))
+        g = self._place(p, 1522, 1780)
+        self.assertTrue(g.startswith("291x56+"), g)
 
     def test_near_cursor_anchor_is_converted_to_real_pixels(self):
         p = _popup(_FakeRoot(w=200, h=100))
         g = self._place(p, 1443, 1500, near_cursor=True)
         rx, ry = LAPTOP.real_point(1443, 1500)
-        self.assertEqual(f"+{rx - 100}+{ry + 28}", g)
+        self.assertEqual(f"200x100+{rx - 100}+{ry + 42}", g)  # 28 * 1.5
+
+
+class PillOffsetDefaultTests(unittest.TestCase):
+    def _load(self, value):
+        import json
+        import tempfile
+        import config as config_mod
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"popup_offset": value}, f)
+        return config_mod.Config.load(path).popup_offset
+
+    def test_config_and_popup_agree_on_the_default(self):
+        import config as config_mod
+        self.assertEqual(config_mod.POPUP_OFFSET_DEFAULT,
+                         popup_mod._POPUP_OFFSET_DEFAULT)
+        self.assertEqual(config_mod.POPUP_OFFSET_DEFAULT,
+                         config_mod.Config().popup_offset)
+
+    def test_the_old_untouched_default_moves_to_the_new_one(self):
+        import config as config_mod
+        self.assertEqual(config_mod.POPUP_OFFSET_DEFAULT, self._load(30))
+
+    def test_a_pill_someone_moved_stays_where_they_put_it(self):
+        for v in (48, 12, -6, 66):
+            self.assertEqual(v, self._load(v))
 
 
 def _scaled_monitors():
@@ -368,7 +443,6 @@ class LiveFallbackPlacementTests(_LiveBase):
         p = _popup(top)
         p._popup_hwnd = top.winfo_id()
         p._repaint_popup = lambda: None
-        del p._dpi_scale            # the real one
         self.assertFalse(p._is_real_pixel_window())
         hwnd = ctypes.WinDLL("user32").GetAncestor(W.HWND(top.winfo_id()), 2)
         for (l, t, r, b) in _scaled_monitors():

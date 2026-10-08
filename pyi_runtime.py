@@ -33,7 +33,9 @@ import os
 import sys
 
 # Set on the one relaunch we perform, so a relaunch can never loop.
-GUARD_VAR = "FTC_WHISPER_RUNTIME_RESET"
+GUARD_VAR = "BRIGHTLINK_ECHO_RUNTIME_RESET"
+# The same guard as v1.8.0 and older named it: stripped from a launch too.
+_LEGACY_GUARD_VAR = "FTC_WHISPER_RUNTIME_RESET"
 _RESET_VAR = "PYINSTALLER_RESET_ENVIRONMENT"
 
 
@@ -43,10 +45,45 @@ def clean_launch_env(base=None) -> dict:
     and our relaunch guard dropped so the child can still heal itself."""
     env = dict(os.environ if base is None else base)
     for key in list(env):
-        if key.upper().startswith("_PYI_") or key.upper() == GUARD_VAR:
+        if key.upper().startswith("_PYI_") or key.upper() in (GUARD_VAR, _LEGACY_GUARD_VAR):
             del env[key]
     env[_RESET_VAR] = "1"
     return env
+
+
+def windows_powershell_module_path(value: str) -> str:
+    """*value* (a PSModulePath) without PowerShell 7's module folders.
+
+    A process started from a PowerShell 7 window inherits pwsh's
+    PSModulePath. Every powershell.exe (5.1) we start then loads pwsh's
+    Security and Utility modules, which it cannot use: Get-AuthenticodeSignature
+    read every installer as "no signer" (the update refused), Get-FileHash
+    returned nothing (an old swap script refused the bridge) and the Cert:
+    drive was missing (CI migration test, 2026-10-07). Windows PowerShell's own
+    folders all say WindowsPowerShell; pwsh's say PowerShell."""
+    keep = []
+    for part in (value or "").split(os.pathsep):
+        low = part.replace("/", "\\").lower().rstrip("\\")
+        if not part.strip():
+            continue
+        if "\\powershell\\" in low + "\\" and "\\windowspowershell" not in low:
+            continue
+        keep.append(part)
+    return os.pathsep.join(keep)
+
+
+def use_windows_powershell_modules(environ=None) -> None:
+    """Make every powershell.exe this process starts load Windows
+    PowerShell's own modules (see windows_powershell_module_path)."""
+    env = os.environ if environ is None else environ
+    value = env.get("PSModulePath")
+    if value is None:
+        return
+    cleaned = windows_powershell_module_path(value)
+    if cleaned:
+        env["PSModulePath"] = cleaned
+    else:
+        env.pop("PSModulePath", None)
 
 
 def _norm(path: str) -> str:

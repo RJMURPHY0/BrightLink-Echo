@@ -273,7 +273,7 @@ all-or-nothing. Full design: `docs/decisions/release-updater.md`, 2026-09-29.
 | `installer/activate.ps1` | Switches versions all or nothing, with rollback |
 | `installer/echo.iss` | The Inno Setup installer (built by `tools/build_installer.py`) |
 | `config.py` | `Config` dataclass → `config.json` |
-| `ftc_whisper.spec` | PyInstaller build: onefile bridge + onedir installed layout (keys sanitised at build time) |
+| `echo.spec` | PyInstaller build: onefile bridge + onedir installed layout (keys sanitised at build time) |
 
 ---
 

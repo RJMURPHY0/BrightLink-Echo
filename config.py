@@ -1,5 +1,5 @@
 """
-Configuration management for FTC Whisper.
+Configuration management for BrightLink Echo.
 Loads/saves settings from a JSON file with sensible defaults.
 
 When running as a PyInstaller bundle:
@@ -119,6 +119,13 @@ def _valid_impact_range(value) -> bool:
     return value in IMPACT_RANGES or parse_custom_range(value) is not None
 
 
+# How far the recording pill sits above its baseline (just over the taskbar),
+# in logical pixels; popup.py scales it to the display and keeps the same
+# value as its _POPUP_OFFSET_DEFAULT (tests/test_overlay_real_pixels.py).
+POPUP_OFFSET_DEFAULT = 8
+_LEGACY_POPUP_OFFSET_DEFAULT = 30
+
+
 @dataclass
 class Config:
     """Application configuration with defaults."""
@@ -157,7 +164,7 @@ class Config:
     parakeet_version: str = "v2"  # Parakeet model: "v2" (English; the more accurate for English, 6.05% vs 6.34% avg WER) or "v3" (multilingual); switching triggers a one-time ~660 MB download. v2 is pinned to an exact commit and SHA-256 per file
     show_popup: bool = True  # Show the cursor-icon popup (Insert/Replace/Upgrade) after each dictation; off = text is injected silently with no popup
     popup_height: str = "low"  # Vertical position of the popup: "low" (near the taskbar, default — out of the way of chatbot input boxes), "medium" (mid-screen), or "high" (near the top, above a chatbot window)
-    popup_offset: int = 30  # Fine-nudge (px) that lifts the fixed popup ABOVE its popup_height baseline, so the pill clears the taskbar by default; the ▴▾ arrows on the recording pill adjust it live and it sticks. 0 = hug the baseline, NEGATIVE = pushed down into the taskbar strip (clamped to the monitor edge, not the work area)
+    popup_offset: int = POPUP_OFFSET_DEFAULT  # Fine-nudge (logical px, scaled with the display) that lifts the fixed popup ABOVE its popup_height baseline, so the pill clears the taskbar by default; the ▴▾ arrows on the recording pill adjust it live and it sticks. 0 = hug the baseline, NEGATIVE = pushed down into the taskbar strip (clamped to the monitor edge, not the work area)
     popup_align: str = "centre"  # Horizontal placement of the fixed popup: "left" | "centre" (default) | "right"; the ◂ ▸ arrows on the recording pill move it and it sticks. This shipped default is the first-install position for every user
     show_pill_arrows: bool = True  # Show the ▴▾◂▸ nudge arrows on the recording pill; off = clean pill (the saved position still applies)
     badge_dismiss_on_key: bool = True  # The post-dictation ✓ badge disappears the moment you press any key (modifiers and auto-repeat excluded); off = it stays until its timeout, the ✕, or you switch app
@@ -377,7 +384,14 @@ class Config:
                 try:
                     config.popup_offset = max(-120, min(int(config.popup_offset), 400))
                 except (TypeError, ValueError):
-                    config.popup_offset = 30
+                    config.popup_offset = POPUP_OFFSET_DEFAULT
+                # 30 was the shipped default up to v1.8.4, saved into every
+                # config whether or not anyone touched the arrows (the arrows
+                # step by 18, so only an untouched pill sits at exactly 30). It
+                # floated the pill too high once the lift scaled with the
+                # display, so an untouched pill moves to the current default.
+                if config.popup_offset == _LEGACY_POPUP_OFFSET_DEFAULT:
+                    config.popup_offset = POPUP_OFFSET_DEFAULT
                 # Horizontal alignment must be a known token; coerce anything
                 # else back to centre so a stray value never breaks _reposition().
                 if config.popup_align not in ("left", "centre", "right"):

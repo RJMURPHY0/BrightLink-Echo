@@ -1,9 +1,9 @@
 """
-Per-account dictation impact stats for FTC Whisper.
+Per-account dictation impact stats for BrightLink Echo.
 
 Powers the Home tab "Your impact" cards: time saved, day streak and
 today's word count. Local-first — every dictation lands in a per-user
-daily aggregate in %APPDATA%\\FTC Whisper\\stats.json synchronously, so
+daily aggregate in %APPDATA%\\BrightLink Echo\\stats.json synchronously, so
 the cards update instantly and work fully offline. When signed in, the
 same aggregates sync to the `user_daily_stats` table (one tiny row per
 user per day, RLS-scoped to the account) so the numbers follow the
@@ -15,6 +15,7 @@ huge history can never block the app or fan out into a big query.
 import datetime
 import json
 import brand
+import data_paths
 import os
 import threading
 
@@ -39,8 +40,7 @@ _MAX_DAYS_KEPT = 1100
 
 
 def _stats_path() -> str:
-    app_data = os.environ.get("APPDATA") or os.path.expanduser("~")
-    folder = os.path.join(app_data, brand.DATA_DIR_NAME)
+    folder = data_paths.roaming_dir()
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, "stats.json")
 

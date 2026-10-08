@@ -662,8 +662,8 @@ _site_state = {"fetching": False, "last_attempt": 0.0,
 
 
 def _site_icon_path() -> str:
-    root = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    return os.path.join(root, brand.DATA_DIR_NAME, "icons", "crm-favicon.png")
+    import data_paths
+    return os.path.join(data_paths.local_dir(), "icons", "crm-favicon.png")
 
 
 def is_crm_tab(app_name: str, app_exe: str) -> bool:

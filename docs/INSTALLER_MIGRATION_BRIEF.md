@@ -45,7 +45,7 @@ That causes two problems:
 
 ## 3. How it works today (facts, with locations)
 
-### Build: `ftc_whisper.spec`
+### Build: `echo.spec`
 - It is onefile: `EXE(...)` takes binaries, zipfiles and datas, and there is no `COLLECT`.
 - Settings: `name=_brand.EXE_BASENAME` ("FTC Whisper"), `upx=False`, `runtime_tmpdir='%LOCALAPPDATA%\\FTC Whisper\\runtime'`, `console=False`, icon `exe_icon.ico`, and version info rendered from `version_info.txt` through `brand.render_version_info`.
 - It **generates** the bundled `config.json` from the `Config` dataclass defaults into `build/sanitized/config.json`. The frozen app bootstraps from `sys._MEIPASS/config.json`.
@@ -54,7 +54,7 @@ That causes two problems:
 
 ### CI: `.github/workflows/build-release.yml`
 - The `check` job reads `APP_VERSION` from `app.py`. It only builds if no release exists for that version. A tag push forces a build; `workflow_dispatch` is a **dry run** unless `publish` is ticked.
-- The build uses `uv pip install ... -c constraints.txt` (never remove the `-c`), then `pyinstaller --noconfirm --clean ftc_whisper.spec`.
+- The build uses `uv pip install ... -c constraints.txt` (never remove the `-c`), then `pyinstaller --noconfirm --clean echo.spec`.
 - Signing:
   - `azure/login` uses OIDC.
   - `azure/artifact-signing-action@v2.0.0` signs **only `*.exe` directly in `dist\`**. It is not recursive, so a onedir subfolder or an installer in another folder will not be signed unless you change this.

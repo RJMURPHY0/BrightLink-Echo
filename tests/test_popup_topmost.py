@@ -256,7 +256,7 @@ class PositionNudgeTests(unittest.TestCase):
         # The offset is what clears the pill off the taskbar; it must be applied
         # to the fixed y (and the on-screen clamp below still protects the edge).
         src = inspect.getsource(FloatingPopup._place_xy)
-        self.assertIn("y -= self._popup_offset", src)
+        self.assertIn("y -= round(self._popup_offset * py)", src)
 
     # ── Horizontal ◂ ▸ arrows ──────────────────────────────────────────────
     def test_left_steps_toward_the_left_and_persists(self):

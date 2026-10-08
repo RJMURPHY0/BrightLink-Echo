@@ -55,6 +55,43 @@ class CleanEnvTests(unittest.TestCase):
         self.assertEqual(base, CHILD_ENV)
 
 
+class WindowsPowerShellModulesTests(unittest.TestCase):
+    PS7 = ";".join([
+        r"C:\Users\r\Documents\PowerShell\Modules",
+        r"C:\Program Files\PowerShell\Modules",
+        r"c:\program files\powershell\7\Modules",
+        r"C:\Program Files\WindowsPowerShell\Modules",
+        r"C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules",
+        r"C:\Program Files (x86)\Some Vendor\Modules",
+    ])
+
+    def test_pwsh_folders_are_dropped_and_the_rest_kept(self):
+        got = R.windows_powershell_module_path(self.PS7).split(";")
+        self.assertEqual([
+            r"C:\Program Files\WindowsPowerShell\Modules",
+            r"C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules",
+            r"C:\Program Files (x86)\Some Vendor\Modules",
+        ], got)
+
+    def test_environment_is_cleaned_in_place(self):
+        env = {"PSModulePath": self.PS7}
+        R.use_windows_powershell_modules(env)
+        self.assertNotIn(r"powershell\7", env["PSModulePath"].lower())
+        self.assertIn("WindowsPowerShell", env["PSModulePath"])
+
+    def test_only_pwsh_folders_means_no_variable(self):
+        env = {"PSModulePath": r"C:\Program Files\PowerShell\7\Modules"}
+        R.use_windows_powershell_modules(env)
+        self.assertNotIn("PSModulePath", env)
+
+    def test_app_cleans_it_before_any_project_import(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "app.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertLess(src.index("use_windows_powershell_modules()"),
+                        src.index("\nimport brand\n"))
+
+
 class ForeignRuntimeTests(unittest.TestCase):
     def check(self, parent_image, environ=None, frozen=True):
         return R.running_on_foreign_runtime(

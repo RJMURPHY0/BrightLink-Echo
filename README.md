@@ -1,10 +1,6 @@
 # BrightLink Echo
 
-*Formerly FTC Whisper.*
-
-> **[⬇ Install BrightLink Echo](https://github.com/RJMURPHY0/BrightLink-Echo/releases/latest)**
->
-> [Direct download (always latest)](https://github.com/RJMURPHY0/BrightLink-Echo/releases/latest/download/BrightLink-Echo.exe)
+> **[⬇ Install BrightLink Echo](https://github.com/RJMURPHY0/BrightLink-Echo/releases/latest/download/BrightLink-Echo.exe)**
 >
 > Digitally signed by **BRIGHTLINK (OS) LTD**. Windows may still show an "unrecognised app" warning on first run — click **More info → Run anyway**. That prompt appears because the signing certificate is new, and it stops once enough people have installed.
 

@@ -9,16 +9,22 @@ the Installed apps entry are re-registered from these values on every launch
 (app_install.register), and the first launch after a rename says so
 (app.py _announce_update_if_any).
 
-FROZEN identifiers are plumbing that installed copies, other apps and the
-auto-updater find by name. They keep their original "FTC Whisper" values on
-purpose:
-  * the data folders hold the ~660 MB model, the encrypted session, history
-    and recordings, and every version looks for them by name;
-  * taskbar pins point at the canonical exe path;
-  * every installed updater downloads UPDATE_ASSET from GITHUB_REPO, and the
-    BrightLink CRM opens URL_SCHEME and calls the local server;
-  * the mutex, the logon task and the registry keys are how a new version
-    finds what an older one left behind.
+ON-DISK names (folders, exe, launchers, registry keys, mutex) moved from the
+old product name to the current one in v1.8.5, and installed copies moved
+with them: installer/activate.ps1 renames the old folders during the update
+(and puts them back if anything fails), and every launch replaces the old
+launchers and registry entries (app_install.register). The old values stay in
+the LEGACY block only so migration and clean-up can find what an older
+version left behind. data_paths.py picks the folder a machine really uses.
+
+FROZEN identifiers are plumbing that older copies, other apps and the
+auto-updater find by name, so they never change:
+  * every pre-1.8 updater downloads UPDATE_ASSET from GITHUB_REPO, and v1.8.0
+    copies download LEGACY_SETUP_UPDATE_ASSET and LEGACY_ROLLOUT_ASSET, so all
+    three stay published on every release;
+  * the BrightLink CRM opens LEGACY_URL_SCHEME (both schemes are registered);
+  * taskbar pins group under APP_USER_MODEL_ID;
+  * SmartScreen reputation is bound to SIGNER_SUBJECT.
 Changing any of them strands existing installs. tests/test_brand.py pins them.
 
 Nothing is imported from the project here: the PyInstaller spec, the
@@ -61,25 +67,54 @@ LEGACY_PRODUCT_NAMES = ("FTC Whisper",)
 DOWNLOAD_ASSET = "-".join(PRODUCT_NAME.split()) + ".exe"
 
 
+# ── On-disk identity (moved from the LEGACY names below in v1.8.5) ──────────
+
+DATA_DIR_NAME = "BrightLink Echo"         # %LOCALAPPDATA%\<this>, %APPDATA%\<this>
+EXE_BASENAME = "BrightLink Echo"          # PyInstaller name=, so dist\BrightLink Echo.exe
+CANONICAL_EXE_NAME = EXE_BASENAME + ".exe"  # the installed exe every launcher targets
+MUTEX_NAME = "Global\\BrightLink_Echo_SingleInstance"
+TASK_NAME = "BrightLink Echo"             # logon task: the early sign-in launcher
+RUN_VALUE_NAME = "BrightLink Echo"        # HKCU Run entry: what Task Manager lists
+URL_SCHEME = "brightlinkecho"             # brightlinkecho://launch
+UNINSTALL_KEY_NAME = "BrightLinkEcho"     # HKCU ...\Uninstall\<this>
+SETUP_MUTEX = "BrightLinkEchoSetup"       # the installer's own single-instance mutex
+FILE_SLUG = "brightlink_echo"             # temp scripts and logs the updater writes
+# Written into the new local data folder once the legacy one has moved into it
+# (installer/activate.ps1). Its presence makes the new folder authoritative
+# even if a locked leftover of the old one survived.
+MIGRATED_MARKER = "migrated.json"
+
+# ── Legacy on-disk identity: what v1.8.4 and older left behind ──────────────
+# Read only by migration, clean-up and the pre-1.8 onefile bridge (which runs
+# inside the legacy folder until the rollout moves it). Never name anything new
+# after these.
+
+LEGACY_DATA_DIR_NAME = "FTC Whisper"
+LEGACY_EXE_BASENAME = "FTC Whisper"
+LEGACY_CANONICAL_EXE_NAME = LEGACY_EXE_BASENAME + ".exe"
+LEGACY_MUTEX_NAME = "Global\\FTC_Whisper_SingleInstance"
+LEGACY_TASK_NAME = "FTC Whisper"
+LEGACY_RUN_VALUE_NAME = "FTC Whisper"
+LEGACY_URL_SCHEME = "ftcwhisper"          # the CRM still opens ftcwhisper://launch
+LEGACY_UNINSTALL_KEY_NAME = "FTCWhisper"
+LEGACY_SETUP_MUTEX = "FTCWhisperSetup"
+LEGACY_FILE_SLUG = "ftc_whisper"
+
 # ── Frozen: never change these (see the module docstring) ───────────────────
 
-DATA_DIR_NAME = "FTC Whisper"             # %LOCALAPPDATA%\<this>, %APPDATA%\<this>
-EXE_BASENAME = "FTC Whisper"              # PyInstaller name=, so dist\FTC Whisper.exe
-CANONICAL_EXE_NAME = EXE_BASENAME + ".exe"  # the installed exe every launcher targets
-MUTEX_NAME = "Global\\FTC_Whisper_SingleInstance"
-TASK_NAME = "FTC Whisper"                 # logon task: the early sign-in launcher
-RUN_VALUE_NAME = "FTC Whisper"            # HKCU Run entry: what Task Manager lists
-URL_SCHEME = "ftcwhisper"                 # the CRM opens ftcwhisper://launch
-UNINSTALL_KEY_NAME = "FTCWhisper"         # HKCU ...\Uninstall\<this>
-UPDATE_ASSET = "FTC-Whisper.exe"          # what every installed updater downloads
+UPDATE_ASSET = "FTC-Whisper.exe"          # what every pre-1.8 updater downloads
 # From v1.8.0 UPDATE_ASSET is the "bridge": a whole onefile app that every
 # pre-1.8 updater can still install, and that then moves the machine to the
 # installed (onedir) layout. Installed copies update through the installer.
-SETUP_UPDATE_ASSET = "FTC-Whisper-Setup.exe"   # the installer, as updaters fetch it
-ROLLOUT_ASSET = "FTC-Whisper-rollout.json"     # how much of the fleet the bridge may migrate
-# The installed layout: <DATA_DIR>\FTC Whisper.exe runs on <DATA_DIR>\app-<version>\
-# (PyInstaller contents_directory). An update is laid out in pending-<version>\
-# first and only then moved into place.
+SETUP_UPDATE_ASSET = "BrightLink-Echo-Setup.exe"   # the installer, as v1.8.5+ fetches it
+ROLLOUT_ASSET = "BrightLink-Echo-rollout.json"     # how much of the fleet the bridge may migrate
+# The same two files under the names v1.8.0 to v1.8.4 copies fetch. CI publishes them on
+# every release for as long as a v1.8.0 to v1.8.4 copy may still be out there.
+LEGACY_SETUP_UPDATE_ASSET = "FTC-Whisper-Setup.exe"
+LEGACY_ROLLOUT_ASSET = "FTC-Whisper-rollout.json"
+# The installed layout: <DATA_DIR>\<CANONICAL_EXE_NAME> runs on
+# <DATA_DIR>\app-<version>\ (PyInstaller contents_directory). An update is laid
+# out in pending-<version>\ first and only then moved into place.
 CONTENTS_DIR_PREFIX = "app-"
 PENDING_DIR_PREFIX = "pending-"
 # Every exe we ship is signed by exactly this certificate subject. SmartScreen
@@ -89,14 +124,15 @@ SIGNER_SUBJECT = ("CN=BRIGHTLINK (OS) LTD, O=BRIGHTLINK (OS) LTD, L=Syston, "
                   "S=Leicester, C=GB")
 # Windows groups the taskbar button, pins and notifications under this id.
 # Its visible name comes from HKCU\Software\Classes\AppUserModelId\<this>
-# (app_install.register_notification_identity), so it never needs to change.
+# (app_install.register_notification_identity), so it never needs to change,
+# and changing it would split every existing taskbar pin into a second button.
 APP_USER_MODEL_ID = "FTC.Whisper"
 # Renamed from RJMURPHY0/FTC_Whisper on 2026-09-22. Builds up to v1.6.86 still
 # ask for the old name and reach this repo through GitHub's redirect, which
 # lasts only while nothing else is ever called FTC_Whisper on this account.
 GITHUB_REPO = "RJMURPHY0/BrightLink-Echo"
-HTTP_USER_AGENT = "FTC-Whisper"
-UPDATER_USER_AGENT = "FTC-Whisper-Updater/1.0"
+HTTP_USER_AGENT = "BrightLink-Echo"
+UPDATER_USER_AGENT = "BrightLink-Echo-Updater/1.0"
 # The name every build shipped under before builds recorded their own name
 # (last-product-name.txt). An update from one of those announces a rename from
 # this, whatever LEGACY_PRODUCT_NAMES grows into later.

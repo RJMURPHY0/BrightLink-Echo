@@ -218,6 +218,22 @@ class StalePathTests(unittest.TestCase):
         self.assertNotIn("models", names)
         self.assertNotIn("phrases", names)
 
+    def test_a_legacy_leftover_goes_only_once_this_folder_replaced_it(self):
+        import brand
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        new = os.path.join(base, brand.DATA_DIR_NAME)
+        legacy = os.path.join(base, brand.LEGACY_DATA_DIR_NAME)
+        os.makedirs(os.path.join(legacy, "runtime"))
+        os.makedirs(new)
+        # Not migrated (no marker): the legacy folder may be what is in use.
+        self.assertNotIn(legacy, il.stale_paths(new, "app-1.8.1"))
+        with open(os.path.join(new, brand.MIGRATED_MARKER), "w") as f:
+            f.write("{}")
+        self.assertIn(legacy, il.stale_paths(new, "app-1.8.1"))
+        # Never from any other folder.
+        self.assertNotIn(legacy, il.stale_paths(self.dir, "app-1.8.1"))
+
     def test_the_folder_a_pending_rollback_needs_is_kept(self):
         _exe_with_contents(il.canonical_exe(self.dir) + il.PREVIOUS_SUFFIX, "app-1.8.0")
         self.assertNotIn("app-1.8.0", self._names("app-1.8.1"))

@@ -35,9 +35,17 @@ class InstallFlagTests(unittest.TestCase):
 
 
 class SilentInstallTests(unittest.TestCase):
-    def _run(self, intact: bool, start: bool = True):
+    def _run(self, intact: bool, start: bool = True, task_manager=None, argv=("x",)):
         calls = []
+
+        def task_manager_state():
+            calls.append("task-manager")
+            return task_manager
+
         with mock.patch.object(sys, "frozen", True, create=True), \
+             mock.patch.object(sys, "argv", list(argv)), \
+             mock.patch.object(app_mod, "_apply_installer_choices", lambda: None), \
+             mock.patch.object(app_mod, "_task_manager_startup_state", task_manager_state), \
              mock.patch.object(app_mod, "_ensure_installed_copy",
                                lambda: calls.append("copy")), \
              mock.patch.object(app_mod, "_stable_exe_path",
@@ -58,12 +66,25 @@ class SilentInstallTests(unittest.TestCase):
     def test_installs_and_registers(self):
         code, calls = self._run(intact=True)
         self.assertEqual(code, 0)
-        self.assertEqual(calls, ["copy", "register", "url", ("startup", True)])
+        self.assertEqual(calls, ["copy", "task-manager", "register", "url", ("startup", True)])
 
     def test_respects_start_with_windows_off(self):
         code, calls = self._run(intact=True, start=False)
         self.assertEqual(code, 0)
         self.assertIn(("startup", False), calls)
+
+    def test_a_task_manager_disable_holds_without_a_tick(self):
+        # Read before _register_application, which deletes the legacy entry.
+        code, calls = self._run(intact=True, start=True, task_manager=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, ["copy", "task-manager", "register", "url", ("startup", False)])
+
+    def test_the_installer_tick_is_a_choice_made_now(self):
+        code, calls = self._run(intact=True, start=True, task_manager=False,
+                                argv=("x", "--install", "/S", "--start-with-windows=1"))
+        self.assertEqual(code, 0)
+        self.assertNotIn("task-manager", calls)
+        self.assertIn(("startup", True), calls)
 
     def test_broken_copy_fails_without_registering(self):
         code, calls = self._run(intact=False)
@@ -161,6 +182,11 @@ class _FakeWinreg:
     def SetValueEx(self, k, name, _reserved, _type, data):
         k.values[name] = data
 
+    def DeleteValue(self, k, name):
+        if name not in k.values:
+            raise FileNotFoundError(name)
+        del k.values[name]
+
 
 class SyncStartupTests(unittest.TestCase):
     """Start with Windows is the HKCU Run entry plus Task Manager's on/off
@@ -241,6 +267,91 @@ class SyncStartupTests(unittest.TestCase):
         self.assertTrue(cfg.start_with_windows)
 
 
+class LegacyStartupCarryOverTests(unittest.TestCase):
+    """v1.8.5 renamed the Run entry. A disable made in Task Manager under the
+    legacy name must survive the move, and nothing under that name may stay
+    behind once the current one is registered or the app is uninstalled."""
+
+    def setUp(self):
+        import app_install
+        self.app_install = app_install
+        self.reg = _FakeWinreg()
+        self.schtasks = []
+        self.run_key = app_install.RUN_KEY
+        self.approved_key = app_install.STARTUP_APPROVED_KEY
+        self.name = app_mod.brand.RUN_VALUE_NAME
+        self.legacy = app_mod.brand.LEGACY_RUN_VALUE_NAME
+        self.assertNotEqual(self.name, self.legacy)
+
+        def fake_run(cmd, *a, **k):
+            self.schtasks.append(list(cmd))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        # Never the real registry, never a real scheduled task.
+        for p in (mock.patch.dict(sys.modules, {"winreg": self.reg}),
+                  mock.patch.object(app_install.subprocess, "run", fake_run)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def legacy_entry(self, disabled: bool):
+        self.reg.keys.setdefault(self.run_key, {})[self.legacy] = '"C:/old/FTC Whisper.exe"'
+        self.reg.keys.setdefault(self.approved_key, {})[self.legacy] = (
+            bytes([3 if disabled else 2]) + bytes(11))
+
+    def test_a_legacy_disable_keeps_it_off(self):
+        self.legacy_entry(disabled=True)
+        self.assertIs(app_mod._startup_registry_state(), None)
+        self.assertIs(app_mod._task_manager_startup_state(), False)
+        cfg = mock.Mock(start_with_windows=True)
+        self.assertFalse(app_mod._startup_setting_at_launch(cfg))
+        self.assertFalse(cfg.start_with_windows)
+        cfg.save.assert_called_once()
+
+    def test_only_a_disable_carries_over(self):
+        self.legacy_entry(disabled=False)
+        self.assertIs(app_mod._task_manager_startup_state(), None)
+        for saved in (True, False):
+            cfg = mock.Mock(start_with_windows=saved)
+            self.assertIs(app_mod._startup_setting_at_launch(cfg), saved)
+            cfg.save.assert_not_called()
+
+    def test_the_current_entry_wins_once_registered(self):
+        self.legacy_entry(disabled=True)
+        self.reg.keys[self.run_key][self.name] = '"C:/new/BrightLink Echo.exe" --startup'
+        self.assertIs(app_mod._task_manager_startup_state(), True)
+
+    def test_registration_removes_the_legacy_pair_and_task(self):
+        self.legacy_entry(disabled=True)
+        self.reg.keys[self.run_key][self.name] = '"new" --startup'
+        self.reg.keys[self.approved_key][self.name] = bytes([3]) + bytes(11)
+        done = self.app_install.remove_legacy_launchers()
+        self.assertNotIn(self.legacy, self.reg.keys[self.run_key])
+        self.assertNotIn(self.legacy, self.reg.keys[self.approved_key])
+        # The current pair is untouched, so the disable now lives there.
+        self.assertIn(self.name, self.reg.keys[self.run_key])
+        self.assertIs(app_mod._startup_registry_state(), False)
+        self.assertIn(["schtasks", "/delete", "/tn", app_mod.brand.LEGACY_TASK_NAME, "/f"],
+                      self.schtasks)
+        self.assertIn("removed legacy Run value", done)
+        self.assertIn("removed legacy Startup apps record", done)
+
+    def test_uninstall_removes_both_pairs_and_both_tasks(self):
+        self.legacy_entry(disabled=True)
+        self.reg.keys[self.run_key][self.name] = '"new" --startup'
+        self.reg.keys[self.approved_key][self.name] = bytes([2]) + bytes(11)
+        self.reg.keys[self.run_key]["Other App"] = '"other.exe"'
+        self.app_install._remove_launchers()
+        self.assertEqual(self.reg.keys[self.run_key], {"Other App": '"other.exe"'})
+        self.assertEqual(self.reg.keys[self.approved_key], {})
+        deleted = [c[3] for c in self.schtasks if c[:2] == ["schtasks", "/delete"]]
+        self.assertIn(app_mod.brand.TASK_NAME, deleted)
+        self.assertIn(app_mod.brand.LEGACY_TASK_NAME, deleted)
+
+    def test_nothing_to_remove_is_not_an_error(self):
+        self.assertEqual(self.app_install.remove_legacy_launchers(), ["removed legacy logon task"])
+        self.app_install._remove_launchers()
+
+
 class ConfigTests(unittest.TestCase):
     def test_default_on_and_legacy_key_ignored(self):
         with tempfile.TemporaryDirectory() as d:
@@ -272,6 +383,8 @@ class SourceOrderTests(unittest.TestCase):
         src = open(app_mod.__file__, encoding="utf-8").read()
         main = src[src.index("def _main() -> None:"):]
         i = main.index("if _launched_at_sign_in():")
+        # Including a disable still recorded under the legacy name.
+        self.assertIn("if _task_manager_startup_state() is False:", main[i:i + 200])
         self.assertLess(i, main.index("_handoff_to_canonical_if_newer()"))
         self.assertLess(i, main.index("_ensure_single_instance()"))
 
