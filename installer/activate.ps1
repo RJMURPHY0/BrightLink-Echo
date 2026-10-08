@@ -108,7 +108,18 @@ Set-Paths $InstallDir
 $ScriptLeaf = if ($PSCommandPath) { [System.IO.Path]::GetFileName($PSCommandPath) } else { '' }
 
 function Log([string]$msg) {
-    try { "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [activate $Version] $msg" | Add-Content -LiteralPath $script:Log -Encoding UTF8 } catch {}
+    # Into whichever data folder exists: the paths switch to the new folder
+    # before a failed move is known, and a log written there was lost (CI
+    # 2026-10-08: the reason for a refused migration was nowhere).
+    $path = $script:Log
+    try {
+        if (-not (Test-Path -LiteralPath ([System.IO.Path]::GetDirectoryName($path)))) {
+            foreach ($d in @($LegacyDir, $NewDir)) {
+                if ($d -and (Test-Path -LiteralPath $d -PathType Container)) { $path = Join-Path $d 'update.log'; break }
+            }
+        }
+        "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [activate $Version] $msg" | Add-Content -LiteralPath $path -Encoding UTF8
+    } catch {}
 }
 # SHA-256 through .NET, never Get-FileHash: in Windows PowerShell 5.1 that is a
 # script function of a module, and a powershell.exe started from PowerShell 7
@@ -264,7 +275,19 @@ function Undo-Adopt {
     # the legacy folder, that leaves it exactly as it knew the machine. If one
     # move cannot be put back, the ones already put back are redone instead,
     # so the machine is never split between the two folders. $true = back.
-    if ($script:Moves.Count -eq 0) { return (-not $script:PrevHomeLegacy) }
+    if ($script:Moves.Count -eq 0) {
+        if ($script:PrevHomeLegacy) {
+            # The very first move failed: nothing left the legacy folder, so
+            # the previous version is exactly where it was. Returning $false
+            # here kept the paths on the new folder, which does not exist, and
+            # the previous version was never started again (CI 2026-10-08).
+            Remove-Item -LiteralPath (Join-Path $NewDir $MarkerName) -Force -ErrorAction SilentlyContinue
+            $script:PrevHomeLegacy = $false
+            Set-Paths $LegacyDir
+            Log 'Nothing was moved: the previous version keeps its folders.'
+        }
+        return $true
+    }
     if ($script:PrevHomeLegacy) {
         Remove-Item -LiteralPath (Join-Path $NewDir $MarkerName) -Force -ErrorAction SilentlyContinue
     }

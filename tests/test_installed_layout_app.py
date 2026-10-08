@@ -273,6 +273,39 @@ class HealthTests(unittest.TestCase):
             app_mod.WhisperFlowApp._start_update_check(fake)   # sign-in, later
         self.assertEqual(1, len(started))
 
+    def test_old_version_folder_goes_once_activate_drops_the_backup(self):
+        # The health report is what tells activate.ps1 to drop the backup exe;
+        # cleaning before that kept the old folder until the next launch.
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            exe = il.canonical_exe(root)
+            for d in ("app-1.8.5", "app-1.8.6"):
+                os.makedirs(os.path.join(root, d))
+            open(exe, "wb").close()
+            prev = exe + il.PREVIOUS_SUFFIX
+            open(prev, "wb").close()
+            seen = []
+
+            def sleep(_s):   # activate.ps1 reads the health report and drops the backup
+                seen.append(os.path.isdir(os.path.join(root, "app-1.8.5")))
+                if os.path.exists(prev):
+                    os.remove(prev)
+
+            def run_now(**kw):
+                return mock.Mock(start=lambda: kw["target"]())
+
+            with mock.patch.object(sys, "frozen", True, create=True), \
+                    mock.patch.object(sys, "executable", exe), \
+                    mock.patch.object(sys, "_MEIPASS", os.path.join(root, "app-1.8.6"), create=True), \
+                    mock.patch.object(il, "write_health"), \
+                    mock.patch.object(il, "running_layout", return_value="onedir"), \
+                    mock.patch.object(app_mod.time, "sleep", sleep), \
+                    mock.patch("threading.Thread", run_now):
+                app_mod._report_healthy()
+            self.assertEqual([True], seen)        # kept while the roll back was possible
+            self.assertFalse(os.path.isdir(os.path.join(root, "app-1.8.5")))
+            self.assertTrue(os.path.isdir(os.path.join(root, "app-1.8.6")))
+
     def test_source_runs_write_nothing(self):
         with mock.patch.object(sys, "frozen", False, create=True), \
                 mock.patch.object(il, "write_health") as w:

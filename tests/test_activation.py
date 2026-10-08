@@ -459,6 +459,33 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(0, self._run(self.legacy), self._log())
         self.assertFalse(os.path.exists(self.legacy))
 
+    def test_a_locked_file_in_the_legacy_folder_leaves_everything_and_relaunches(self):
+        # The FIRST move fails, so nothing has moved yet: the previous version
+        # must still be started again (CI 2026-10-08: it was not, and the log
+        # went to the new folder, which did not exist).
+        self._legacy_install()
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = ctypes.c_void_p
+        # The e2e's lock: the legacy exe held for reading, shared for reading.
+        h = k32.CreateFileW(os.path.join(self.legacy, brand.LEGACY_CANONICAL_EXE_NAME),
+                            0x80000000, 1, None, 3, 0x80, None)
+        self.assertNotEqual(h, ctypes.c_void_p(-1).value)
+        try:
+            code = self._run(self.legacy, attempts=2)
+            launched = self._wait(os.path.join(self.legacy, "launched-" + self.OLD + ".txt"))
+        finally:
+            k32.CloseHandle(ctypes.c_void_p(h))
+        self.assertEqual(6, code, self._log())
+        self._assert_legacy_intact()
+        self.assertFalse(os.path.exists(self.new), self._log())
+        self.assertTrue(launched, self._log())
+        self.assertIn("NOT installing", self._log())
+        self.assertEqual("", install_layout.read_bad_version(self.legacy))
+        # Once nothing holds it, the next try moves the machine.
+        self.assertEqual(0, self._run(self.legacy), self._log())
+        self.assertFalse(os.path.exists(self.legacy))
+
     def test_an_install_over_the_legacy_folder_adopts_its_data(self):
         os.makedirs(self.new)
         self._legacy_install(stage_in=self.new)

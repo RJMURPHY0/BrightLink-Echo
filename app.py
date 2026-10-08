@@ -3776,6 +3776,16 @@ def _report_healthy(cleanup: bool = True) -> None:
         import shutil
         root = os.path.dirname(os.path.abspath(sys.executable))
         own = os.path.basename(getattr(sys, "_MEIPASS", ""))
+        # activate.ps1 drops the backup exe (the roll back) only once it reads
+        # the health report just written, a moment from now. Until then
+        # stale_paths keeps the old version's folder for that roll back, so
+        # cleaning straight away left it until the next launch (CI 2026-10-08:
+        # app-1.8.5 outlived the 1.8.6 update). A backup that stays (a slow
+        # start activate.ps1 kept without health) still keeps its folder.
+        prev = install_layout.canonical_exe(root) + install_layout.PREVIOUS_SUFFIX
+        deadline = time.time() + 300
+        while os.path.exists(prev) and time.time() < deadline:
+            time.sleep(2)
         for path in install_layout.stale_paths(root, own):
             shutil.rmtree(path, ignore_errors=True)
             if not os.path.exists(path):
