@@ -2319,9 +2319,9 @@ class WhisperFlowApp:
         if getattr(self.config, "show_popup", True) or not result:
             self.popup.show_cursor_icon(
                 transcribed_text,
-                on_insert=lambda t=transcribed_text, h=hwnd: self._insert_text(t, h),
-                on_replace=lambda new_text, t=transcribed_text, h=hwnd, uc=_undo_n, dc=_live_dc: self._replace_text(new_text, h, t, undo_count=uc, del_chars=dc),
-                on_insert_result=lambda new_text, h=hwnd: self._insert_refined(new_text, h),
+                on_insert=lambda t=transcribed_text, h=hwnd, c=_rec_child: self._insert_text(t, h, c),
+                on_replace=lambda new_text, t=transcribed_text, h=hwnd, uc=_undo_n, dc=_live_dc, c=_rec_child: self._replace_text(new_text, h, t, undo_count=uc, del_chars=dc, child=c),
+                on_insert_result=lambda new_text, h=hwnd, c=_rec_child: self._insert_refined(new_text, h, c),
                 inserted=result,
                 hwnd=hwnd,
                 cursor_x=0,
@@ -3226,12 +3226,34 @@ class WhisperFlowApp:
         except Exception:
             return 0, 0
 
-    def _restore_target_focus(self, hwnd: int) -> None:
+    def _restore_target_focus(self, hwnd: int, child: int = 0) -> None:
         """Popup Insert/Replace paths: wait for the popup to withdraw, focus the
         target, and (for browsers) click to re-establish DOM focus — the popup's
-        refinement panel takes real focus, which clears contenteditable focus."""
+        refinement panel takes real focus, which clears contenteditable focus.
+
+        `child` is the editor control the dictation went into. Activating the
+        top-level window alone leaves focus on the frame in apps like Outlook
+        (compose editor is a child), so the paste lands nowhere. The recorded
+        child is only restored when focus is on the frame itself; if the user
+        has since clicked into another control, that choice wins."""
         time.sleep(0.25)  # let popup withdraw and OS settle focus
         self._focus_window(hwnd)
+        if child:
+            try:
+                from injector import _get_focused_child
+                u32 = ctypes.windll.user32
+                if u32.IsWindow(child) and _get_focused_child(hwnd) in (0, hwnd):
+                    tgt_tid = u32.GetWindowThreadProcessId(hwnd, None)
+                    our_tid = ctypes.windll.kernel32.GetCurrentThreadId()
+                    att = bool(tgt_tid and tgt_tid != our_tid
+                               and u32.AttachThreadInput(our_tid, tgt_tid, True))
+                    try:
+                        u32.SetFocus(child)
+                    finally:
+                        if att:
+                            u32.AttachThreadInput(our_tid, tgt_tid, False)
+            except Exception as e:
+                print(f"[App] Child focus restore error: {e}")
         try:
             cls = self._get_window_class(hwnd)
             if cls and (
@@ -3247,17 +3269,17 @@ class WhisperFlowApp:
         except Exception as e:
             print(f"[App] Focus-restore click error: {e}")
 
-    def _insert_text(self, text: str, hwnd: int) -> None:
+    def _insert_text(self, text: str, hwnd: int, child: int = 0) -> None:
         """Manual insert — called when user clicks Insert in the popup."""
-        self._restore_target_focus(hwnd)
+        self._restore_target_focus(hwnd, child)
         self.injector.inject(text)
         print(f"[App] Manual insert: {len(text)} chars")
 
-    def _insert_refined(self, text: str, hwnd: int) -> None:
+    def _insert_refined(self, text: str, hwnd: int, child: int = 0) -> None:
         """Insert the AI result without undoing anything (popup's 'Insert
         result'). Same injection as _insert_text, but this one is an APPLIED
         refinement so it counts towards the time-saved breakdown."""
-        self._insert_text(text, hwnd)
+        self._insert_text(text, hwnd, child)
         self._record_refine_applied()
 
     def _record_refine_applied(self) -> None:
@@ -3284,10 +3306,10 @@ class WhisperFlowApp:
             print(f"[App] Refine stat failed (non-fatal): {e}")
 
     def _replace_text(self, new_text: str, hwnd: int, original_text: str = "",
-                      undo_count: int = 1, del_chars: int = 0) -> None:
+                      undo_count: int = 1, del_chars: int = 0, child: int = 0) -> None:
         import keyboard as kb
 
-        self._restore_target_focus(hwnd)
+        self._restore_target_focus(hwnd, child)
         if del_chars > 0:
             # Live-injected dictation: our text landed as many keystroke bursts, so
             # a single Ctrl+Z won't cleanly remove it. Delete exactly the characters
