@@ -315,6 +315,55 @@ def fix_pause_punctuation(text: str) -> str:
     return text
 
 
+# A whole-clip pass (History Retry, a long clip that was not streamed) grows
+# ONNX Runtime's CPU arena to that clip's size, and the arena never hands it
+# back: one 229 s pass kept ~400 MB for the rest of the session (measured
+# 2026-10-01). Encoder runs longer than this many feature frames (10 ms each)
+# shrink the arena as they finish. Streamed dictation commits at most ~18 s
+# per chunk, so it never reaches the threshold and keeps its speed. Turning
+# the arena off altogether was measured 30-50% slower: never do that.
+_ARENA_SHRINK_FRAMES = 3000
+
+
+class _ArenaShrinkingSession:
+    """Stands in for onnx_asr's encoder session: adds ORT's arena-shrink run
+    option to long runs and forwards everything else unchanged."""
+
+    def __init__(self, session, shrink_options, threshold: int):
+        self._session = session
+        self._shrink = shrink_options
+        self._threshold = threshold
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+    def run(self, output_names, input_feed, run_options=None):
+        if run_options is None:
+            try:
+                frames = int(input_feed["audio_signal"].shape[-1])
+            except Exception:
+                frames = 0
+            if frames > self._threshold:
+                run_options = self._shrink
+        return self._session.run(output_names, input_feed, run_options)
+
+
+def _shrink_arena_after_long_runs(model, ort) -> None:
+    """Wrap the loaded model's encoder session. Reaches into onnx_asr's
+    private attributes (version pinned by constraints.txt); if they move,
+    transcription is untouched and only the memory give-back is lost."""
+    try:
+        asr = model.asr
+        encoder = asr._encoder
+        if not isinstance(encoder, ort.InferenceSession):
+            raise TypeError(type(encoder).__name__)
+        opts = ort.RunOptions()
+        opts.add_run_config_entry("memory.enable_memory_arena_shrinkage", "cpu:0")
+        asr._encoder = _ArenaShrinkingSession(encoder, opts, _ARENA_SHRINK_FRAMES)
+    except Exception as e:
+        print(f"[ParakeetEngine] Arena shrink not set up ({e}).")
+
+
 class ParakeetTranscriber:
     """Drop-in fast transcriber with the same call surface as Transcriber.
 
@@ -389,6 +438,7 @@ class ParakeetTranscriber:
                     quantization="int8",
                     sess_options=opts,
                 )
+                _shrink_arena_after_long_runs(self._model, ort)
                 print("[ParakeetEngine] Model ready.")
                 return True
             except Exception as e:

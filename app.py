@@ -460,15 +460,24 @@ class WhisperFlowApp:
                     daemon=True, name="warm-mic",
                 ).start()
 
-            # ── Pre-load all models immediately in background ─────────
-            threading.Thread(
-                target=self.transcriber.load_model, daemon=True, name="model-preload"
-            ).start()
+            # ── Pre-load models in background ─────────────────────────
+            # Once Parakeet is loaded it carries English dictation and the
+            # two whisper models are only its fallback (plus History Retry).
+            # Holding all three cost ~500 MB working set and ~3.5 GB commit
+            # (measured 2026-10-01). So when Parakeet's files are already on
+            # disk the accurate model waits until a path asks for it, and
+            # base.en preloads only to serve a press made during Parakeet's
+            # load; _init_parakeet frees it once Parakeet is ready.
+            if not self._parakeet_expected():
+                threading.Thread(
+                    target=self.transcriber.load_model, daemon=True,
+                    name="model-preload",
+                ).start()
             threading.Thread(
                 target=self.fast_transcriber.load_model, daemon=True, name="fast-model-preload"
             ).start()
             threading.Thread(
-                target=self._init_parakeet, daemon=True, name="parakeet-preload"
+                target=self._preload_parakeet, daemon=True, name="parakeet-preload"
             ).start()
             # The native-heavy imports above are what a broken build fails
             # on. activate.ps1 rolls a new version back only if it exits
@@ -552,6 +561,9 @@ class WhisperFlowApp:
                     and verify_model_files(version=_ver)):
                 print(f"[App] Parakeet model ({_ver}) missing or not the pinned "
                       f"build — downloading (~660 MB, one-time)…")
+                # Whisper carries dictation for as long as the download takes.
+                threading.Thread(target=self._load_whisper_fallback,
+                                 daemon=True, name="whisper-fallback").start()
                 if not self._download_parakeet_with_retry(_ver):
                     return
                 verify_model_files(version=_ver)
@@ -560,6 +572,68 @@ class WhisperFlowApp:
                 print("[App] Parakeet engine active — near-instant transcription enabled.")
         except Exception as e:
             print(f"[App] Parakeet init failed ({e}) — using Whisper pipeline.")
+
+    def _preload_parakeet(self) -> None:
+        """Startup thread: bring Parakeet up, then hold exactly the whisper
+        models the result needs (none beside a loaded Parakeet, both when
+        whisper is in charge)."""
+        try:
+            self._init_parakeet()
+        finally:
+            if self._use_parakeet():
+                self._release_whisper_fallback()
+            else:
+                self._load_whisper_fallback()
+
+    def _parakeet_expected(self) -> bool:
+        """True when Parakeet should take over English dictation within
+        seconds of launch: enabled, English, and its files on disk."""
+        try:
+            if not getattr(self.config, "use_parakeet", True):
+                return False
+            lang = (getattr(self.config, "language", "en") or "en").lower()
+            if lang not in ("", "en", "english"):
+                return False
+            from asr_engine import model_files_present
+            return model_files_present(
+                version=getattr(self.config, "parakeet_version", "v2"))
+        except Exception as e:
+            print(f"[App] Parakeet check failed ({e}) — preloading whisper.")
+            return False
+
+    def _load_whisper_fallback(self) -> None:
+        """Whisper is in charge: have both of its models loaded."""
+        for eng in (self.fast_transcriber, self.transcriber):
+            if eng is None or eng.is_loaded:
+                continue
+            try:
+                eng.load_model()
+            except Exception as e:
+                print(f"[App] Whisper preload failed ({e}).")
+
+    # Waits between attempts to free the whisper models while a dictation
+    # that began on whisper (pressed during Parakeet's load) is still running.
+    _WHISPER_RELEASE_WAIT_S = 5
+    _WHISPER_RELEASE_TRIES = 120
+
+    def _release_whisper_fallback(self) -> None:
+        """Parakeet is in charge: free the whisper models. Waits for an idle
+        moment, so a dictation that started on whisper finishes on it."""
+        for _ in range(self._WHISPER_RELEASE_TRIES):
+            if not self._use_parakeet():
+                return
+            try:
+                idle = self.hotkey_manager.state == AppState.IDLE
+            except Exception:
+                idle = False
+            if idle:
+                freed = [eng.unload() for eng in
+                         (self.fast_transcriber, self.transcriber)
+                         if eng is not None]
+                if all(freed):
+                    return
+            time.sleep(self._WHISPER_RELEASE_WAIT_S)
+        print("[App] Whisper models still busy — left loaded.")
 
     def _use_parakeet(self) -> bool:
         """Parakeet handles English; anything else stays on the whisper path."""
@@ -612,18 +686,27 @@ class WhisperFlowApp:
         hw = self._get_hotwords()
         prompt_hw = self._get_prompt_hotwords()
         candidates = []
-        if self._use_parakeet():
+        whisper = self.transcriber
+        on_parakeet = self._use_parakeet()
+        if on_parakeet:
+            # Beside Parakeet the accurate whisper model is not kept loaded;
+            # load it while the Parakeet pass runs so it adds no wait.
+            if whisper is not None and not whisper.is_loaded:
+                threading.Thread(target=whisper.load_model, daemon=True,
+                                 name="retry-whisper-load").start()
             try:
                 candidates.append(self.parakeet.transcribe(
                     audio, rate, hotwords_str=hw).strip())
             except Exception as e:
                 print(f"[App] Retry parakeet pass failed: {e}")
-        if self.transcriber is not None:
+        if whisper is not None:
             try:
-                candidates.append(self.transcriber.transcribe(
+                candidates.append(whisper.transcribe(
                     audio, rate, hotwords_str=prompt_hw).strip())
             except Exception as e:
                 print(f"[App] Retry whisper pass failed: {e}")
+            if on_parakeet:
+                whisper.unload()
         candidates = [self._fix_homophones(c, "retry") for c in candidates if c]
         if not candidates:
             return ""
@@ -1434,6 +1517,10 @@ class WhisperFlowApp:
             end_punctuation=getattr(self.config, "end_punctuation", "smart"),
         )
         self.transcriber = new_t
+        if self._use_parakeet():
+            # Same rule as startup: beside Parakeet it loads when a path needs it.
+            print(f"[App] Accurate model set to '{value}' (loads on demand).")
+            return
         threading.Thread(
             target=new_t.load_model, daemon=True, name="model-reload"
         ).start()
