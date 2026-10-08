@@ -4344,9 +4344,18 @@ def _register_application() -> None:
     try:
         import app_install
 
-        app_install.register(_startup_target(), APP_VERSION)
+        target = _startup_target()
+        install_layout.log(f"Registering {APP_VERSION} with Windows from {target}.")
+        app_install.register(target, APP_VERSION)
     except Exception as e:
         print(f"[App] Application registration skipped (non-fatal): {e}")
+        # In update.log, not just stdout: a windowed build has no console, and a
+        # skipped registration leaves the Installed apps entry and the legacy
+        # launchers behind with nothing to say why (v1.8.5 CI, 2026-10-07).
+        import traceback
+        install_layout.log("Registration failed: " + "".join(
+            traceback.format_exception_only(type(e), e)).strip()
+            + " | " + traceback.format_exc().strip().splitlines()[-3][:200])
 
 
 def _reconcile_legacy_launchers() -> None:

@@ -182,14 +182,26 @@ def model_listing() -> dict:
 
 
 def collect_logs(rep: Report):
-    src = [os.path.join(il.install_dir(), n) for n in (il.UPDATE_LOG, "startup-error.log")]
-    src += [os.path.join(il.install_dir(), n) for n in os.listdir(il.install_dir())
-            if n.startswith("setup-") and n.endswith(".log")] if os.path.isdir(il.install_dir()) else []
-    for slug in (brand.FILE_SLUG, brand.LEGACY_FILE_SLUG):
-        src.append(os.path.join(tempfile.gettempdir(), f"{slug}_update.log"))
-    for p in src:
+    # Both folders: a failed or partial migration leaves logs in either.
+    for d, tag in ((data_paths.new_local_dir(), ""), (data_paths.legacy_local_dir(), "legacy-")):
+        if not os.path.isdir(d):
+            continue
+        names = [il.UPDATE_LOG, "startup-error.log", "install-state.json"]
+        names += [n for n in os.listdir(d) if n.startswith("setup-") and n.endswith(".log")]
+        for n in names:
+            try:
+                shutil.copy(os.path.join(d, n), os.path.join(rep.out, tag + n))
+            except OSError:
+                pass
         try:
-            shutil.copy(p, os.path.join(rep.out, os.path.basename(p)))
+            with open(os.path.join(rep.out, tag + "listing.txt"), "w", encoding="utf-8") as f:
+                f.write("\n".join(sorted(os.listdir(d))))
+        except OSError:
+            pass
+    for slug in (brand.FILE_SLUG, brand.LEGACY_FILE_SLUG):
+        try:
+            shutil.copy(os.path.join(tempfile.gettempdir(), f"{slug}_update.log"),
+                        os.path.join(rep.out, f"{slug}_update.log"))
         except OSError:
             pass
 
@@ -351,12 +363,16 @@ def scenario_faults(rep: Report, work: str, assets: str, version: str):
         bridge = os.path.join(dl, brand.UPDATE_ASSET)
         shutil.copy(os.path.join(assets, brand.UPDATE_ASSET), bridge)
         subprocess.Popen([bridge], cwd=dl)
-        rep.check("bridge installed and running",
-                  wait_for(lambda: ping_version() == version and os.path.exists(canonical())
-                           # the copy at the canonical path writes its config
-                           # on first run; seeding before that raced it
-                           and os.path.exists(os.path.join(il.install_dir(), "config.json")),
-                           240))
+        def bridge_state():
+            return {"ping": ping_version(), "canonical": canonical(),
+                    "canonical_exists": os.path.exists(canonical()),
+                    "config": os.path.join(il.install_dir(), "config.json"),
+                    "config_exists": os.path.exists(os.path.join(il.install_dir(), "config.json"))}
+        up = wait_for(lambda: (lambda st: st["ping"] == version and st["canonical_exists"]
+                               # the copy at the canonical path writes its config
+                               # on first run; seeding before that raced it
+                               and st["config_exists"])(bridge_state()), 240)
+        rep.check("bridge installed and running", up, "" if up else bridge_state())
         models = seed_user_data()
 
         for fault in ("bad-digest", "truncate"):

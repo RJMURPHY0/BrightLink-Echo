@@ -605,6 +605,17 @@ def register_notification_identity() -> None:
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 
+def _note(message: str) -> None:
+    """Print, and add to update.log beside the exe: a windowed build has no
+    console, and registration that silently did nothing must be findable."""
+    print(f"[Install] {message}")
+    try:
+        with open(os.path.join(_install_dir(), "update.log"), "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [register] {message}\n")
+    except Exception:
+        pass
+
+
 def register(exe: str, version: str) -> None:
     """Make Windows treat this install as an application. Idempotent, cheap on
     every launch after the first (a registry read and two os.path.exists), and
@@ -644,8 +655,9 @@ def register(exe: str, version: str) -> None:
     try:
         if not entry_is_current(_registered_entry(), version, exe):
             _write_uninstall_entry(exe, version, install_dir)
+            _note(f"Installed apps entry written for {version} ({exe}).")
     except Exception as e:
-        print(f"[Install] Installed-apps registration skipped: {e}")
+        _note(f"Installed-apps registration skipped: {e}")
 
     try:
         _write_app_paths(exe, old_names)
@@ -664,11 +676,11 @@ def register(exe: str, version: str) -> None:
         try:
             steps = remove_legacy_registrations() + retarget_legacy_links(exe)
             for step in steps:
-                print(f"[Install] {step}")
+                _note(step)
             if not any(step.startswith("could not") for step in steps):
                 save_state(install_dir, dict(state, legacy_cleared_for=exe))
         except Exception as e:
-            print(f"[Install] Legacy clean-up skipped: {e}")
+            _note(f"Legacy clean-up skipped: {e}")
 
 
 # ── Uninstall ────────────────────────────────────────────────────────────────
