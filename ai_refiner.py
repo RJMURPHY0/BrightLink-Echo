@@ -35,6 +35,28 @@ _KEEP_ESSENCE = (
 )
 
 
+# Emoji and pictographs (incl. skin-tone/ZWJ sequences and variation selectors).
+_EMOJI = re.compile(
+    "[🀀-🫿☀-➿⬀-⯿←-⇿"
+    "⌀-⏿‍️©®‼⁉™ℹ]+")
+
+_KEEP_EMOJI = (
+    " Keep every emoji exactly as written, in the same place in the text. "
+    "Never remove, replace or add emoji."
+)
+
+
+def _restore_emoji(original: str, out: str) -> str:
+    """Safety net: if the model dropped an emoji the user had, put it back.
+    Emoji missing from the result are appended to the end, so they are never
+    silently lost even when the model ignores the instruction."""
+    missing = [e for e in _EMOJI.findall(original or "")
+               if e not in (out or "")]
+    if not missing:
+        return out
+    return (out.rstrip() + " " + " ".join(missing)).strip()
+
+
 def _looks_like_a_list(text: str) -> bool:
     """True when the text already carries list lines the model must preserve."""
     return bool(re.search(r"^\s*(?:[-•*]|\d+[.)])\s+\S", text or "",
@@ -390,8 +412,12 @@ class AIRefiner:
         # (restore_spacing), unless the Ask itself is about the layout.
         keep_spacing = not (custom_prompt and _LAYOUT_ASK.search(custom_prompt))
 
+        if _EMOJI.search(text):
+            prompt += _KEEP_EMOJI
+
         def _finish(out: str) -> str:
             out = self._apply_sender_name(out, mode, name)
+            out = _restore_emoji(text, out)
             return restore_spacing(text, out) if keep_spacing else out
 
         # _NO_FORMAT bans lists so the model never invents them. When the text

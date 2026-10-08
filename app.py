@@ -467,15 +467,24 @@ class WhisperFlowApp:
                     daemon=True, name="warm-mic",
                 ).start()
 
-            # ── Pre-load all models immediately in background ─────────
-            threading.Thread(
-                target=self.transcriber.load_model, daemon=True, name="model-preload"
-            ).start()
+            # ── Pre-load models in background ─────────────────────────
+            # Once Parakeet is loaded it carries English dictation and the
+            # two whisper models are only its fallback (plus History Retry).
+            # Holding all three cost ~500 MB working set and ~3.5 GB commit
+            # (measured 2026-10-01). So when Parakeet's files are already on
+            # disk the accurate model waits until a path asks for it, and
+            # base.en preloads only to serve a press made during Parakeet's
+            # load; _init_parakeet frees it once Parakeet is ready.
+            if not self._parakeet_expected():
+                threading.Thread(
+                    target=self.transcriber.load_model, daemon=True,
+                    name="model-preload",
+                ).start()
             threading.Thread(
                 target=self.fast_transcriber.load_model, daemon=True, name="fast-model-preload"
             ).start()
             threading.Thread(
-                target=self._init_parakeet, daemon=True, name="parakeet-preload"
+                target=self._preload_parakeet, daemon=True, name="parakeet-preload"
             ).start()
             # The native-heavy imports above are what a broken build fails
             # on. activate.ps1 rolls a new version back only if it exits
@@ -559,6 +568,9 @@ class WhisperFlowApp:
                     and verify_model_files(version=_ver)):
                 print(f"[App] Parakeet model ({_ver}) missing or not the pinned "
                       f"build — downloading (~660 MB, one-time)…")
+                # Whisper carries dictation for as long as the download takes.
+                threading.Thread(target=self._load_whisper_fallback,
+                                 daemon=True, name="whisper-fallback").start()
                 if not self._download_parakeet_with_retry(_ver):
                     return
                 verify_model_files(version=_ver)
@@ -567,6 +579,68 @@ class WhisperFlowApp:
                 print("[App] Parakeet engine active — near-instant transcription enabled.")
         except Exception as e:
             print(f"[App] Parakeet init failed ({e}) — using Whisper pipeline.")
+
+    def _preload_parakeet(self) -> None:
+        """Startup thread: bring Parakeet up, then hold exactly the whisper
+        models the result needs (none beside a loaded Parakeet, both when
+        whisper is in charge)."""
+        try:
+            self._init_parakeet()
+        finally:
+            if self._use_parakeet():
+                self._release_whisper_fallback()
+            else:
+                self._load_whisper_fallback()
+
+    def _parakeet_expected(self) -> bool:
+        """True when Parakeet should take over English dictation within
+        seconds of launch: enabled, English, and its files on disk."""
+        try:
+            if not getattr(self.config, "use_parakeet", True):
+                return False
+            lang = (getattr(self.config, "language", "en") or "en").lower()
+            if lang not in ("", "en", "english"):
+                return False
+            from asr_engine import model_files_present
+            return model_files_present(
+                version=getattr(self.config, "parakeet_version", "v2"))
+        except Exception as e:
+            print(f"[App] Parakeet check failed ({e}) — preloading whisper.")
+            return False
+
+    def _load_whisper_fallback(self) -> None:
+        """Whisper is in charge: have both of its models loaded."""
+        for eng in (self.fast_transcriber, self.transcriber):
+            if eng is None or eng.is_loaded:
+                continue
+            try:
+                eng.load_model()
+            except Exception as e:
+                print(f"[App] Whisper preload failed ({e}).")
+
+    # Waits between attempts to free the whisper models while a dictation
+    # that began on whisper (pressed during Parakeet's load) is still running.
+    _WHISPER_RELEASE_WAIT_S = 5
+    _WHISPER_RELEASE_TRIES = 120
+
+    def _release_whisper_fallback(self) -> None:
+        """Parakeet is in charge: free the whisper models. Waits for an idle
+        moment, so a dictation that started on whisper finishes on it."""
+        for _ in range(self._WHISPER_RELEASE_TRIES):
+            if not self._use_parakeet():
+                return
+            try:
+                idle = self.hotkey_manager.state == AppState.IDLE
+            except Exception:
+                idle = False
+            if idle:
+                freed = [eng.unload() for eng in
+                         (self.fast_transcriber, self.transcriber)
+                         if eng is not None]
+                if all(freed):
+                    return
+            time.sleep(self._WHISPER_RELEASE_WAIT_S)
+        print("[App] Whisper models still busy — left loaded.")
 
     def _use_parakeet(self) -> bool:
         """Parakeet handles English; anything else stays on the whisper path."""
@@ -619,18 +693,27 @@ class WhisperFlowApp:
         hw = self._get_hotwords()
         prompt_hw = self._get_prompt_hotwords()
         candidates = []
-        if self._use_parakeet():
+        whisper = self.transcriber
+        on_parakeet = self._use_parakeet()
+        if on_parakeet:
+            # Beside Parakeet the accurate whisper model is not kept loaded;
+            # load it while the Parakeet pass runs so it adds no wait.
+            if whisper is not None and not whisper.is_loaded:
+                threading.Thread(target=whisper.load_model, daemon=True,
+                                 name="retry-whisper-load").start()
             try:
                 candidates.append(self.parakeet.transcribe(
                     audio, rate, hotwords_str=hw).strip())
             except Exception as e:
                 print(f"[App] Retry parakeet pass failed: {e}")
-        if self.transcriber is not None:
+        if whisper is not None:
             try:
-                candidates.append(self.transcriber.transcribe(
+                candidates.append(whisper.transcribe(
                     audio, rate, hotwords_str=prompt_hw).strip())
             except Exception as e:
                 print(f"[App] Retry whisper pass failed: {e}")
+            if on_parakeet:
+                whisper.unload()
         candidates = [self._fix_homophones(c, "retry") for c in candidates if c]
         if not candidates:
             return ""
@@ -1441,6 +1524,10 @@ class WhisperFlowApp:
             end_punctuation=getattr(self.config, "end_punctuation", "smart"),
         )
         self.transcriber = new_t
+        if self._use_parakeet():
+            # Same rule as startup: beside Parakeet it loads when a path needs it.
+            print(f"[App] Accurate model set to '{value}' (loads on demand).")
+            return
         threading.Thread(
             target=new_t.load_model, daemon=True, name="model-reload"
         ).start()
@@ -2232,9 +2319,9 @@ class WhisperFlowApp:
         if getattr(self.config, "show_popup", True) or not result:
             self.popup.show_cursor_icon(
                 transcribed_text,
-                on_insert=lambda t=transcribed_text, h=hwnd: self._insert_text(t, h),
-                on_replace=lambda new_text, t=transcribed_text, h=hwnd, uc=_undo_n, dc=_live_dc: self._replace_text(new_text, h, t, undo_count=uc, del_chars=dc),
-                on_insert_result=lambda new_text, h=hwnd: self._insert_refined(new_text, h),
+                on_insert=lambda t=transcribed_text, h=hwnd, c=_rec_child: self._insert_text(t, h, c),
+                on_replace=lambda new_text, t=transcribed_text, h=hwnd, uc=_undo_n, dc=_live_dc, c=_rec_child: self._replace_text(new_text, h, t, undo_count=uc, del_chars=dc, child=c),
+                on_insert_result=lambda new_text, h=hwnd, c=_rec_child: self._insert_refined(new_text, h, c),
                 inserted=result,
                 hwnd=hwnd,
                 cursor_x=0,
@@ -3139,12 +3226,34 @@ class WhisperFlowApp:
         except Exception:
             return 0, 0
 
-    def _restore_target_focus(self, hwnd: int) -> None:
+    def _restore_target_focus(self, hwnd: int, child: int = 0) -> None:
         """Popup Insert/Replace paths: wait for the popup to withdraw, focus the
         target, and (for browsers) click to re-establish DOM focus — the popup's
-        refinement panel takes real focus, which clears contenteditable focus."""
+        refinement panel takes real focus, which clears contenteditable focus.
+
+        `child` is the editor control the dictation went into. Activating the
+        top-level window alone leaves focus on the frame in apps like Outlook
+        (compose editor is a child), so the paste lands nowhere. The recorded
+        child is only restored when focus is on the frame itself; if the user
+        has since clicked into another control, that choice wins."""
         time.sleep(0.25)  # let popup withdraw and OS settle focus
         self._focus_window(hwnd)
+        if child:
+            try:
+                from injector import _get_focused_child
+                u32 = ctypes.windll.user32
+                if u32.IsWindow(child) and _get_focused_child(hwnd) in (0, hwnd):
+                    tgt_tid = u32.GetWindowThreadProcessId(hwnd, None)
+                    our_tid = ctypes.windll.kernel32.GetCurrentThreadId()
+                    att = bool(tgt_tid and tgt_tid != our_tid
+                               and u32.AttachThreadInput(our_tid, tgt_tid, True))
+                    try:
+                        u32.SetFocus(child)
+                    finally:
+                        if att:
+                            u32.AttachThreadInput(our_tid, tgt_tid, False)
+            except Exception as e:
+                print(f"[App] Child focus restore error: {e}")
         try:
             cls = self._get_window_class(hwnd)
             if cls and (
@@ -3160,17 +3269,17 @@ class WhisperFlowApp:
         except Exception as e:
             print(f"[App] Focus-restore click error: {e}")
 
-    def _insert_text(self, text: str, hwnd: int) -> None:
+    def _insert_text(self, text: str, hwnd: int, child: int = 0) -> None:
         """Manual insert — called when user clicks Insert in the popup."""
-        self._restore_target_focus(hwnd)
+        self._restore_target_focus(hwnd, child)
         self.injector.inject(text)
         print(f"[App] Manual insert: {len(text)} chars")
 
-    def _insert_refined(self, text: str, hwnd: int) -> None:
+    def _insert_refined(self, text: str, hwnd: int, child: int = 0) -> None:
         """Insert the AI result without undoing anything (popup's 'Insert
         result'). Same injection as _insert_text, but this one is an APPLIED
         refinement so it counts towards the time-saved breakdown."""
-        self._insert_text(text, hwnd)
+        self._insert_text(text, hwnd, child)
         self._record_refine_applied()
 
     def _record_refine_applied(self) -> None:
@@ -3197,10 +3306,10 @@ class WhisperFlowApp:
             print(f"[App] Refine stat failed (non-fatal): {e}")
 
     def _replace_text(self, new_text: str, hwnd: int, original_text: str = "",
-                      undo_count: int = 1, del_chars: int = 0) -> None:
+                      undo_count: int = 1, del_chars: int = 0, child: int = 0) -> None:
         import keyboard as kb
 
-        self._restore_target_focus(hwnd)
+        self._restore_target_focus(hwnd, child)
         if del_chars > 0:
             # Live-injected dictation: our text landed as many keystroke bursts, so
             # a single Ctrl+Z won't cleanly remove it. Delete exactly the characters

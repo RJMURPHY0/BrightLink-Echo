@@ -1855,7 +1855,7 @@ class FloatingPopup:
             ("💬 Casual", "casual"),
             ("✨ Fix All", "punctuation"),
             ("✂ Short", "concise"),
-            ("⚡ Optimise", "prompt_optimiser"),
+            ("⚡ Prompt Optimiser", "prompt_optimiser"),
         ]:
             self._btn(top, label, lambda m=mode: self._run_ai(m)).pack(
                 side="left", padx=(0, 4)

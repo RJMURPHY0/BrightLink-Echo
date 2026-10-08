@@ -44,3 +44,13 @@ backup-dream-*/
 
 # graphify knowledge graph — generated locally from AST, rebuild free with /graphify .
 graphify-out/
+
+# Secrets: never commit (added 2026-10-08)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+prod-env.txt

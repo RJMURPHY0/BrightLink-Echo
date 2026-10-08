@@ -163,6 +163,9 @@ class Transcriber:
         if not acquired:
             return ""  # streaming preview bails out rather than queuing
         try:
+            # unload() may have run between the check above and the lock.
+            if self._model is None:
+                self.load_model()
             return self._run(audio, sample_rate, context_words=context_words,
                              hotwords_str=hotwords_str, conf_out=conf_out)
         finally:
@@ -345,3 +348,21 @@ class Transcriber:
     @property
     def is_loaded(self) -> bool:
         return self._model is not None
+
+    def unload(self) -> bool:
+        """Free the loaded model; the next transcribe() loads it again.
+        Returns False, and keeps the model, while a transcription holds the
+        lock: freeing it mid-decode is never worth the memory."""
+        if not self._transcribe_lock.acquire(blocking=False):
+            return False
+        try:
+            with self._load_lock:
+                if self._model is None:
+                    return True
+                self._model = None
+        finally:
+            self._transcribe_lock.release()
+        import gc
+        gc.collect()
+        print(f"[Transcriber] Unloaded '{self.model_size}'.")
+        return True
