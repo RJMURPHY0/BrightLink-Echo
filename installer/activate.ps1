@@ -621,6 +621,24 @@ if ($Relaunch) {
     Log 'The new version reported healthy.'
 }
 
+# 6b. A migration hands Windows' registrations (Installed apps entry, logon
+#     task, App Paths) from the legacy names to the current ones. The new
+#     version also does this as it starts, on a background thread that CI saw
+#     stall before its first step (2026-10-08, 1 run in 4), leaving the legacy
+#     Installed apps entry and logon task behind. Here it runs to the end in
+#     its own process before the update is done, as Install mode's does. A
+#     failure only logs: the app retries at its next start, and a working
+#     update is never undone for it.
+if ($script:PrevHomeLegacy -and -not $NoSystemChanges) {
+    $code = -1
+    try {
+        $p = Start-Echo @('--install', '/S')
+        if ($p.WaitForExit(180000)) { $code = $p.ExitCode } else { try { $p.Kill() } catch {} }
+    } catch { Log "Registration could not start: $_" }
+    if ($code -eq 0) { Log 'Registered with Windows under the current names.' }
+    else { Log "Registration did not finish (exit $code); the app retries at its next start." }
+}
+
 Remove-Item -LiteralPath $script:Backup -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $script:Pending -Recurse -Force -ErrorAction SilentlyContinue
 if ($Migrating -and ($script:InstallDir -ieq $NewDir)) {

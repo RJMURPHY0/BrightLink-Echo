@@ -186,7 +186,7 @@ def collect_logs(rep: Report):
     for d, tag in ((data_paths.new_local_dir(), ""), (data_paths.legacy_local_dir(), "legacy-")):
         if not os.path.isdir(d):
             continue
-        names = [il.UPDATE_LOG, "startup-error.log", "install-state.json"]
+        names = [il.UPDATE_LOG, "startup-error.log", "install-state.json", "register-hang.log"]
         names += [n for n in os.listdir(d) if n.startswith("setup-") and n.endswith(".log")]
         for n in names:
             try:

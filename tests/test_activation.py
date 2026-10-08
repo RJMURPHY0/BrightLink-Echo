@@ -459,6 +459,22 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(0, self._run(self.legacy), self._log())
         self.assertFalse(os.path.exists(self.legacy))
 
+    def test_a_migration_registers_through_the_new_exe_before_it_is_done(self):
+        # Real registry work, so pinned on the script (the e2e runs it for real):
+        # after a healthy start, a migration runs "--install /S" and waits, and
+        # a failure there only logs (it never undoes a working update).
+        with open(SCRIPT, encoding="utf-8") as f:
+            src = f.read()
+        start = src.index("# 6b.")
+        block = src[start:src.index("Remove-Item -LiteralPath $script:Backup -Force", start)]
+        self.assertIn("$script:PrevHomeLegacy -and -not $NoSystemChanges", block)
+        self.assertIn("Start-Echo @('--install', '/S')", block)
+        self.assertIn("WaitForExit(180000)", block)
+        self.assertNotIn("Restore-Previous", block)
+        self.assertNotIn("Finish", block)
+        # After the health check, so only a version that starts is registered.
+        self.assertLess(src.index("The new version reported healthy."), src.index("# 6b."))
+
     def test_a_locked_file_in_the_legacy_folder_leaves_everything_and_relaunches(self):
         # The FIRST move fails, so nothing has moved yet: the previous version
         # must still be started again (CI 2026-10-08: it was not, and the log

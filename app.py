@@ -4351,12 +4351,24 @@ def _register_application() -> None:
     """
     if not getattr(sys, "frozen", False):
         return
+    watchdog = None
     try:
         import app_install
 
         target = _startup_target()
         install_layout.log(f"Registering {APP_VERSION} with Windows from {target}.")
+        # CI saw this thread stop before its first registry write (2026-10-08,
+        # 1 run in 4). If it ever takes 90 s, every thread's stack goes to
+        # register-hang.log beside the exe, so the cause can be read.
+        try:
+            import faulthandler
+            watchdog = open(os.path.join(os.path.dirname(target), "register-hang.log"), "w",
+                            encoding="utf-8")
+            faulthandler.dump_traceback_later(90, repeat=False, file=watchdog)
+        except Exception:
+            watchdog = None
         app_install.register(target, APP_VERSION)
+        install_layout.log(f"Registered {APP_VERSION} with Windows.")
     except Exception as e:
         print(f"[App] Application registration skipped (non-fatal): {e}")
         # In update.log, not just stdout: a windowed build has no console, and a
@@ -4366,6 +4378,18 @@ def _register_application() -> None:
         install_layout.log("Registration failed: " + "".join(
             traceback.format_exception_only(type(e), e)).strip()
             + " | " + traceback.format_exc().strip().splitlines()[-3][:200])
+    finally:
+        if watchdog is not None:
+            try:
+                import faulthandler
+                faulthandler.cancel_dump_traceback_later()
+                watchdog.close()
+                # faulthandler writes to the file descriptor directly, so ask the
+                # file system, not the file object, whether anything was dumped.
+                if os.path.getsize(watchdog.name) == 0:   # finished in time
+                    os.remove(watchdog.name)
+            except Exception:
+                pass
 
 
 def _reconcile_legacy_launchers() -> None:
