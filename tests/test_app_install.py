@@ -11,7 +11,9 @@ Two things must never regress here:
 
 import inspect
 import os
+import shutil
 import sys
+import time
 import tempfile
 import unittest
 from unittest import mock
@@ -305,6 +307,49 @@ class DeleteGuardTests(unittest.TestCase):
         self.assertIn("Remove-Item -LiteralPath $d -Recurse -Force", script)
         self.assertIn("s.ps1", script)
 
+    def test_cleanup_script_stops_a_relaunched_copy_and_logs(self):
+        d = os.path.join(self.local, "BrightLink Echo")
+        script = app_install.cleanup_script(
+            4321, [d], "s.ps1", "u.log",
+            keys=["Software\\Classes\\ftcwhisper"], tasks=["BrightLink Echo"],
+            run_values=["BrightLink Echo"], files=["C:\\x\\a.lnk"],
+        )
+        # anything running from inside the folder is stopped before each delete
+        self.assertIn("Win32_Process", script)
+        self.assertIn("Stop-Process", script)
+        self.assertIn("AddSeconds(90)", script)
+        # a failure is written down, never silent
+        self.assertIn("COULD NOT REMOVE", script)
+        self.assertIn("u.log", script)
+        # a launch during the uninstall re-registers; the entries go again after
+        self.assertIn("schtasks /delete /tn $t /f", script)
+        self.assertIn("Remove-ItemProperty", script)
+        self.assertIn("ftcwhisper", script)
+        self.assertIn("a.lnk", script)
+        self.assertLess(script.index("Remove-Item -LiteralPath $d"),
+                        script.index("schtasks /delete"))
+
+    def test_spawn_cleanup_lists_every_name_both_generations(self):
+        d = tempfile.mkdtemp()
+        written = {}
+
+        def fake_popen(cmd, **kw):
+            with open(cmd[-1], encoding="utf-8") as f:
+                written["script"] = f.read()
+            return mock.Mock()
+
+        try:
+            with mock.patch.object(app_install, "safe_to_delete", return_value=True), \
+                    mock.patch.object(app_install.subprocess, "Popen", fake_popen):
+                app_install._spawn_cleanup([d])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        script = written["script"]
+        for name in (brand.TASK_NAME, brand.LEGACY_TASK_NAME, brand.URL_SCHEME,
+                     brand.LEGACY_URL_SCHEME, brand.UNINSTALL_KEY_NAME,
+                     brand.LEGACY_UNINSTALL_KEY_NAME):
+            self.assertIn(name, script)
+
     def test_spawn_never_uses_detached_process(self):
         # DETACHED_PROCESS combined with CREATE_NO_WINDOW makes powershell.exe
         # exit 0 without running -File. That exact pair silently broke every
@@ -315,6 +360,67 @@ class DeleteGuardTests(unittest.TestCase):
         )
         self.assertNotIn("DETACHED_PROCESS", code)
         self.assertIn("CREATE_NO_WINDOW", inspect.getsource(app_install))
+
+
+class UninstallMarkerTests(unittest.TestCase):
+    """A relaunch while the cleanup is removing the folder must not bring the
+    app back (it re-registered everything and ran with the model deleted)."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.folder = os.path.join(self.root, "BrightLink Echo")
+        os.makedirs(self.folder)
+        self.exe = os.path.join(self.folder, "BrightLink Echo.exe")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_no_marker_never_blocks(self):
+        self.assertFalse(app_install.uninstall_pending(self.exe, dirs=[self.folder]))
+
+    def test_a_fresh_marker_blocks_a_copy_in_that_folder(self):
+        app_install.write_uninstall_marker([self.folder])
+        self.assertTrue(app_install.uninstall_pending(self.exe, dirs=[self.folder]))
+        nested = os.path.join(self.folder, "app-1.8.5", "BrightLink Echo.exe")
+        self.assertTrue(app_install.uninstall_pending(nested, dirs=[self.folder]))
+
+    def test_a_stale_marker_stops_counting(self):
+        app_install.write_uninstall_marker([self.folder])
+        later = time.time() + app_install.UNINSTALL_MARKER_TTL + 5
+        self.assertFalse(app_install.uninstall_pending(self.exe, now=later, dirs=[self.folder]))
+
+    def test_a_copy_elsewhere_is_never_blocked(self):
+        app_install.write_uninstall_marker([self.folder])
+        other = os.path.join(self.root, "Downloads", "BrightLink-Echo.exe")
+        self.assertFalse(app_install.uninstall_pending(other, dirs=[self.folder]))
+        # a sibling whose name merely starts the same
+        sibling = os.path.join(self.root, "BrightLink Echo 2", "BrightLink Echo.exe")
+        self.assertFalse(app_install.uninstall_pending(sibling, dirs=[self.folder]))
+
+    def test_marker_is_written_only_into_folders_that_exist(self):
+        missing = os.path.join(self.root, "nope")
+        written = app_install.write_uninstall_marker([self.folder, missing])
+        self.assertEqual(written, [os.path.join(self.folder, app_install.UNINSTALL_MARKER)])
+        self.assertFalse(os.path.exists(missing))
+
+    def test_run_uninstall_writes_the_marker_before_it_kills_anything(self):
+        order = []
+        with mock.patch.object(app_install, "write_uninstall_marker",
+                               lambda *a, **k: order.append("marker")), \
+                mock.patch.object(app_install, "_kill_other_instances",
+                                  lambda: order.append("kill")), \
+                mock.patch.object(app_install, "_remove_launchers", lambda: None), \
+                mock.patch.object(app_install, "_remove_registry_entries", lambda: None), \
+                mock.patch.object(app_install, "_remove_shortcuts", lambda: None):
+            self.assertEqual(app_install.run_uninstall(silent=True), 0)
+        self.assertEqual(order, ["marker", "kill"])
+
+    def test_setup_deletes_the_marker_on_a_reinstall(self):
+        iss = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "installer", "echo.iss")
+        with open(iss, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn(app_install.UNINSTALL_MARKER, text)
 
 
 class CleanupInsideAJobTests(unittest.TestCase):
@@ -368,7 +474,7 @@ class NotificationIdentityTests(unittest.TestCase):
             app_install._install_dir())
 
     def test_uninstall_removes_the_key(self):
-        src = inspect.getsource(app_install._remove_registry_entries)
+        src = inspect.getsource(app_install._registry_key_paths)
         self.assertIn("NOTIFICATION_ID_KEY", src)
 
     def test_registered_before_the_window_exists(self):

@@ -132,6 +132,18 @@ def stop_all() -> None:
     time.sleep(2)
 
 
+def running_images() -> list:
+    """Image names of our exe that are running right now."""
+    out = []
+    for image in (brand.CANONICAL_EXE_NAME, brand.LEGACY_CANONICAL_EXE_NAME,
+                  brand.DOWNLOAD_ASSET, brand.UPDATE_ASSET):
+        r = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {image}", "/FO", "CSV", "/NH"],
+                           capture_output=True, text=True, creationflags=NO_WIN)
+        if image.lower() in (r.stdout or "").lower():
+            out.append(image)
+    return out
+
+
 def wait_ping(timeout: float) -> float:
     t0 = time.time()
     while time.time() - t0 < timeout:
@@ -422,10 +434,22 @@ def main(argv=None) -> int:
     if os.path.isdir(models):
         shutil.rmtree(parked, ignore_errors=True)
         shutil.move(models, parked)
-    subprocess.run([exe, "--uninstall", "/S"], timeout=120)
+    # A person opens the app again while the uninstall is still running (the
+    # taskbar pin or Start entry is still there for a moment). That launch used
+    # to re-register everything and leave a window with no model behind.
+    uninstaller = subprocess.Popen([exe, "--uninstall", "/S"], creationflags=NO_WIN)
+    relaunched = []
+    for _ in range(8):
+        time.sleep(1.5)
+        if os.path.exists(exe):
+            relaunched.append(subprocess.Popen([exe], creationflags=NO_WIN))
+    uninstaller.wait(timeout=120)
     deadline = time.time() + 240  # thousands of leftover onefile unpack files
     while time.time() < deadline and os.path.exists(root):
         time.sleep(1)
+    time.sleep(3)  # the cleanup removes the entries once more after the folder
+    rep.check("nothing of ours is still running after the uninstall", not running_images(),
+              running_images())
     rep.check("uninstall removed the install folder",
               not os.path.exists(root) and not os.path.exists(old_root))
     rep.check("uninstall removed the Installed apps entry", not uninstall_entries(), uninstall_entries())

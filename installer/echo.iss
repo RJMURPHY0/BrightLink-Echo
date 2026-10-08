@@ -93,6 +93,8 @@ Name: "startup"; Description: "&Start {#AppName} when I sign in to Windows"
 [InstallDelete]
 ; A half-written pending folder from an interrupted run is never reused.
 Type: filesandordirs; Name: "{app}\{#PendingPrefix}*"
+; An uninstall's marker (app_install.UNINSTALL_MARKER) must never block a fresh install.
+Type: files; Name: "{app}\uninstalling.flag"
 
 [Files]
 Source: "{#SourceDir}\{#ExeName}"; DestDir: "{app}\{#PendingDir}"; Flags: ignoreversion

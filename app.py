@@ -4562,6 +4562,16 @@ def _main() -> None:
         if _uninstall_requested():
             from app_install import run_uninstall
             os._exit(run_uninstall(silent=_uninstall_silent()))
+        # An uninstall started moments ago and its cleanup is still removing
+        # this folder. Starting now would register the app again over it and
+        # leave a window with no model behind; exit without a trace.
+        if getattr(sys, "frozen", False):
+            try:
+                from app_install import uninstall_pending
+                if uninstall_pending():
+                    os._exit(0)
+            except Exception as e:
+                print(f"[App] Uninstall check skipped: {e}")
         # Same place and same reason: the Store's silent install may run while
         # the app is open, and must neither hand off nor show anything.
         if _install_requested():

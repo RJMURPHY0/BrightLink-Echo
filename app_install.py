@@ -65,6 +65,15 @@ LEGACY_URL_PROTOCOL_KEY = "Software\\Classes\\" + brand.LEGACY_URL_SCHEME
 
 STATE_FILE = "install-state.json"
 
+# Written into the install folder when an uninstall starts. A copy launched
+# from that folder while it is fresh exits at once instead of registering
+# itself again over the half-removed install (a relaunch in the seconds the
+# cleanup takes left the UI up with the model deleted and every Windows entry
+# rewritten). The folder's own deletion removes it; Setup deletes it on a
+# reinstall; after UNINSTALL_MARKER_TTL it stops counting.
+UNINSTALL_MARKER = "uninstalling.flag"
+UNINSTALL_MARKER_TTL = 15 * 60
+
 # MessageBoxW
 _MB_YESNO = 0x00000004
 _MB_ICONQUESTION = 0x00000020
@@ -780,22 +789,31 @@ def _remove_launchers() -> None:
     remove_legacy_launchers()
 
 
-def _remove_registry_entries() -> None:
-    import winreg
-
+def _registry_key_paths() -> list:
+    """Every HKCU key tree an install writes, both generations of name."""
     paths = [UNINSTALL_KEY, APP_PATHS_KEY, URL_PROTOCOL_KEY, NOTIFICATION_ID_KEY,
              LEGACY_UNINSTALL_KEY, LEGACY_APP_PATHS_KEY, LEGACY_URL_PROTOCOL_KEY]
     paths += [app_paths_key(n) for n in brand.product_names()]
-    for path in paths:
+    return list(dict.fromkeys(paths))
+
+
+def _remove_registry_entries() -> None:
+    import winreg
+
+    for path in _registry_key_paths():
         _delete_key_tree(winreg.HKEY_CURRENT_USER, path)
 
 
-def _remove_shortcuts() -> None:
+def _shortcut_paths() -> list:
     paths = []
     for name in brand.product_names():
         paths += [start_menu_link(name), desktop_link(name),
                   os.path.join(startup_dir(), f"{name}.lnk")]
-    for path in paths:
+    return paths
+
+
+def _remove_shortcuts() -> None:
+    for path in _shortcut_paths():
         try:
             if os.path.exists(path):
                 os.remove(path)
@@ -825,24 +843,98 @@ def safe_to_delete(path: str) -> bool:
     return False
 
 
-def cleanup_script(pid: int, dirs: list, script_path: str) -> str:
+def write_uninstall_marker(dirs=None) -> list:
+    """Drop the marker in each install folder that exists. Returns the paths."""
+    written = []
+    for d in (data_paths.all_local_dirs() if dirs is None else dirs):
+        if not os.path.isdir(d):
+            continue
+        path = os.path.join(d, UNINSTALL_MARKER)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(str(int(time.time())))
+            written.append(path)
+        except OSError as e:
+            print(f"[Install] Could not write {path}: {e}")
+    return written
+
+
+def uninstall_pending(exe: str = "", now: float = 0.0, dirs=None) -> bool:
+    """True when this exe sits in an install folder whose uninstall started
+    moments ago. Only a copy running from inside that folder counts, so a
+    reinstall elsewhere or a source run is never blocked."""
+    exe = os.path.normcase(os.path.abspath(exe or sys.executable))
+    now = now or time.time()
+    for d in (data_paths.all_local_dirs() if dirs is None else dirs):
+        folder = os.path.normcase(os.path.abspath(d))
+        if not exe.startswith(folder + os.sep):
+            continue
+        try:
+            age = now - os.path.getmtime(os.path.join(d, UNINSTALL_MARKER))
+        except OSError:
+            continue
+        if abs(age) < UNINSTALL_MARKER_TTL:
+            return True
+    return False
+
+
+def uninstall_log_path() -> str:
+    import tempfile
+
+    return os.path.join(tempfile.gettempdir(), f"{brand.FILE_SLUG}_uninstall.log")
+
+
+def cleanup_script(pid: int, dirs: list, script_path: str, log_path: str = "",
+                   keys: list = (), tasks: list = (), run_values: list = (),
+                   files: list = ()) -> str:
     """PowerShell that waits for this process to exit, then removes the install
-    folders. Deferred because a running exe cannot delete itself."""
-    targets = ", ".join(f"'{_ps_quote(d)}'" for d in dirs)
+    folders. Deferred because a running exe cannot delete itself.
+
+    A copy launched while the folder is going (the user opening the app again)
+    would hold the exe open and rewrite every Windows entry, so the loop stops
+    anything running from inside a target folder before each delete attempt,
+    keeps going for up to 90 seconds, and finally removes the entries again.
+    Every step lands in *log_path*, so a leftover is never silent."""
+    q = _ps_quote
+
+    def lit(items):
+        return ", ".join(f"'{q(i)}'" for i in items)
+
+    run_keys = [RUN_KEY, STARTUP_APPROVED_KEY] if run_values else []
     return f"""$ErrorActionPreference = 'SilentlyContinue'
+$log = '{q(log_path)}'
+function Log($m) {{ if ($log) {{ Add-Content -LiteralPath $log -Value ('{{0:s}} {{1}}' -f (Get-Date), $m) }} }}
+Log 'cleanup started (uninstaller pid {pid})'
 while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{
     Start-Sleep -Milliseconds 400
 }}
 Start-Sleep -Milliseconds 800
-foreach ($d in @({targets})) {{
-    for ($i = 0; $i -lt 20; $i++) {{
-        if (-not (Test-Path -LiteralPath $d)) {{ break }}
-        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
-        if (-not (Test-Path -LiteralPath $d)) {{ break }}
+$deadline = (Get-Date).AddSeconds(90)
+foreach ($d in @({lit(dirs)})) {{
+    while ($true) {{
+        Get-CimInstance Win32_Process | Where-Object {{
+            $_.ExecutablePath -and $_.ExecutablePath.StartsWith($d + '\\', [StringComparison]::OrdinalIgnoreCase)
+        }} | ForEach-Object {{ Log ('stopping ' + $_.ExecutablePath + ' (pid ' + $_.ProcessId + ')'); Stop-Process -Id $_.ProcessId -Force }}
+        if (Test-Path -LiteralPath $d) {{
+            Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+        }}
+        if (-not (Test-Path -LiteralPath $d)) {{ Log ('removed ' + $d); break }}
+        if ((Get-Date) -gt $deadline) {{
+            $left = (Get-ChildItem -LiteralPath $d -Recurse -Force -File | Select-Object -First 5 -ExpandProperty FullName) -join '; '
+            Log ('COULD NOT REMOVE ' + $d + ' ; left: ' + $left)
+            break
+        }}
         Start-Sleep -Seconds 1
     }}
 }}
-Remove-Item -LiteralPath '{_ps_quote(script_path)}' -Force -ErrorAction SilentlyContinue
+foreach ($t in @({lit(tasks)})) {{ schtasks /delete /tn $t /f | Out-Null }}
+foreach ($k in @({lit(run_keys)})) {{
+    foreach ($v in @({lit(run_values)})) {{ Remove-ItemProperty -LiteralPath ('HKCU:\\' + $k) -Name $v -ErrorAction SilentlyContinue }}
+}}
+foreach ($k in @({lit(keys)})) {{ Remove-Item -LiteralPath ('HKCU:\\' + $k) -Recurse -Force -ErrorAction SilentlyContinue }}
+foreach ($f in @({lit(files)})) {{ Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }}
+Log 'cleanup finished'
+Remove-Item -LiteralPath '{q(script_path)}' -Force -ErrorAction SilentlyContinue
 """
 
 
@@ -856,7 +948,13 @@ def _spawn_cleanup(dirs: list) -> None:
         tempfile.gettempdir(), f"{brand.FILE_SLUG}_uninstall_{os.getpid()}.ps1"
     )
     with open(script_path, "w", encoding="utf-8") as f:
-        f.write(cleanup_script(os.getpid(), dirs, script_path))
+        f.write(cleanup_script(
+            os.getpid(), dirs, script_path, uninstall_log_path(),
+            keys=_registry_key_paths(),
+            tasks=list(dict.fromkeys([TASK_NAME, brand.LEGACY_TASK_NAME])),
+            run_values=list(dict.fromkeys([brand.RUN_VALUE_NAME, brand.LEGACY_RUN_VALUE_NAME])),
+            files=_shortcut_paths(),
+        ))
 
     # Same launch contract as the updater's swap script: CREATE_NO_WINDOW and
     # NEVER DETACHED_PROCESS (conflicting console modes make powershell.exe exit
@@ -905,6 +1003,7 @@ def run_uninstall(silent: bool = False) -> int:
             _MB_YESNO | _MB_ICONQUESTION | _MB_SETFOREGROUND | _MB_TOPMOST,
         ) == _IDYES
 
+    write_uninstall_marker()
     _kill_other_instances()
     _remove_launchers()
     _remove_registry_entries()
