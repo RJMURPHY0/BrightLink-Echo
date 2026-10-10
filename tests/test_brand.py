@@ -372,9 +372,12 @@ class VersionResourceTests(unittest.TestCase):
     def test_the_installer_leaves_one_installed_apps_entry_and_no_admin(self):
         iss = open(os.path.join(ROOT, "installer", "echo.iss"), encoding="utf-8").read()
         for line in ("PrivilegesRequired=lowest", "Uninstallable=no", "CreateUninstallRegKey=no",
-                     "CloseApplications=no", "DefaultDirName={code:InstallRoot}",
-                     "SetupMutex={#SetupMutex},{#LegacySetupMutex}"):
+                     "CloseApplications=no", "DefaultDirName={code:InstallRoot}"):
             self.assertIn(line, iss)
+        # The single-instance guard claims both mutex names itself (silently).
+        guard = open(os.path.join(ROOT, "installer", "single_instance.isi"), encoding="utf-8").read()
+        self.assertIn("{#SetupMutex}", guard)
+        self.assertIn("{#LegacySetupMutex}", guard)
         # Staging runs while the app is open, so no AppMutex directive.
         self.assertNotIn("\nAppMutex=", iss)
         self.assertIn("VersionInfoOriginalFileName={#OutputBase}.exe", iss)

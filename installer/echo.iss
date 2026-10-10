@@ -20,6 +20,9 @@
 ;     (Uninstallable=no): the app's own entry is the only one, and its
 ;     "<exe> --uninstall" removes everything
 ;   * no AppMutex: staging must be allowed while the app runs
+;   * one Setup at a time, silently: single_instance.isi claims the SetupMutex names itself
+;     (Inno's own SetupMutex= answers every extra click with a modal box) and a second
+;     launch just brings the first window forward
 ;   * the speech model is NOT in here: the app downloads it once, with its own
 ;     retry, resume and per-file SHA-256 check
 ;
@@ -63,7 +66,6 @@ Uninstallable=no
 CreateUninstallRegKey=no
 CloseApplications=no
 RestartApplications=no
-SetupMutex={#SetupMutex},{#LegacySetupMutex}
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputBase}
 SetupIconFile={#IconFile}
@@ -206,3 +208,5 @@ begin
   else
     Result := 0;
 end;
+
+#include "single_instance.isi"

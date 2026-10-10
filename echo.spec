@@ -27,6 +27,16 @@ datas    = []
 binaries = []
 hiddenimports = []
 
+# collect_all also copies every package's .py files next to the exe as "data".
+# Each module is already in the PYZ archive (collect_all returns every submodule
+# as a hidden import), so those copies are dead weight: openai and anthropic
+# alone shipped ~3,000 source files, 72% of the install's 5,300 files. Every
+# file is copied, hashed, moved and virus-scanned on each install and update
+# (about 3.5 minutes on a laptop with Avast). Everything that is not source
+# (the onnx assets, py.typed, certificates) is kept. app.py's --selftest imports
+# every one of these packages in the built exe, so a miss fails the build.
+_LOOSE_SOURCE = ('.py', '.pyc', '.pyi')
+
 # ── Collect all data / binaries / hidden imports for complex packages ────────
 for pkg in [
     'faster_whisper',
@@ -55,6 +65,7 @@ for pkg in [
 ]:
     try:
         d, b, h = collect_all(pkg)
+        d = [e for e in d if not e[0].lower().endswith(_LOOSE_SOURCE)]
         datas    += d
         binaries += b
         hiddenimports += h

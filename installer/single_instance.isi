@@ -1,0 +1,66 @@
+// One Setup at a time, silently.
+//
+// Inno's own SetupMutex answers every extra launch with a modal "Setup is
+// already running" box. The installer is ~88 MB and takes a while to show its
+// first window (antivirus scans the file), so people click the download again
+// and again: seven clicks left six boxes to dismiss. This claims the same two
+// mutex names itself (the current one and the legacy one a v1.8.0 to v1.8.4
+// updater's stage-only run holds), and a second launch brings the first Setup
+// window forward and exits without a word.
+//
+// Included by installer/echo.iss and by tests/test_installer_single_instance.py,
+// which builds a tiny Setup around it. Define TestHoldMs to keep the first
+// instance alive that long after it has claimed the mutex (tests only).
+//
+// Pascal Script only: include it inside an open [Code] section.
+
+function CreateMutexW(Attributes: Longint; InitialOwner: Longint; Name: String): Longint;
+  external 'CreateMutexW@kernel32.dll stdcall setuponly';
+function SetForegroundWindow(Wnd: HWND): Boolean;
+  external 'SetForegroundWindow@user32.dll stdcall setuponly';
+function ShowWindow(Wnd: HWND; Command: Integer): Boolean;
+  external 'ShowWindow@user32.dll stdcall setuponly';
+function IsIconic(Wnd: HWND): Boolean;
+  external 'IsIconic@user32.dll stdcall setuponly';
+
+// True when this call created the mutex, False when another Setup owns it.
+// CreateMutex succeeds either way and sets ERROR_ALREADY_EXISTS (183) for an
+// existing one, and it is atomic: two launches in the same instant cannot
+// both win.
+function ClaimSetupMutex(Name: String): Boolean;
+begin
+  CreateMutexW(0, 0, Name);
+  Result := DLLGetLastError <> 183;
+end;
+
+procedure ShowTheRunningSetup;
+var
+  Wnd: HWND;
+begin
+  Wnd := FindWindowByWindowName('Setup - {#AppName} {#AppVersion}');
+  if Wnd <> 0 then
+  begin
+    if IsIconic(Wnd) then
+      ShowWindow(Wnd, 9);  // SW_RESTORE
+    SetForegroundWindow(Wnd);
+  end;
+end;
+
+function InitializeSetup: Boolean;
+var
+  Current, Legacy: Boolean;
+begin
+  Current := ClaimSetupMutex('{#SetupMutex}');
+  Legacy := ClaimSetupMutex('{#LegacySetupMutex}');
+  Result := Current and Legacy;
+  if not Result then
+  begin
+    Log('Another Setup is already running: exiting without a message.');
+    ShowTheRunningSetup;
+  end
+#ifdef TestHoldMs
+  else
+    Sleep({#TestHoldMs})
+#endif
+  ;
+end;

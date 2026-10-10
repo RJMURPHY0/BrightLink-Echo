@@ -73,7 +73,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.8.6"
+APP_VERSION = "1.8.7"
 
 
 class _RECT(ctypes.Structure):
@@ -4635,6 +4635,36 @@ def _selftest(args: list) -> int:
         report["foreign_runtime"] = pyi_runtime.running_on_foreign_runtime()
         import onnxruntime
         report["onnxruntime"] = onnxruntime.__version__
+        # The build ships no loose .py copies (echo.spec _LOOSE_SOURCE), so each
+        # package must come out of the PYZ archive. The AI SDKs are imported
+        # lazily by the refine path: without this a bundle that lost one would
+        # only fail at someone's first dictation that used it.
+        import importlib
+        sdk = {}
+        for mod in ("openai", "anthropic", "httpx", "httpcore", "anyio", "supabase",
+                    "gotrue", "postgrest", "storage3", "realtime", "huggingface_hub",
+                    "onnx_asr", "tokenizers", "faster_whisper", "ctranslate2",
+                    "sounddevice", "pystray", "PIL.Image", "PIL.ImageDraw", "tqdm",
+                    "packaging.version", "filelock"):
+            try:
+                importlib.import_module(mod)
+                sdk[mod] = "ok"
+            except BaseException as e:
+                sdk[mod] = f"{type(e).__name__}: {e}"[:200]
+        try:
+            import openai
+            import anthropic
+            openai.OpenAI(api_key="selftest", base_url="https://127.0.0.1")
+            anthropic.Anthropic(api_key="selftest")
+            from openai.types.chat import ChatCompletion  # noqa: F401
+            from anthropic.types import Message  # noqa: F401
+            sdk["clients"] = "ok"
+        except BaseException as e:
+            sdk["clients"] = f"{type(e).__name__}: {e}"[:200]
+        report["sdk_imports"] = sdk
+        bad = {k: v for k, v in sdk.items() if v != "ok"}
+        if bad:
+            raise RuntimeError(f"packaged imports failed: {bad}")
         import audio_store
         from asr_engine import ParakeetTranscriber
         audio, rate = audio_store.read(args[0])
