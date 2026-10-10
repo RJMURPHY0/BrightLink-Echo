@@ -29,6 +29,14 @@ def _find_iscc() -> str:
     return ""
 
 
+def _kill_tree(proc) -> None:
+    """Inno's loader starts a .tmp child that does the work; killing only the
+    loader leaves it holding the mutex."""
+    if proc.poll() is None:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                       capture_output=True, creationflags=NO_WIN)
+
+
 def _visible_windows_of(pid: int) -> list:
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     found = []
@@ -73,7 +81,7 @@ class SecondSetupIsSilentTests(unittest.TestCase):
                 time.sleep(0.1)
             exited = second.poll() is not None
             if not exited:
-                second.kill()
+                _kill_tree(second)
             self.assertTrue(exited, f"the second Setup stayed open; windows seen: {seen}")
             self.assertEqual(seen, [], "the second Setup must show nothing")
             self.assertIsNone(first.poll(), "the first Setup is unaffected by the second")
@@ -94,9 +102,20 @@ class SecondSetupIsSilentTests(unittest.TestCase):
             self.assertEqual(alive, [], f"extra Setups still open: {alive}")
         finally:
             for p in extras:
-                if p.poll() is None:
-                    p.kill()
+                _kill_tree(p)
             first.wait(timeout=30)
+
+    def test_launches_in_the_same_instant_leave_exactly_one(self):
+        # No head start for anyone: every launch races for the mutex. A guard
+        # that let two of them each win one name would leave none running.
+        procs = [subprocess.Popen([self.exe], creationflags=NO_WIN) for _ in range(8)]
+        try:
+            time.sleep(3.0)  # the winner holds for the test's 6 s; the rest have exited
+            alive = [p.pid for p in procs if p.poll() is None]
+            self.assertEqual(len(alive), 1, f"expected exactly one Setup, found {alive}")
+        finally:
+            for p in procs:
+                _kill_tree(p)
 
     def test_it_is_free_again_once_the_first_finishes(self):
         subprocess.run([self.exe, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],

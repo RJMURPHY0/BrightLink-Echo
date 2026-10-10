@@ -47,12 +47,13 @@ begin
 end;
 
 function InitializeSetup: Boolean;
-var
-  Current, Legacy: Boolean;
 begin
-  Current := ClaimSetupMutex('{#SetupMutex}');
-  Legacy := ClaimSetupMutex('{#LegacySetupMutex}');
-  Result := Current and Legacy;
+  // Stop at the first mutex that is taken. Claiming the legacy one as well
+  // after losing the current one lets two simultaneous launches each win one
+  // name and both exit, leaving no Setup at all.
+  Result := ClaimSetupMutex('{#SetupMutex}');
+  if Result then
+    Result := ClaimSetupMutex('{#LegacySetupMutex}');
   if not Result then
   begin
     Log('Another Setup is already running: exiting without a message.');

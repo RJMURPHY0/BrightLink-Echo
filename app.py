@@ -4642,7 +4642,7 @@ def _selftest(args: list) -> int:
         import importlib
         sdk = {}
         for mod in ("openai", "anthropic", "httpx", "httpcore", "anyio", "supabase",
-                    "gotrue", "postgrest", "storage3", "realtime", "huggingface_hub",
+                    "supabase_auth", "postgrest", "storage3", "realtime", "huggingface_hub",
                     "onnx_asr", "tokenizers", "faster_whisper", "ctranslate2",
                     "sounddevice", "pystray", "PIL.Image", "PIL.ImageDraw", "tqdm",
                     "packaging.version", "filelock"):
@@ -4661,6 +4661,23 @@ def _selftest(args: list) -> int:
             sdk["clients"] = "ok"
         except BaseException as e:
             sdk["clients"] = f"{type(e).__name__}: {e}"[:200]
+        try:
+            import io
+            from PIL import Image
+            Image.init()
+            buf = io.BytesIO()
+            Image.new("RGBA", (8, 8), (243, 146, 0, 255)).save(buf, "PNG")
+            buf.seek(0)
+            sdk["PIL png round trip"] = "ok" if Image.open(buf).size == (8, 8) else "wrong size"
+        except BaseException as e:
+            sdk["PIL png round trip"] = f"{type(e).__name__}: {e}"[:200]
+        try:
+            import tkinter
+            tcl = tkinter.Tcl()
+            tcl.eval("package require msgcat")
+            sdk["tcl"] = "ok" if tcl.eval("expr {1+1}") == "2" else "wrong"
+        except BaseException as e:
+            sdk["tcl"] = f"{type(e).__name__}: {e}"[:200]
         report["sdk_imports"] = sdk
         bad = {k: v for k, v in sdk.items() if v != "ok"}
         if bad:

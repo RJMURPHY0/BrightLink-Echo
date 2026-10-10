@@ -187,7 +187,9 @@ begin
       Params := Params + ' -StartWithWindows 1'
     else
       Params := Params + ' -StartWithWindows 0';
-    WizardForm.StatusLabel.Caption := 'Finishing installation...';
+    // The bar sat full and still for a minute or more while activate.ps1 ran.
+    WizardForm.ProgressGauge.Style := npbstMarquee;
+    WizardForm.StatusLabel.Caption := 'Finishing installation: checking files and registering with Windows...';
     if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params,
                 ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ActivationCode) then
       ActivationCode := -1;

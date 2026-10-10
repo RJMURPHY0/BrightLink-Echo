@@ -204,6 +204,32 @@ a = Analysis(
     noarchive=False,
 )
 
+# Measured on a laptop with on-access antivirus (Setup log, 2026-10-08): the
+# 5,336 files took 107 s to install. Besides the loose sources above (37 s):
+#   * _tcl_data/tzdata: 609 tiny files (~13 s) for Tcl's `clock -timezone`,
+#     which tkinter never calls; Python's own time zones do not use them.
+#   * _tcl_data/msgs: 127 locale tables for msgcat's translated Tk dialogs; the
+#     app draws its own UI and Tcl falls back to its built-in English.
+#   * PIL/_avif: Pillow's AVIF codec, a 7.5 MB native module (~4 s of scanning)
+#     for a format the app never reads or writes; Pillow catches the missing
+#     import and reports AVIF as unsupported (app --selftest runs Image.init()).
+def _drop_data(entry):
+    name = entry[0].replace('\\', '/').lower()
+    if name.startswith(('_tcl_data/tzdata/', 'tcl/tzdata/')):
+        return True
+    if name.startswith(('_tcl_data/msgs/', 'tcl/msgs/')):
+        return not os.path.basename(name).startswith('en')
+    return False
+
+
+def _drop_binary(entry):
+    name = entry[0].replace('\\', '/').lower()
+    return name.startswith('pil/_avif')
+
+
+a.datas = [e for e in a.datas if not _drop_data(e)]
+a.binaries = [e for e in a.binaries if not _drop_binary(e)]
+
 pyz = PYZ(a.pure)
 
 import re as _re

@@ -469,14 +469,33 @@ if ($already) {
 } else {
     $problems = @()
     $base = if ($source -eq $script:PendingContents) { $script:Pending } else { $script:InstallDir }
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    # One directory listing (about half a second for 5,000 files) instead of one
+    # Get-Item per file (seven seconds). A listing that fails, say on a path
+    # over the old limit, falls back to checking each file as before.
+    $sizes = $null
+    try {
+        $sizes = New-Object 'System.Collections.Generic.Dictionary[string,long]' ([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($fi in (New-Object System.IO.DirectoryInfo $base).EnumerateFiles('*', [System.IO.SearchOption]::AllDirectories)) {
+            $sizes[$fi.FullName] = $fi.Length
+        }
+    } catch { $sizes = $null; Log "Directory listing failed ($($_.Exception.Message)): checking file by file." }
     foreach ($f in $manifest.files) {
         $full = Join-Path $base (([string]$f.path) -replace '/', '\')
-        $item = Get-Item -LiteralPath $full -ErrorAction SilentlyContinue
-        if (-not $item) { $problems += "missing $($f.path)" }
-        elseif ($item.Length -ne [int64]$f.size) { $problems += "size $($f.path)" }
+        if ($null -ne $sizes) {
+            if (-not $sizes.ContainsKey($full)) { $problems += "missing $($f.path)" }
+            elseif ($sizes[$full] -ne [int64]$f.size) { $problems += "size $($f.path)" }
+        } else {
+            $item = Get-Item -LiteralPath $full -ErrorAction SilentlyContinue
+            if (-not $item) { $problems += "missing $($f.path)" }
+            elseif ($item.Length -ne [int64]$f.size) { $problems += "size $($f.path)" }
+        }
         if ($problems.Count -ge 5) { break }
     }
+    Log ("Checked {0} files in {1:n1} s." -f @($manifest.files).Count, $clock.Elapsed.TotalSeconds)
+    $clock.Restart()
     if (-not (Test-ExeHash $script:PendingExe $wantExe)) { $problems += "exe hash $($script:PendingExe)" }
+    Log ("Hashed the exe in {0:n1} s." -f $clock.Elapsed.TotalSeconds)
     if ($problems.Count -gt 0) {
         Log "NOT installing: pending-$Version is incomplete: $($problems -join '; ')"
         Give-Back
@@ -566,10 +585,12 @@ if ($Mode -eq 'Install') {
     if ($NoDesktopShortcut) { $argv += '--no-desktop-shortcut' }
     if ($StartWithWindows -ge 0) { $argv += "--start-with-windows=$StartWithWindows" }
     $code = -1
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         $p = Start-Echo $argv
         if ($p.WaitForExit(180000)) { $code = $p.ExitCode } else { try { $p.Kill() } catch {} }
     } catch { Log "Registration could not start: $_" }
+    Log ("Registration step took {0:n1} s." -f $clock.Elapsed.TotalSeconds)
     if ($code -ne 0) {
         Log "Registration failed (exit $code)."
         # A failed restore leaves the new exe in place: moving its folders back
