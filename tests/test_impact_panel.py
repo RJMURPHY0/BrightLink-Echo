@@ -336,7 +336,11 @@ class SpeedPanelTests(unittest.TestCase):
     ÷ time spent) are the SAME number, so both panels quote one figure and the
     footnote no longer has a 5.6×-vs-3.4× gap to reconcile."""
 
-    _SNAP = dict(avg_wpm=224, effective_wpm=224, voiced_words=30335,
+    # avg_wpm_window is pinned too: the base snapshot comes from this
+    # machine's own stats file, so a quiet day there (no window rate yet)
+    # flipped the footnote to the lifetime wording and failed these tests.
+    _SNAP = dict(avg_wpm=224, avg_wpm_window=224, effective_wpm=224,
+                 voiced_words=30335,
                  voiced_seconds=8127.0, total_words=34369,
                  dictation_time_minutes=34369 / 224.0, total_audio_seconds=15120.0,
                  refine_count=4, refine_seconds=28.0, refine_prompt_words=32)

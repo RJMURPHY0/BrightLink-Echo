@@ -1083,21 +1083,13 @@ class Injector:
             self._note_typed_fallback(text, cls)
             return self._direct_inject(text)
 
-        # Native (non-browser) target with non-text on the clipboard (a screenshot
-        # from Win+Shift+S, copied files) — applies to EVERY mode, not just auto.
-        # A clipboard paste here would (a) destroy that content and (b) can outright
-        # FAIL when the capture tool still holds the clipboard open, which is the
-        # "dictated while screenshotting, text never landed" case. WM_CHAR is
-        # reliable for native apps and touches nothing on the clipboard, so use it
-        # first; fall back to clipboard only if direct injection fully fails.
-        if self._clipboard_has_nontext():
-            print("[Injector] Clipboard holds non-text (image/files) — direct inject first (preserve it)")
-            if self._direct_inject(text):
-                return True
-            if self._partial_direct:
-                return False  # some chars landed — a paste now would duplicate them
-            print("[Injector] Direct inject failed -> clipboard paste (last resort)")
-            return self._clipboard_paste(text)
+        # A screenshot or copied files on the clipboard no longer send a native
+        # target down the typed path: since v1.6.93 the paste snapshots and
+        # restores every clipboard format, images included. Typing it instead
+        # put an email into Outlook visibly character by character, each line
+        # break a separate Enter (reported 2026-10-12). A capture tool still
+        # holding the clipboard open makes the paste fail, and the fallbacks
+        # below then type it as before.
 
         # Non-browser: respect config-driven injection mode.
         # - clipboard  : most universal for office/web/chat apps

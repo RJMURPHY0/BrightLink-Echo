@@ -411,12 +411,36 @@ def _close_body(body: str, m, text: str) -> str:
     return body
 
 
+# What the engine hears for "kind regards" said quickly at the end of an email
+# ("…in person or over Teams. Camera guards, Ryan." on 2026-10-12). Repaired
+# only as the whole last sentence AND with a name after it, so a body sentence
+# or a closing "Camera guards." about the kit itself is never touched.
+_MISHEARD_CLOSE = (
+    "camera guards", "camera regards", "kind of regards", "kinda regards",
+    "kinder regards", "kind regard", "kine regards", "kind guards",
+)
+_MISHEARD_RE = re.compile(
+    r"(?P<lead>^\s*|(?<=[.!?])\s+|,\s+|\n\s*)"
+    rf"(?P<phrase>(?i:{_alt(_MISHEARD_CLOSE)}))\b"
+    rf"(?P<tail>\s*[,.!]?\s+{_NAME}(?:\s+{_NAME}){{0,3}}\s*[.!]?\s*)$")
+
+
+def _repair_close(text: str) -> str:
+    m = _MISHEARD_RE.search(text)
+    if m is None:
+        return text
+    lead = m.group("lead")
+    kind = "kind" if lead.strip() == "," else "Kind"
+    return text[:m.start("phrase")] + kind + " regards" + m.group("tail")
+
+
 # ── Public ───────────────────────────────────────────────────────────────────
 
 def format_email(text: str, sender_name: str = "") -> str:
     """Lay out a dictated email. Unchanged when no greeting or sign-off."""
     if not text or not text.strip():
         return text
+    text = _repair_close(text)
     greeting = _split_greeting(text)
     body_start = greeting[2] if greeting else 0
     addressee = greeting[1] if greeting else ""
@@ -451,9 +475,11 @@ def format_signoff(text: str, sender_name: str = "") -> str:
     greeting included, is left exactly as spoken."""
     if not text or not text.strip():
         return text
-    m = _find_signoff(text, "", _first_name(sender_name), anywhere=True)
+    repaired = _repair_close(text)
+    m = _find_signoff(repaired, "", _first_name(sender_name), anywhere=True)
     if m is None:
         return text
+    text = repaired
     body = _close_body(text[:m.start()].rstrip(), m, text)
     block = _signoff_block(m)
     return body + "\n\n" + block if body.strip() else block

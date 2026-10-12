@@ -361,31 +361,51 @@ ICON_AUTO_DISMISS_SECS = 30.0
 #     (a held key auto-repeats, and every repeat is another key DOWN), and
 #   * the base key of the combo, held for the same reason.
 #
-# _MODIFIER_KEY_NAMES drops the first; the auto-repeat guard drops both. What
-# is left for the grace to cover is only synthetic input from OUR OWN injection
-# still draining through the hook thread, which is microseconds, not seconds.
+# _MODIFIER_VKS drops the first; the held-key guard drops both. What is left
+# for the grace to cover is only synthetic input from OUR OWN injection still
+# landing, which is microseconds, not seconds.
 KEY_DISMISS_GRACE_SECS = 0.25
 
-# Keys that never count as "the user pressed a button". A modifier on its own
-# does nothing to the document, and the hotkey's modifier is by definition down
-# at the moment the badge appears — dismissing on it would kill the badge
-# before it could be read, which is the flicker the grace window used to exist
-# to prevent. Shift held to capitalise the next word is the same story.
-_MODIFIER_KEY_NAMES = frozenset({
-    "alt", "alt gr", "left alt", "right alt",
-    "ctrl", "left ctrl", "right ctrl",
-    "shift", "left shift", "right shift",
-    "windows", "left windows", "right windows",
-    "caps lock", "num lock", "scroll lock", "fn",
+# How often the badge reads the keyboard. A tap lasts 50ms or more, and a tap
+# shorter than one poll still shows in GetAsyncKeyState's "pressed since" bit.
+KEY_DISMISS_POLL_MS = 30
+
+# Virtual keys that count as "the user pressed a button": every key from
+# Backspace up, less the ones below. Mouse buttons (VK 1-6) are left out, so a
+# click on the badge opens the panel instead of hiding it.
+#
+# A modifier on its own does nothing to the document, and the hotkey's
+# modifier is by definition down at the moment the badge appears. Shift held
+# to capitalise the next word is the same story. The generic VKs (0x10-0x12)
+# and their left/right forms are all listed: GetAsyncKeyState reports both.
+_MODIFIER_VKS = frozenset({
+    0x10, 0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5,   # shift, ctrl, alt
+    0x5B, 0x5C,                                              # windows
+    0x14, 0x90, 0x91,                                        # caps, num, scroll lock
 })
-# Taking a screenshot is looking AT the badge, not moving on from it. PrtSc
-# (every variant arrives as one of these names) and any key pressed while a
-# Windows key is held (Win+Shift+S, Win+PrtSc: shell shortcuts that never type
-# into the document) must not dismiss it, or the badge is gone before the
-# capture happens. Whether it then appears in the capture is decided by the
-# "Hide Popup in Screenshots" setting (set_capture_hidden), not by this.
-_SCREENSHOT_KEY_NAMES = frozenset({"print screen", "snapshot", "sysrq",
-                                   "prtsc", "prt sc"})
+# Taking a screenshot is looking AT the badge, not moving on from it. PrtSc,
+# and any key pressed while a Windows key is held (Win+Shift+S, Win+PrtSc:
+# shell shortcuts that never type into the document), must not dismiss it, or
+# the badge is gone before the capture happens. Whether it then appears in the
+# capture is decided by the "Hide Popup in Screenshots" setting
+# (set_capture_hidden), not by this.
+_SCREENSHOT_VKS = frozenset({0x2C})
+_DISMISS_VKS = tuple(vk for vk in range(0x08, 0xFF)
+                     if vk not in _MODIFIER_VKS and vk not in _SCREENSHOT_VKS)
+
+_U32_KEYS = None
+
+
+def _key_state(vk: int) -> int:
+    """GetAsyncKeyState on a private WinDLL (see _monitor_user32 for why)."""
+    global _U32_KEYS
+    if _U32_KEYS is None:
+        u32 = ctypes.WinDLL("user32")
+        u32.GetAsyncKeyState.restype = ctypes.c_short
+        u32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        _U32_KEYS = u32
+    return _U32_KEYS.GetAsyncKeyState(vk) & 0xFFFF
+
 
 # Screen-capture tools take the foreground while the user frames a shot (the
 # Win+Shift+S overlay is ScreenClippingHost). Moving focus to one of them is
@@ -398,24 +418,8 @@ _CAPTURE_TOOL_EXES = frozenset({
 
 
 def _windows_key_held() -> bool:
-    """True while either Windows key is physically down (fails closed)."""
-    try:
-        gaks = ctypes.windll.user32.GetAsyncKeyState
-        return bool((gaks(0x5B) | gaks(0x5C)) & 0x8000)
-    except Exception:
-        return False
-
-
-def _key_dismisses_badge(name: str, windows_held: bool) -> bool:
-    """Whether a fresh key DOWN counts as the user moving on from the badge."""
-    name = (name or "").lower()
-    if name in _MODIFIER_KEY_NAMES:
-        return False          # a modifier alone is not "pressing a button"
-    if name in _SCREENSHOT_KEY_NAMES:
-        return False          # screenshotting the badge
-    if windows_held:
-        return False          # Win+Shift+S and other shell shortcuts
-    return True
+    """True while either Windows key is physically down."""
+    return bool((_key_state(0x5B) | _key_state(0x5C)) & 0x8000)
 
 
 def _foreground_is_capture_tool() -> bool:
@@ -1814,7 +1818,8 @@ class FloatingPopup:
             w.bind("<Enter>", lambda _e: self._icon_frame.configure(bg=CP["btn_bg"]))
             w.bind("<Leave>", lambda _e: self._icon_frame.configure(bg=CP["bg"]))
 
-        self._dismiss_hooks = []
+        self._dismiss_poll = None
+        self._key_state = _key_state
         self._fg_watch_tick = None
 
     # ── Refinement frame ───────────────────────────────────────────────────────
@@ -2348,73 +2353,64 @@ class FloatingPopup:
 
     def _register_key_dismiss(self) -> None:
         """In the post-insert icon badge, ANY key dismisses it once the grace
-        window has passed — the user has moved on, so the badge should get out
+        window has passed: the user has moved on, so the badge should get out
         of the way without them having to aim at it.
 
-        A single global `keyboard.hook` rather than one per key: the previous
-        version bound Space and Enter only, which left the badge sitting there
-        through any other kind of typing. suppress=False so every keystroke
-        still reaches the app underneath — this only ever observes.
+        Polled from the Tk loop with GetAsyncKeyState, not a keyboard hook. The
+        `keyboard` library's hook is one Python low-level hook for the whole
+        process, and Windows silently removes a low-level hook whose callback
+        is late (the GIL busy with a transcription is enough). After that the
+        badge never heard a key again: "Enter no longer makes the popup go"
+        (reported 2026-10-12). Polling only reads key state, so nothing can
+        unhook it and every keystroke still reaches the app underneath.
 
         NOT active in the refinement panel, where the user is typing into the
         Ask box and Enter submits it (_expand_to_panel unhooks first)."""
-        try:
-            import keyboard as kb
+        self._unregister_key_dismiss()
+        armed_at = self._icon_entered
+        token = object()
+        self._dismiss_poll = token
+        state = self._key_state
 
-            self._unregister_key_dismiss()
-            armed_at = self._icon_entered
+        # Keys already down when the badge appeared. The hotkey that just
+        # ended the dictation is still physically held at this moment; only a
+        # key that goes down AFTER this counts. Reading every key here also
+        # clears its "pressed since the last call" bit, so a press from before
+        # the badge is not mistaken for a tap between two polls.
+        held = {vk for vk in _DISMISS_VKS if state(vk) & 0x8000}
 
-            # Keys already down when the badge appeared. The hotkey that just
-            # ended the dictation is still physically held at this moment, and
-            # Windows auto-repeats a held key — every repeat arriving as another
-            # key DOWN. Seeding from what is pressed RIGHT NOW is what lets the
-            # grace window be a quarter of a second instead of well over a
-            # second: a repeat of a key the user was already holding is not them
-            # pressing anything, so it is ignored however long they hold it.
-            held: set = set()
-            try:
-                held = {e.scan_code for e in kb._pressed_events.values()}
-            except Exception:
-                pass
-
-            def _on_dismiss_key(event):
-                etype = getattr(event, "event_type", None)
-                code = getattr(event, "scan_code", None)
-                if etype == "up":
-                    held.discard(code)
-                    return
-                # Key DOWN only. The key-up of the hotkey that just stopped the
-                # dictation arrives after the badge appears; dismissing on it
-                # would make the badge vanish the instant it was drawn.
-                if etype != "down":
-                    return
-                if code in held:
-                    return          # auto-repeat of a key the user already held
-                held.add(code)
-                if not _key_dismisses_badge(getattr(event, "name", ""),
-                                            _windows_key_held()):
-                    return          # modifier, screenshot key or Win+ shortcut
-                if time.time() - armed_at < KEY_DISMISS_GRACE_SECS:
-                    return
+        def _poll():
+            if self._dismiss_poll is not token:
+                return
+            pressed = False
+            for vk in _DISMISS_VKS:
+                s = state(vk)
+                if not s & 0x8000:
+                    held.discard(vk)
+                    if s & 0x0001:
+                        pressed = True      # a tap shorter than one poll
+                    continue
+                if vk in held:
+                    continue                # still the key the user held
+                held.add(vk)
+                pressed = True
+            if (pressed and time.time() - armed_at >= KEY_DISMISS_GRACE_SECS
+                    and not _windows_key_held()):
                 self._unregister_key_dismiss()
-                if self.root:
-                    self.root.after(0, self._do_hide)
+                self._do_hide()
+                return
+            try:
+                self.root.after(KEY_DISMISS_POLL_MS, _poll)
+            except (tk.TclError, RuntimeError, AttributeError) as e:
+                print(f"[Popup] Key-dismiss poll stopped: {e}")
 
-            self._dismiss_hooks = [kb.hook(_on_dismiss_key, suppress=False)]
-        except Exception:
-            pass
+        try:
+            self.root.after(KEY_DISMISS_POLL_MS, _poll)
+        except (tk.TclError, RuntimeError, AttributeError) as e:
+            print(f"[Popup] Key-dismiss not armed: {e}")
 
     def _unregister_key_dismiss(self) -> None:
-        if self._dismiss_hooks:
-            try:
-                import keyboard as kb
-
-                for hook in self._dismiss_hooks:
-                    if hook is not None:
-                        kb.unhook(hook)
-            except Exception:
-                pass
-            self._dismiss_hooks = []
+        self._dismiss_poll = None
 
     # ── Dismiss when the user switches away ─────────────────────────────────
 

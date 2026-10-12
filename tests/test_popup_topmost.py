@@ -313,13 +313,13 @@ class KeyDismissTests(unittest.TestCase):
 
     def _popup(self):
         p = FloatingPopup.__new__(FloatingPopup)
-        p._dismiss_hooks = []
+        p._dismiss_poll = None
         p._fg_watch_tick = None
         p.unhooked = 0
 
         def _unreg():
             p.unhooked += 1
-            p._dismiss_hooks = []
+            p._dismiss_poll = None
         p._unregister_key_dismiss = _unreg
         p._stop_foreground_watch = lambda: None
         return p
@@ -367,26 +367,78 @@ class KeyDismissTests(unittest.TestCase):
 
     # ── any-key dismiss ──────────────────────────────────────────────────
 
-    def test_the_hook_is_global_not_two_named_keys(self):
-        # Binding only Space and Enter left the badge sitting there through
-        # every other kind of typing — the reported complaint.
+    def _armed(self, down=(), grace_passed=True, win_held=False):
+        """A badge with the key-dismiss armed against a fake keyboard.
+
+        Returns (popup, keys, tick, hidden): set keys[vk] to a GetAsyncKeyState
+        value, call tick() to run one poll, read hidden for the result."""
+        keys = {vk: 0x8000 for vk in down}
+        p = FloatingPopup.__new__(FloatingPopup)
+        p._dismiss_poll = None
+        p._key_state = lambda vk: keys.get(vk, 0)
+        p._icon_entered = 0.0 if grace_passed else popup_mod.time.time() + 60
+        queued = []
+
+        class _Root:
+            def after(self, _ms, fn):
+                queued.append(fn)
+        p.root = _Root()
+        hidden = []
+        p._do_hide = lambda: hidden.append(True)
+        orig = popup_mod._windows_key_held
+        self.addCleanup(setattr, popup_mod, "_windows_key_held", orig)
+        popup_mod._windows_key_held = lambda: win_held
+        FloatingPopup._register_key_dismiss(p)
+
+        def tick():
+            if queued:
+                queued.pop(0)()
+        return p, keys, tick, hidden
+
+    def test_enter_dismisses(self):
+        # The reported case (2026-10-12): Enter after a dictation left the
+        # badge up.
+        p, keys, tick, hidden = self._armed()
+        keys[0x0D] = 0x8000
+        tick()
+        self.assertEqual([True], hidden)
+
+    def test_any_typing_key_dismisses(self):
+        for vk in (0x20, 0x41, 0x08, 0x2E, 0x70, 0xBE):   # space, A, bksp, del, F1, .
+            p, keys, tick, hidden = self._armed()
+            keys[vk] = 0x8000
+            tick()
+            self.assertEqual([True], hidden, hex(vk))
+
+    def test_a_tap_between_two_polls_still_dismisses(self):
+        p, keys, tick, hidden = self._armed()
+        keys[0x0D] = 0x0001        # up again, but pressed since the last read
+        tick()
+        self.assertEqual([True], hidden)
+
+    def test_it_reads_key_state_and_hooks_nothing(self):
+        # A low-level keyboard hook is what Windows removed silently, after
+        # which no key dismissed the badge again.
         src = inspect.getsource(FloatingPopup._register_key_dismiss)
-        self.assertIn("kb.hook(", src)
+        self.assertNotIn("kb.hook(", src)
         self.assertNotIn("on_press_key", src)
+        self.assertIn("_key_state", src)
 
-    def test_the_keystroke_still_reaches_the_app(self):
-        # suppress=True would eat the user's typing to hide a badge.
-        self.assertIn("suppress=False",
-                      inspect.getsource(FloatingPopup._register_key_dismiss))
+    def test_nothing_pressed_keeps_polling(self):
+        p, keys, tick, hidden = self._armed()
+        for _ in range(5):
+            tick()
+        self.assertEqual([], hidden)
+        self.assertIsNotNone(p._dismiss_poll)
 
-    def test_key_up_never_dismisses(self):
-        # The hotkey's own key-up lands right after the badge appears.
-        src = inspect.getsource(FloatingPopup._register_key_dismiss)
-        self.assertIn('!= "down"', src)
+    def test_unregister_stops_the_poll(self):
+        p, keys, tick, hidden = self._armed()
+        FloatingPopup._unregister_key_dismiss(p)
+        keys[0x0D] = 0x8000
+        tick()
+        self.assertEqual([], hidden)
 
     def test_a_grace_window_guards_the_dismiss(self):
-        src = inspect.getsource(FloatingPopup._register_key_dismiss)
-        self.assertIn("KEY_DISMISS_GRACE_SECS", src)
         self.assertLessEqual(
             popup_mod.KEY_DISMISS_GRACE_SECS, 0.4,
             "1.2s made the badge visibly ignore the first key the user pressed, "
@@ -394,30 +446,39 @@ class KeyDismissTests(unittest.TestCase):
         self.assertGreater(
             popup_mod.KEY_DISMISS_GRACE_SECS, 0.0,
             "some grace remains: our own injection's synthetic keystrokes are "
-            "still draining through the hook thread as the badge is armed")
+            "still landing as the badge is armed")
+        p, keys, tick, hidden = self._armed(grace_passed=False)
+        keys[0x0D] = 0x8000
+        tick()
+        self.assertEqual([], hidden)
 
-    def test_a_held_key_repeating_never_dismisses(self):
-        # The real reason the grace used to be over a second: the hotkey is
-        # still physically held when the badge appears, and Windows auto-repeats
-        # a held key as a stream of fresh key DOWNs. Filtering those by identity
-        # is what allows the short grace above.
-        src = inspect.getsource(FloatingPopup._register_key_dismiss)
-        self.assertIn("held", src)
-        self.assertIn("_pressed_events", src,
-                      "the already-held set must be seeded from what is down "
-                      "RIGHT NOW, or the hotkey's own key reads as a fresh press")
+    def test_a_held_key_never_dismisses(self):
+        # The hotkey's base key is still physically held when the badge
+        # appears; only a key that goes down afterwards counts.
+        p, keys, tick, hidden = self._armed(down=(0x56,))
+        tick()
+        tick()
+        self.assertEqual([], hidden)
+        keys[0x56] = 0             # released...
+        tick()
+        keys[0x56] = 0x8000        # ...and pressed again: that is the user
+        tick()
+        self.assertEqual([True], hidden)
 
     def test_a_modifier_alone_never_dismisses(self):
         # Alt is down by definition at badge time for an Alt+V hotkey, and
         # Shift held to capitalise is not the user dismissing anything.
-        # The hook asks _key_dismisses_badge, which applies this list.
-        self.assertIn("_key_dismisses_badge(",
-                      inspect.getsource(FloatingPopup._register_key_dismiss))
-        self.assertIn("_MODIFIER_KEY_NAMES",
-                      inspect.getsource(popup_mod._key_dismisses_badge))
-        for name in ("alt", "ctrl", "shift", "left windows"):
-            self.assertIn(name, popup_mod._MODIFIER_KEY_NAMES)
-            self.assertFalse(popup_mod._key_dismisses_badge(name, False))
+        for vk in (0x10, 0x11, 0x12, 0xA0, 0xA4, 0x5B, 0x14):
+            self.assertNotIn(vk, popup_mod._DISMISS_VKS, hex(vk))
+            p, keys, tick, hidden = self._armed()
+            keys[vk] = 0x8000
+            tick()
+            self.assertEqual([], hidden, hex(vk))
+
+    def test_mouse_buttons_never_dismiss(self):
+        # A click on the badge opens the panel instead.
+        for vk in (0x01, 0x02, 0x04):
+            self.assertNotIn(vk, popup_mod._DISMISS_VKS)
 
     def test_the_dismiss_can_be_turned_off(self):
         # Ryan asked for the behaviour AND a way to opt out of it.
@@ -426,7 +487,7 @@ class KeyDismissTests(unittest.TestCase):
 
     def test_the_grace_is_measured_from_the_badge_this_hook_belongs_to(self):
         # Captured at registration, not read live: a newer badge must not
-        # extend an older hook's grace, and vice versa.
+        # extend an older poll's grace, and vice versa.
         self.assertIn("armed_at = self._icon_entered",
                       inspect.getsource(FloatingPopup._register_key_dismiss))
 
@@ -494,25 +555,22 @@ class ScreenshotKeepsBadgeTests(unittest.TestCase):
     """Screenshotting the badge must not dismiss it. Whether it then shows in
     the capture is the Hide Popup in Screenshots setting's job alone."""
 
-    def test_ordinary_keys_still_dismiss(self):
-        for name in ("a", "space", "enter", "backspace", "s"):
-            self.assertTrue(popup_mod._key_dismisses_badge(name, False), name)
+    def _armed(self, win_held=False):
+        return KeyDismissTests._armed(self, win_held=win_held)
 
     def test_print_screen_never_dismisses(self):
-        for name in ("print screen", "Print Screen", "snapshot"):
-            self.assertFalse(popup_mod._key_dismisses_badge(name, False), name)
+        self.assertNotIn(0x2C, popup_mod._DISMISS_VKS)
+        p, keys, tick, hidden = self._armed()
+        keys[0x2C] = 0x8000
+        tick()
+        self.assertEqual([], hidden)
 
     def test_win_shift_s_never_dismisses(self):
         # The S of Win+Shift+S arrives while the Windows key is held.
-        self.assertFalse(popup_mod._key_dismisses_badge("s", True))
-
-    def test_modifiers_still_never_dismiss(self):
-        self.assertFalse(popup_mod._key_dismisses_badge("shift", False))
-
-    def test_the_hook_routes_through_the_rule(self):
-        src = inspect.getsource(FloatingPopup._register_key_dismiss)
-        self.assertIn("_key_dismisses_badge(", src)
-        self.assertIn("_windows_key_held()", src)
+        p, keys, tick, hidden = self._armed(win_held=True)
+        keys[0x53] = 0x8000
+        tick()
+        self.assertEqual([], hidden)
 
     def _popup_with_foreground(self, fg, exe):
         p = FloatingPopup.__new__(FloatingPopup)

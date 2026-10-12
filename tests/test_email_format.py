@@ -410,6 +410,37 @@ class RefinerInteractionTests(unittest.TestCase):
                          ai_refiner._line_count("a\n\nb"))
 
 
+class MisheardCloseTests(unittest.TestCase):
+    """Parakeet heard "Kind regards, Ryan." as "Camera guards, Ryan." in an
+    Outlook reply (2026-10-12), so the sign-off stayed on the body's line."""
+
+    def test_the_reported_email(self):
+        self.assertEqual(
+            fmt("Hi Ryan, do you think it's best to meet in person or over "
+                "Teams. Camera guards, Ryan.", ME),
+            "Hi Ryan,\n\nDo you think it's best to meet in person or over "
+            "Teams.\n\nKind regards,\nRyan")
+
+    def test_other_sound_alikes(self):
+        for heard in ("Kind of regards", "Kinder regards", "Kind regard",
+                      "Camera regards"):
+            self.assertTrue(
+                fmt(f"Thanks for this. {heard}, Ryan.", ME)
+                .endswith("\n\nKind regards,\nRyan"), heard)
+
+    def test_outside_email_with_a_name(self):
+        self.assertEqual(format_signoff("Thanks for that. Camera guards Ryan.", ME),
+                         "Thanks for that.\n\nKind regards,\nRyan")
+
+    def test_the_kit_itself_is_left_alone(self):
+        for text in ("We need camera guards for the site.",
+                     "Fit the camera guards, then call me.",
+                     "Camera guards are in stock.",
+                     "Please order more. Camera guards."):
+            self.assertEqual(fmt(text, ME), text)
+            self.assertEqual(format_signoff(text, ME), text)
+
+
 class CorpusRegressionTests(unittest.TestCase):
     """Every real stored transcript, as if it had been dictated into an email.
     Whatever changes must keep every word in order."""
