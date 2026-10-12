@@ -25,7 +25,7 @@ import ctypes
 # the version handoff, so it never touches the running copy.
 if sys.platform == "win32" and sys.argv[1:2] == ["--restart-audio-engine"]:
     import audio_engine
-    os._exit(audio_engine.restart_elevated())
+    os._exit(audio_engine.restart_elevated(sys.argv[2] if len(sys.argv) > 2 else ""))
 
 # Boost to above-normal immediately — before heavy project imports (tkinter, PIL, faster-whisper)
 # so the entire loading phase runs at elevated priority, not just post-import code.
@@ -1286,7 +1286,7 @@ class WhisperFlowApp:
                 self.app_window.show_toast(
                     "Restarting Windows audio. Click Yes on the Windows prompt.",
                     8000)
-                code = audio_engine.restart()
+                code = audio_engine.restart(log_path=_startup_log_path())
                 with open(_startup_log_path(), "a", encoding="utf-8") as f:
                     f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
                             f"Audio engine restart: exit {code}\n")

@@ -77,6 +77,7 @@ UNINSTALL_MARKER_TTL = 15 * 60
 # MessageBoxW
 _MB_YESNO = 0x00000004
 _MB_ICONQUESTION = 0x00000020
+_MB_ICONWARNING = 0x00000030
 _MB_ICONINFO = 0x00000040
 _MB_SETFOREGROUND = 0x00010000
 _MB_TOPMOST = 0x00040000
@@ -938,10 +939,38 @@ Remove-Item -LiteralPath '{q(script_path)}' -Force -ErrorAction SilentlyContinue
 """
 
 
-def _spawn_cleanup(dirs: list) -> None:
+# How long the uninstaller waits for the cleanup script to log that it is
+# running. PowerShell can be slow to start under antivirus scanning.
+_CLEANUP_CONFIRM_SECONDS = 10.0
+
+
+def _cleanup_confirmed(log_path: str, offset: int, pid: int, wait: float) -> bool:
+    """True once the cleanup script has logged its first line for *pid*
+    after *offset* bytes of the log. A started powershell.exe proves nothing:
+    antivirus can kill it the moment it starts (Avast did, 2026-10-12)."""
+    marker = f"cleanup started (uninstaller pid {pid})"
+    wanted = (marker.encode("ascii"), marker.encode("utf-16-le"))
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            with open(log_path, "rb") as f:
+                f.seek(offset)
+                data = f.read()
+            if any(w in data for w in wanted):
+                return True
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.2)
+
+
+def _spawn_cleanup(dirs: list) -> bool:
+    """Start the deferred cleanup and return True once it is confirmed
+    running (or there is nothing to remove), False when it could not start."""
     dirs = [d for d in dirs if safe_to_delete(d) and os.path.isdir(d)]
     if not dirs:
-        return
+        return True
     import tempfile
 
     # Inside the folder it removes, never %TEMP%: "-ExecutionPolicy Bypass
@@ -962,11 +991,15 @@ def _spawn_cleanup(dirs: list) -> None:
             ))
 
     try:
-        _write(script_path)
-    except OSError as e:
-        print(f"[Install] Could not write {script_path} ({e}); using %TEMP% instead.")
-        script_path = os.path.join(tempfile.gettempdir(), name)
-        _write(script_path)
+        try:
+            _write(script_path)
+        except OSError as e:
+            print(f"[Install] Could not write {script_path} ({e}); using %TEMP% instead.")
+            script_path = os.path.join(tempfile.gettempdir(), name)
+            _write(script_path)
+    except Exception as e:
+        print(f"[Install] Deferred cleanup could not be written: {e}")
+        return False
 
     # Same launch contract as the updater's swap script: CREATE_NO_WINDOW and
     # NEVER DETACHED_PROCESS (conflicting console modes make powershell.exe exit
@@ -976,7 +1009,15 @@ def _spawn_cleanup(dirs: list) -> None:
              | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
              | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0))
     cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path]
-    std = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # cwd outside every folder it removes: PowerShell holding its working
+    # folder open would leave that folder behind ("COULD NOT REMOVE").
+    std = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+               cwd=tempfile.gettempdir())
+    log = uninstall_log_path()
+    try:
+        offset = os.path.getsize(log) if os.path.exists(log) else 0
+    except OSError:
+        offset = 0
     try:
         try:
             subprocess.Popen(cmd, creationflags=flags, **std)
@@ -989,12 +1030,23 @@ def _spawn_cleanup(dirs: list) -> None:
                 subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0), **std)
     except Exception as e:
         print(f"[Install] Deferred cleanup could not start: {e}")
+        return False
+    if _cleanup_confirmed(log, offset, os.getpid(), _CLEANUP_CONFIRM_SECONDS):
+        return True
+    print(f"[Install] Deferred cleanup did not report in: {script_path}")
+    try:
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} cleanup did not start "
+                    f"(uninstaller pid {os.getpid()}); left: {'; '.join(dirs)}\n")
+    except OSError:
+        pass
+    return False
 
 
 def run_uninstall(silent: bool = False) -> int:
     """Handle `<exe> --uninstall [/S]`, the UninstallString Windows
     runs from Installed apps. Returns 0 when the uninstall ran, 1 if the user
-    backed out."""
+    backed out, 2 when the app's files could not be removed."""
     name = brand.PRODUCT_NAME
     if not silent:
         answer = _message_box(
@@ -1027,16 +1079,26 @@ def run_uninstall(silent: bool = False) -> int:
     if remove_data:
         dirs += list(data_paths.all_roaming_dirs())
 
-    if not silent:
-        _message_box(
-            f"{name} has been removed.",
-            name,
-            _MB_ICONINFO | _MB_SETFOREGROUND | _MB_TOPMOST,
-        )
-
     # Only a frozen build owns the install folder; from source there is nothing
     # of ours under %LOCALAPPDATA% to delete but the model cache, and blowing
-    # that away from a dev checkout would be a surprise.
-    if getattr(sys, "frozen", False):
-        _spawn_cleanup(dirs)
-    return 0
+    # that away from a dev checkout would be a surprise. Started BEFORE the
+    # "removed" message, which must not claim what has not happened: the
+    # script waits for this process to exit before it deletes anything.
+    cleaned = _spawn_cleanup(dirs) if getattr(sys, "frozen", False) else True
+
+    if not silent:
+        if cleaned:
+            _message_box(
+                f"{name} has been removed.",
+                name,
+                _MB_ICONINFO | _MB_SETFOREGROUND | _MB_TOPMOST,
+            )
+        else:
+            _message_box(
+                f"{name} is uninstalled, but its files could not be removed yet.\n\n"
+                f"If this folder is still there after you restart, delete it:\n"
+                f"{data_paths.local_dir()}",
+                name,
+                _MB_ICONWARNING | _MB_SETFOREGROUND | _MB_TOPMOST,
+            )
+    return 0 if cleaned else 2

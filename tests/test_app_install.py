@@ -458,6 +458,76 @@ class CleanupInsideAJobTests(unittest.TestCase):
         self.assertTrue(written[0].endswith(".ps1"))
 
 
+
+def setUpModule():
+    # Tests that fake Popen never get a running script: do not wait for one.
+    global _no_wait
+    _no_wait = mock.patch.object(app_install, "_CLEANUP_CONFIRM_SECONDS", 0)
+    _no_wait.start()
+
+
+def tearDownModule():
+    _no_wait.stop()
+
+
+class UninstallSaysRemovedOnlyWhenItIsTests(unittest.TestCase):
+    """Codex audit #3 (2026-10-09): the uninstaller said "has been removed"
+    before the cleanup had even started, and antivirus can kill the cleanup
+    the moment it starts. Now the script must log that it is running first."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.folder = os.path.join(self.d, "Echo")
+        os.makedirs(self.folder)
+        self.log = os.path.join(self.d, "uninstall.log")
+        with open(self.log, "w", encoding="utf-8") as f:
+            f.write(f"old run: cleanup started (uninstaller pid {os.getpid()})\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _spawn(self, script_logs):
+        def fake_popen(cmd, **kw):
+            if script_logs:
+                with open(self.log, "a", encoding="utf-16-le") as f:
+                    f.write(f"x cleanup started (uninstaller pid {os.getpid()})\n")
+            return mock.Mock()
+        with mock.patch.object(app_install, "safe_to_delete", return_value=True),                 mock.patch.object(app_install, "uninstall_log_path", return_value=self.log),                 mock.patch.object(app_install.subprocess, "Popen", side_effect=fake_popen):
+            return app_install._spawn_cleanup([self.folder])
+
+    def test_a_script_that_logs_in_is_confirmed(self):
+        self.assertTrue(self._spawn(script_logs=True))
+
+    def test_a_script_killed_at_start_is_not(self):
+        # The old run's line in the log must not count for this one.
+        self.assertFalse(self._spawn(script_logs=False))
+        with open(self.log, encoding="utf-8", errors="replace") as f:
+            self.assertIn("cleanup did not start", f.read())
+
+    def test_a_launch_that_fails_is_not(self):
+        with mock.patch.object(app_install, "safe_to_delete", return_value=True),                 mock.patch.object(app_install, "uninstall_log_path", return_value=self.log),                 mock.patch.object(app_install.subprocess, "Popen", side_effect=OSError("blocked")):
+            self.assertFalse(app_install._spawn_cleanup([self.folder]))
+
+    def _uninstall(self, cleaned):
+        events = []
+        with mock.patch.object(app_install.sys, "frozen", True, create=True),                 mock.patch.object(app_install, "_message_box",
+                                  lambda text, *a: events.append(("box", text)) or app_install._IDYES),                 mock.patch.object(app_install, "_spawn_cleanup",
+                                  lambda dirs: events.append(("cleanup", None)) or cleaned),                 mock.patch.object(app_install, "write_uninstall_marker", lambda *a, **k: None),                 mock.patch.object(app_install, "_kill_other_instances", lambda: None),                 mock.patch.object(app_install, "_remove_launchers", lambda: None),                 mock.patch.object(app_install, "_remove_registry_entries", lambda: None),                 mock.patch.object(app_install, "_remove_shortcuts", lambda: None):
+            code = app_install.run_uninstall(silent=False)
+        return code, events
+
+    def test_removed_is_said_only_after_the_cleanup_is_running(self):
+        code, events = self._uninstall(cleaned=True)
+        self.assertEqual(0, code)
+        self.assertEqual(("cleanup", None), events[-2])
+        self.assertIn("has been removed", events[-1][1])
+
+    def test_a_cleanup_that_did_not_start_is_reported(self):
+        code, events = self._uninstall(cleaned=False)
+        self.assertEqual(2, code)
+        self.assertNotIn("has been removed", events[-1][1])
+        self.assertIn(app_install.data_paths.local_dir(), events[-1][1])
+
 class ScriptsStayOutOfTempTests(unittest.TestCase):
     def test_the_swap_script_is_written_beside_the_exe(self):
         import updater
