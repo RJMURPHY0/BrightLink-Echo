@@ -548,6 +548,27 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
     # cheaply. Every term's primary phoneme starts with one of these characters;
     # a window whose first word does not can never match, so it skips the encode.
     term_first = {c[0] for _t, _l, codes, *_rest in terms for c in codes if c}
+    # Index the terms by phonetic code, so a span is only scored against the
+    # few terms _phonetic_match could accept instead of every term (a ranked
+    # CRM vocabulary is ~170 of them, on every dictation). Same rule, same
+    # order: (term primary == span primary), (term primary == span secondary)
+    # or (term secondary == span primary).
+    all_lows = {t[1] for t in terms}
+    by_primary, by_secondary = {}, {}
+    for idx, t in enumerate(terms):
+        tp, ts = t[2][0], t[2][1]
+        by_primary.setdefault(tp, []).append(idx)
+        if ts:
+            by_secondary.setdefault(ts, []).append(idx)
+
+    def _candidates(cand_codes) -> list:
+        cp, cs = cand_codes
+        found = set(by_primary.get(cp, ()) if cp else ())
+        if cs:
+            found.update(by_primary.get(cs, ()))
+        if cp:
+            found.update(by_secondary.get(cp, ()))
+        return [terms[k] for k in sorted(found)]
     word_dm = []
     for t in tokens:
         try:
@@ -601,11 +622,10 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
             span_fw = sum(word_fw[i:i + size])
             best = None
             best_jw = 0.0
+            if cand_low in all_lows:         # already correct — leave casing to others
+                continue
             for (term, low, codes, strict, term_fw, term_fw_n, min_span,
-                 term_words, spoken_key) in terms:
-                if cand_low == low:          # already correct — leave casing to others
-                    best = None
-                    break
+                 term_words, spoken_key) in _candidates(cand_codes):
                 if size < min_span:
                     continue
                 # No term, hand-typed or managed, may put a function word into

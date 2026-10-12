@@ -89,6 +89,13 @@ _HEARTBEAT_STALE_SECONDS = 1.2
 # How long start() waits for the first fresh callback before abandoning the
 # warm stream and cold-opening a new one.
 _START_VERIFY_SECONDS = 0.45
+# ...unless the stream was demonstrably live at the press (fresh pre-roll):
+# then a late callback means the process was busy, not that the device died,
+# and the audio is still queued in the stream. Abandoning it threw that audio
+# away and cost a ~1.1 s cold reopen, on every press of a busy evening
+# (press_slow + mic_press_recovered cold_recovered, v1.8.10, 2026-10-12). A
+# live stream gets the full heartbeat window instead.
+_START_VERIFY_LIVE_SECONDS = _HEARTBEAT_STALE_SECONDS
 _WATCHDOG_INTERVAL = 2.0      # idle heartbeat check cadence. Kept short: a
                               # press landing on a dead warm stream loses the
                               # first words outright, so the window in which a
@@ -802,7 +809,12 @@ class Recorder:
             # device can die at any moment. If no fresh callback lands shortly,
             # abandon the warm stream and cold-open a new one so a recording
             # can never proceed on a silent mic.
-            deadline = time.monotonic() + _START_VERIFY_SECONDS
+            verify_from = time.monotonic()
+            # A stream reopened by this very press has a fresh heartbeat but
+            # no proven audio yet: it keeps the short window.
+            was_live = preroll_fresh and not self._last_warm_reopened
+            deadline = verify_from + (_START_VERIFY_LIVE_SECONDS if was_live
+                                      else _START_VERIFY_SECONDS)
             verified = False
             while time.monotonic() < deadline:
                 with self._lock:
@@ -811,6 +823,19 @@ class Recorder:
                         break
                 time.sleep(0.015)
             if verified:
+                waited = time.monotonic() - verify_from
+                if not self._last_warm_reopened and waited > _START_VERIFY_SECONDS:
+                    # Kept a live stream through a stall that used to force a
+                    # cold reopen. Reported so the fleet log shows how often
+                    # the process is too busy to take audio at a press.
+                    self.last_start_recovery = {
+                        "mode": "warm_late",
+                        "elapsed_ms": int((time.monotonic() - press_ts) * 1000),
+                        "waited_ms": int(waited * 1000),
+                        "device": self._active_device_name,
+                        "seed_ms": int(seed_samples * 1000
+                                       / max(1, self.active_sample_rate)),
+                    }
                 if self._last_warm_reopened:
                     # Stream was dead at press and the fast reopen saved it —
                     # audio flows now, but whatever was said before the reopen

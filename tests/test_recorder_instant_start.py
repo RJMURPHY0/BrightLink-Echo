@@ -179,6 +179,31 @@ class PressRecoveryTests(unittest.TestCase):
             self.assertIsNone(rec.last_start_recovery)
             rec.stop()
 
+    def test_a_live_stream_that_stalls_at_the_press_is_kept(self):
+        # Seen on v1.8.10 (2026-10-12): every press of a busy evening logged
+        # cold_recovered at ~1.1 s. The stream was live (fresh pre-roll); the
+        # process was just slow to take the next callback. Abandoning it threw
+        # the queued audio away and paid a cold reopen.
+        rec = _warm_recorder("Mic A")
+        self.assertTrue(rec._ensure_warm_stream())
+        rec._last_warm_reopened = False
+        reopened = []
+        rec._open_best_input_stream = lambda *a, **k: reopened.append(True)
+        rec._last_callback_ts = time.monotonic()        # live at the press
+
+        def late_callback():
+            time.sleep(0.7)                              # past the old 0.45 s
+            block = np.zeros((1024, 1), dtype=np.float32)
+            rec._audio_callback(block, 1024, None, None)
+
+        import threading
+        threading.Thread(target=late_callback, daemon=True).start()
+        rec.start()
+        self.assertEqual(reopened, [])
+        self.assertEqual(rec.last_start_recovery["mode"], "warm_late")
+        self.assertGreater(rec.last_start_recovery["waited_ms"], 450)
+        rec.stop()
+
     def test_stale_press_skips_portaudio_refresh_and_reports(self):
         # Warm stream dead at press: the fast reopen must NOT pay the
         # PortAudio re-init (that is spoken audio lost), and the press must be
