@@ -15,6 +15,7 @@ import app_search
 import tkinter as tk
 import tkinter.font as tkfont
 import bookmark_tabs
+import word_fixes
 from latest_worker import LatestWorker
 import ui_render
 from datetime import date as _date, datetime, timedelta
@@ -7618,6 +7619,148 @@ class AppWindow:
             except tk.TclError:
                 pass
 
+    # ── Fix words: correct a dictation, Echo learns the mishearing ──────────
+    #
+    # The user edits the text the way it should have read; word_fixes works
+    # out which words changed and turns each real mishearing into a
+    # vocabulary rule, so it is put right on every later dictation and every
+    # synced PC. The row is updated either way, and the toast's Undo puts both
+    # the vocabulary and the text back.
+
+    def _open_word_fix(self, entry: dict) -> None:
+        self._close_word_fix()
+        item = entry["item"]
+        text = item.get("refined_text") or item.get("transcribed_text") or ""
+        st = {"item": item, "key": self._history_item_key(item), "text": text}
+        self._wf = st
+
+        cover = tk.Frame(self._dash_frame, bg=C["bg"])
+        st["cover"] = cover
+        tk.Frame(cover, bg=C["bg"]).pack(fill="both", expand=True)
+        card = self._card(cover, inner_pad=(18, 16), margin=(0, 0))
+        tk.Frame(cover, bg=C["bg"]).pack(fill="both", expand=True)
+        bg = C["surface"]
+
+        head = tk.Frame(card, bg=bg)
+        head.pack(fill="x")
+        tk.Label(head, text="Fix words", bg=bg, fg=C["text"],
+                 font=("Segoe UI", 11, "bold")).pack(side="left")
+        close = tk.Label(head, text="✕", bg=bg, fg=C["subtext"],
+                         font=("Segoe UI", 10), cursor="hand2")
+        close.pack(side="right")
+        close.bind("<Button-1>", lambda _e: self._close_word_fix())
+        close.bind("<Enter>", lambda _e: close.configure(fg=C["text"]))
+        close.bind("<Leave>", lambda _e: close.configure(fg=C["subtext"]))
+        tk.Label(card, text="Correct it and press Enter. Echo learns the fix.",
+                 bg=bg, fg=C["subtext"], font=("Segoe UI", 9),
+                 anchor="w").pack(fill="x", pady=(2, 12))
+
+        box = tk.Text(card, height=5, wrap="word", relief="flat", bd=6,
+                      highlightthickness=1, highlightbackground=C["border"],
+                      highlightcolor=C["accent"], bg=C["input_bg"],
+                      fg=C["text"], insertbackground=C["text"],
+                      font=("Segoe UI", 10), undo=True)
+        box.insert("1.0", text)
+        box.pack(fill="x", pady=(0, 12))
+        st["box"] = box
+
+        foot = tk.Frame(card, bg=bg)
+        foot.pack(fill="x")
+        save = self._surface_btn(foot, "Save", self._save_word_fix,
+                                 font=("Segoe UI", 9, "bold"),
+                                 padx=14, pady=6, bg=bg)
+        save.pack(side="right")
+        cancel = self._surface_btn(foot, "Cancel", self._close_word_fix,
+                                   fg=C["subtext"], font=("Segoe UI", 9),
+                                   padx=14, pady=6, bg=bg)
+        cancel.pack(side="right", padx=(0, 8))
+
+        # Enter saves; Shift+Enter keeps its line break.
+        box.bind("<Return>", lambda _e: (self._save_word_fix(), "break")[1])
+        box.bind("<Shift-Return>", lambda _e: None)
+        box.bind("<Escape>", lambda _e: self._close_word_fix())
+
+        def _show():
+            cover.place(in_=self._dash_frame, x=0, y=0, relwidth=1.0,
+                        relheight=1.0)
+            cover.lift()
+        self._atomic_ui(_show)
+        try:
+            box.focus_set()
+            box.mark_set("insert", "end-1c")
+        except tk.TclError:
+            pass
+
+    def _close_word_fix(self) -> None:
+        st, self._wf = getattr(self, "_wf", None), None
+        if st and st.get("cover") is not None:
+            try:
+                st["cover"].destroy()
+            except tk.TclError:
+                pass
+
+    def _save_word_fix(self) -> None:
+        st = getattr(self, "_wf", None)
+        if not st:
+            return
+        try:
+            new = st["box"].get("1.0", "end-1c").strip()
+        except tk.TclError:
+            new = ""
+        old, item = st["text"], st["item"]
+        self._close_word_fix()
+        if not new or new == old.strip():
+            return
+        result = word_fixes.learn(old, new)
+        email = self._account_email()
+        undo = []
+        if result["learned"]:
+            try:
+                undo = word_fixes.apply_learned(self._config, result["learned"],
+                                                email)
+            except Exception as exc:
+                print(f"[History] Learning the fix failed: {exc}")
+                undo = []
+            if undo:
+                self._sync_library("vocabulary")
+                self.refresh_libraries()
+        self._replace_history_text(item, st["key"], new)
+        if undo:
+            def _undo():
+                try:
+                    word_fixes.undo_learned(self._config, undo, email)
+                except Exception as exc:
+                    print(f"[History] Undoing the fix failed: {exc}")
+                self._sync_library("vocabulary")
+                self.refresh_libraries()
+                self._replace_history_text(item, self._history_item_key(item),
+                                           old)
+            self.show_action_toast(word_fixes.summary(result["learned"]),
+                                   "Undo", _undo)
+        elif result["learned"]:
+            self.show_toast("Fixed. Echo already knew that.")
+        else:
+            self.show_toast("Fixed. Nothing to learn from that change.")
+
+    def _replace_history_text(self, item: dict, key: str, new_text: str) -> None:
+        """Give a History row new text, locally, in the cloud and on screen,
+        keeping it open (a local row's key includes its text)."""
+        if self._db is not None:
+            try:
+                self._db.update_transcription(item, new_text)
+            except Exception as exc:
+                print(f"[History] Update failed: {exc}")
+        item["transcribed_text"] = new_text
+        item.pop("refined_text", None)
+        new_key = self._history_item_key(item)
+        if self._hist_expanded_key == key:
+            self._hist_expanded_key = new_key
+        if self._hist_confirm_key == key:
+            self._hist_confirm_key = new_key
+        self._history_fingerprint = \
+            self._history_items_fingerprint(self._hist_all)
+        self._render_history()
+
     def _on_history_motion(self, event) -> None:
         cv = self._hist_cv
         canvas_y = cv.canvasy(event.y)
@@ -7740,6 +7883,8 @@ class AppWindow:
                     self._toggle_history_play(entry)
                 elif action == "retry":
                     self._retry_history_item(entry)
+                elif action == "fix":
+                    self._open_word_fix(entry)
                 elif action == "download":
                     self._download_transcript(entry)
                 elif action == "delete":
@@ -8047,6 +8192,7 @@ class AppWindow:
                 else:
                     defs.append(("↻  Retry transcription" if long_labels
                                  else "↻ Retry", "retry"))
+            defs.append(("✎  Fix words" if long_labels else "✎ Fix", "fix"))
             defs.append(("↓  Download transcript" if long_labels
                          else "↓ Download", "download"))
             defs.append(("Delete", "delete"))
