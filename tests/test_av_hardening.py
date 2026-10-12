@@ -25,10 +25,44 @@ class NoHiddenWindowStyleTests(unittest.TestCase):
             self.assertNotIn('"-WindowStyle"', code, rel)
             self.assertNotIn("-WindowStyle Hidden", code, rel)
 
+    def test_audio_restart_asks_for_no_hidden_window_either(self):
+        src = _src("audio_engine.py")
+        self.assertNotIn("-WindowStyle", src)
+        self.assertNotRegex(src, r"(?i)[\"']powershell")
+
     def test_launches_stay_windowless_without_it(self):
         self.assertIn("CREATE_NO_WINDOW", _src("updater.py"))
         self.assertIn("_NO_WIN", _src("app_install.py"))
         self.assertIn("SW_HIDE", _src(os.path.join("installer", "echo.iss")))
+
+
+class NoEncodedPowerShellTests(unittest.TestCase):
+    """Avast Behavior Shield killed the audio engine restart as IDP.HELU.PSE94
+    on 2026-10-12: an encoded, elevated PowerShell that stopped a service.
+    Encoded command lines are the top AV heuristic, so no shipped file (or
+    test, which runs on the same machines) may start one."""
+
+    _BANNED = ("-encodedcommand", "-encodedarguments", "frombase64string")
+
+    def _shipped(self):
+        for name in sorted(os.listdir(ROOT)):
+            if name.endswith(".py"):
+                yield name
+        for sub in ("installer", "tests", "tools"):
+            d = os.path.join(ROOT, sub)
+            if os.path.isdir(d):
+                for name in sorted(os.listdir(d)):
+                    if name.endswith((".py", ".ps1", ".iss", ".cmd", ".bat")):
+                        yield os.path.join(sub, name)
+
+    def test_nothing_starts_encoded_powershell(self):
+        me = os.path.join("tests", os.path.basename(__file__))
+        for rel in self._shipped():
+            if rel == me:
+                continue
+            low = _src(rel).lower()
+            for token in self._BANNED:
+                self.assertNotIn(token, low, rel)
 
 
 class ScriptHashPortabilityTests(unittest.TestCase):

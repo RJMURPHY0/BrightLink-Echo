@@ -20,6 +20,13 @@ from collections import deque
 
 import ctypes
 
+# The elevated copy audio_engine.restart() starts through the UAC prompt: it
+# restarts Windows Audio and exits. Before every other import, the mutex and
+# the version handoff, so it never touches the running copy.
+if sys.platform == "win32" and sys.argv[1:2] == ["--restart-audio-engine"]:
+    import audio_engine
+    os._exit(audio_engine.restart_elevated())
+
 # Boost to above-normal immediately — before heavy project imports (tkinter, PIL, faster-whisper)
 # so the entire loading phase runs at elevated priority, not just post-import code.
 if sys.platform == "win32":
@@ -73,7 +80,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.8.8"
+APP_VERSION = "1.8.9"
 
 
 class _RECT(ctypes.Structure):

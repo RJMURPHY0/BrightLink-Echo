@@ -944,17 +944,29 @@ def _spawn_cleanup(dirs: list) -> None:
         return
     import tempfile
 
-    script_path = os.path.join(
-        tempfile.gettempdir(), f"{brand.FILE_SLUG}_uninstall_{os.getpid()}.ps1"
-    )
-    with open(script_path, "w", encoding="utf-8") as f:
-        f.write(cleanup_script(
-            os.getpid(), dirs, script_path, uninstall_log_path(),
-            keys=_registry_key_paths(),
-            tasks=list(dict.fromkeys([TASK_NAME, brand.LEGACY_TASK_NAME])),
-            run_values=list(dict.fromkeys([brand.RUN_VALUE_NAME, brand.LEGACY_RUN_VALUE_NAME])),
-            files=_shortcut_paths(),
-        ))
+    # Inside the folder it removes, never %TEMP%: "-ExecutionPolicy Bypass
+    # -File" on a script in %TEMP% is a behaviour rule Avast scores as malware
+    # (2026-10-12). PowerShell has read the whole script before the folder
+    # goes, so deleting it along with the folder is fine.
+    name = f"{brand.FILE_SLUG}_uninstall_{os.getpid()}.ps1"
+    script_path = os.path.join(dirs[0], name)
+
+    def _write(path):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(cleanup_script(
+                os.getpid(), dirs, path, uninstall_log_path(),
+                keys=_registry_key_paths(),
+                tasks=list(dict.fromkeys([TASK_NAME, brand.LEGACY_TASK_NAME])),
+                run_values=list(dict.fromkeys([brand.RUN_VALUE_NAME, brand.LEGACY_RUN_VALUE_NAME])),
+                files=_shortcut_paths(),
+            ))
+
+    try:
+        _write(script_path)
+    except OSError as e:
+        print(f"[Install] Could not write {script_path} ({e}); using %TEMP% instead.")
+        script_path = os.path.join(tempfile.gettempdir(), name)
+        _write(script_path)
 
     # Same launch contract as the updater's swap script: CREATE_NO_WINDOW and
     # NEVER DETACHED_PROCESS (conflicting console modes make powershell.exe exit

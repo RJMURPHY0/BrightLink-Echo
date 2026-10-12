@@ -446,11 +446,46 @@ class CleanupInsideAJobTests(unittest.TestCase):
             with mock.patch.object(app_install, "safe_to_delete", return_value=True), \
                     mock.patch.object(app_install.subprocess, "Popen", side_effect=fake_popen):
                 app_install._spawn_cleanup([d])
+            written = os.listdir(d)
         finally:
-            os.rmdir(d)
+            shutil.rmtree(d, ignore_errors=True)
         self.assertEqual(2, len(calls))
         self.assertTrue(calls[0] & breakaway)
         self.assertFalse(calls[1] & breakaway)
+        # Inside the folder it removes: "-ExecutionPolicy Bypass -File" on a
+        # script in %TEMP% is what Avast's behaviour rules score as malware.
+        self.assertEqual(1, len(written))
+        self.assertTrue(written[0].endswith(".ps1"))
+
+
+class ScriptsStayOutOfTempTests(unittest.TestCase):
+    def test_the_swap_script_is_written_beside_the_exe(self):
+        import updater
+        d = tempfile.mkdtemp()
+        try:
+            exe = os.path.join(d, "Echo.exe")
+            with mock.patch.object(updater.subprocess, "Popen"):
+                updater.spawn_swap_script(exe + ".new", exe, 999999, sha256="ab" * 32,
+                                          log_file=os.path.join(d, "u.log"), launch=False)
+            self.assertEqual([f"{brand.FILE_SLUG}_update.ps1"],
+                             [f for f in os.listdir(d) if f.endswith(".ps1")])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_an_unwritable_folder_falls_back_to_temp_rather_than_no_cleanup(self):
+        missing = os.path.join(tempfile.gettempdir(), "no-such-echo-dir-xyz")
+        launched = []
+        with mock.patch.object(app_install, "safe_to_delete", return_value=True),                 mock.patch.object(app_install.os.path, "isdir", return_value=True),                 mock.patch.object(app_install.subprocess, "Popen",
+                                  side_effect=lambda cmd, **kw: launched.append(cmd)):
+            app_install._spawn_cleanup([missing])
+        self.assertEqual(1, len(launched))
+        script = launched[0][-1]
+        try:
+            self.assertEqual(os.path.normcase(tempfile.gettempdir()),
+                             os.path.normcase(os.path.dirname(script)))
+        finally:
+            if os.path.exists(script):
+                os.remove(script)
 
 
 class NotificationIdentityTests(unittest.TestCase):

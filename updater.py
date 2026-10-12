@@ -557,7 +557,11 @@ def spawn_swap_script(new_exe: str, current_exe: str, pid: int,
     cur_ps  = current_exe.replace("'", "''")
     want = (sha256 or "").lower().replace("'", "")
     launch_flag = "$true" if launch else "$false"
-    ps_file = ps_file or os.path.join(tempfile.gettempdir(), f"{brand.FILE_SLUG}_update.ps1")
+    # Beside the exe, never %TEMP%: "-ExecutionPolicy Bypass -File" on a script
+    # in %TEMP% is a behaviour rule Avast scores as malware (2026-10-12). The
+    # folder is writable, since the script replaces the exe in it.
+    ps_file = ps_file or os.path.join(os.path.dirname(os.path.abspath(current_exe)),
+                                      f"{brand.FILE_SLUG}_update.ps1")
     log_file = (log_file or os.path.join(tempfile.gettempdir(),
                                          f"{brand.FILE_SLUG}_update.log")).replace("'", "''")
     script = f"""
@@ -655,8 +659,15 @@ if ($ok) {{
 }}
 Log "Done."
 """
-    with open(ps_file, "w", encoding="utf-8") as f:
-        f.write(script)
+    try:
+        with open(ps_file, "w", encoding="utf-8") as f:
+            f.write(script)
+    except OSError as e:
+        # An update that runs from %TEMP% still beats no update at all.
+        print(f"[Updater] Could not write {ps_file} ({e}); using %TEMP% instead.")
+        ps_file = os.path.join(tempfile.gettempdir(), f"{brand.FILE_SLUG}_update.ps1")
+        with open(ps_file, "w", encoding="utf-8") as f:
+            f.write(script)
 
     cmd = [
         "powershell",
