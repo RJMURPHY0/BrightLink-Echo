@@ -4701,6 +4701,13 @@ def _thread_excepthook(args) -> None:
 
 
 def main() -> None:
+    # The windowed exe has no console: without this every diagnostic print
+    # was lost, so a press that recorded nothing left no trace of why.
+    try:
+        import runtime_log
+        runtime_log.install(os.path.join(data_paths.local_dir(), "echo.log"))
+    except Exception:
+        pass
     try:
         threading.excepthook = _thread_excepthook
     except Exception:

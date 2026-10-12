@@ -16,11 +16,18 @@ What syncs (everything personal), and how each part merges:
                         history.json. Identity is (created_at, text), with the
                         same 10 s tolerance the History merge uses for rows
                         from builds that minted two timestamps.
+                        Deletes and Clear go to echo_history_deletions first
+                        (rows deleted in the cloud at once); every sync pulls
+                        the other PCs' deletes and erases them here. The
+                        server refuses re-uploads of deleted rows, even from
+                        old versions.
   * Recordings          private bucket echo-sync-audio/<user>/<key>.wav, key =
                         audio_store.canonical_key(created_at). Each new
                         dictation's clip is uploaded as it finishes; a full
                         sync uploads what is missing and downloads the clips
-                        of history rows this PC does not have.
+                        of history rows this PC does not have. A deleted
+                        dictation's clip is removed and can't be uploaded
+                        again.
   * Vocabulary/snippets user_vocabulary / user_snippets (existing merge,
                         last-write-wins per entry with soft deletes).
   * Settings           echo_user_state row "settings": per-setting value and
@@ -424,6 +431,11 @@ class CloudSync:
         return self._db.push_state("phrases", merged)
 
     def _step_history(self):
+        # Deletes first, both ways: this PC's go up, the other PCs' come down
+        # and are erased here, so nothing deleted anywhere is uploaded again.
+        sent = self._db.flush_deletions()
+        if not self._db.pull_deletions():
+            return False
         index = self._db.remote_history_index()
         if index is None:
             return False
@@ -438,15 +450,24 @@ class CloudSync:
         added = self._db.persist_history_rows(rows)
         if added:
             print(f"[Sync] history: {added} row(s) from your other PCs")
-        return True
+        return sent
 
     def _step_audio(self):
         import audio_store
         remote = self._db.list_synced_audio()
         if remote is None:
             return False
-        rows = self._db.owned_local_history(200)
         ok = True
+        # A deleted dictation's recording still in the cloud (its delete was
+        # made offline, or by an old version) is removed, never downloaded.
+        stale = self._db.tombstoned_audio_keys(remote)
+        if stale:
+            if self._db.remove_synced_audio(stale):
+                print(f"[Sync] recordings: removed {len(stale)} deleted")
+            else:
+                ok = False
+            remote -= stale
+        rows = self._db.owned_local_history(200)
         downloaded = 0
         for row in rows:
             created = row.get("created_at") or ""
@@ -482,8 +503,9 @@ class CloudSync:
         def _go():
             import audio_store
             path = audio_store.find(created_at)
-            if path:
-                self._db.upload_audio(audio_store.canonical_key(created_at), path)
+            key = audio_store.canonical_key(created_at)
+            if path and not self._db.tombstoned_audio_keys({key}):
+                self._db.upload_audio(key, path)
 
         threading.Thread(target=_go, daemon=True, name="sync-clip").start()
 

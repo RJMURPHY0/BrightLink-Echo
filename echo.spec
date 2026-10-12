@@ -171,6 +171,8 @@ hiddenimports += [
     # "Restart Windows audio" item.
     'audio_engine',
     'brand',
+    # Imported lazily at the top of main() (the windowed exe's echo.log).
+    'runtime_log',
     # Imported lazily inside text_expansion._dm() for the vocabulary phonetic
     # net — bytecode scanning misses a function-level import, so name it here.
     # (The feature degrades to a no-op if absent, but we want it in the build.)

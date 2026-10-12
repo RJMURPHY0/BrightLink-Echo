@@ -8277,7 +8277,7 @@ class AppWindow:
                        font=("Segoe UI", 10), anchor="nw")
         cv.create_text(
             14, 37,
-            text="Disappears from the app now; removed from the cloud after 30 days.",
+            text="Deleted here now, and from your other PCs with Cloud Sync.",
             fill=C["subtext"], font=("Segoe UI", 8), anchor="nw",
             width=max(cv.winfo_width() - 28, 120))
         _rr(cv, 14, 76, 126, 108, 8, fill=C["error"], outline="")

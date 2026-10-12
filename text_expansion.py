@@ -216,7 +216,9 @@ FUZZY_MIN_TERM_LEN = 4      # shorter terms rely on the exact sounds_like path
 FUZZY_JW = 0.70             # Jaro-Winkler floor (secondary to the metaphone gate)
 FUZZY_LEN_LO = 0.5          # span/term length ratio bounds
 FUZZY_LEN_HI = 1.7
-FUZZY_MAX_WINDOW = 3        # a mishearing spans at most this many words
+FUZZY_MAX_WINDOW = 5        # a mishearing spans at most this many words
+                            # (3 until 2026-10-12: four- and five-word company
+                            # names could never be corrected at all)
 
 # ── Managed (CRM-derived) terms: a stricter tier ─────────────────────────────
 #
@@ -239,6 +241,18 @@ MANAGED_MIN_TERM_LEN = 5    # single-word managed terms; shorter ones are droppe
 MANAGED_JW = 0.86           # vs FUZZY_JW 0.70 — near-identical or nothing
 MANAGED_LEN_LO = 0.7        # tighter than FUZZY_LEN_* so a short word cannot
 MANAGED_LEN_HI = 1.4        # reach a long company name
+# When a span has as many words as a managed name, an everyday word in it may
+# only stand for a near-identical word of the name. Without this a name could
+# swallow the word beside it: Double Metaphone drops a leading W, so "again"
+# codes like "Wagon", and "ali's again" became "Ali's Wagon" (term_bench,
+# 2026-10-12). Only everyday words: the recogniser splits and spells names
+# freely ("Aaron Moss" for "Aaron Maes", "Finchmark Town" for "Finch
+# Marketown"), and those must still correct.
+MANAGED_WORD_JW = 0.9
+# Fewer spoken words becoming a longer managed name is a merge ("brightlink"
+# -> "Bright Link") only if the spoken letters cover nearly all of the name.
+# "artisans" covers 73% of "Artisans Way" and gained a "Way" nobody said.
+MANAGED_MERGE_COVER = 0.85
 
 # Ordinary English words. A span made entirely of these is never rewritten, even
 # on a phonetic-code collision. Not exhaustive by design — the metaphone gate is
@@ -257,6 +271,7 @@ through time to too two up us use very was way we well went were what when where
 while who why will with would year you your
 cell cells bell bells sell sells sale sales share shares mail mails male sell seller
 tell well fell dwell shell smell spell swell dell hell fella
+again today tomorrow okay yes please thanks still really maybe sure
 """.split())
 
 # Function words and pronouns. A managed term may not replace a span that
@@ -377,6 +392,27 @@ def _digits(text: str) -> list:
     return _DIGITS_RE.findall(text or "")
 
 
+def _spoken_form(low: str) -> str:
+    """A term as it is said: "&" is "and", and hyphens and bars are breaks.
+    "Fagan & Whalley" is dictated "Fagan and Whalley"; matched against the
+    written form, the spoken "and" tripped the function-word rule, so no
+    company with an ampersand was ever corrected or cased (term_bench)."""
+    low = re.sub(r"\s*&\s*", " and ", low)
+    return " ".join(re.sub(r"[-|/]", " ", low).split())
+
+
+def _silent_safe(dm, word: str) -> bool:
+    """False for a word the phonetic encoder cannot hear: a lone letter ("H",
+    "W") or anything that encodes to nothing. Such a word leaves no trace in a
+    term's code, so a span that never contained it still matches."""
+    if len(word) < 2:
+        return False
+    try:
+        return bool(dm(word)[0])
+    except Exception:
+        return False
+
+
 def _phonetic_match(term_codes: tuple, cand_codes: tuple) -> bool:
     """True when the term's primary code lines up with either candidate code, or
     the candidate's primary matches the term's secondary. Empty codes never match."""
@@ -418,7 +454,9 @@ def managed_variants(raw: str) -> list:
     seen = set()
 
     def _add(v: str) -> None:
-        v = " ".join(v.split()).strip(" ,;:-&")
+        # Trailing full stops too: a row stored as "hinansho." put a full
+        # stop into the middle of the sentence it corrected.
+        v = " ".join(v.split()).strip(" ,;:-&.")
         low = v.lower()
         if not v or low in seen:
             return
@@ -477,17 +515,28 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
         # Callers put the user's own entries first, so a hand-typed term always
         # claims the name before a managed one with the same spelling can.
         seen.add(low)
+        spoken = _spoken_form(low)
         try:
-            codes = dm(term)
+            codes = dm(spoken)
         except Exception:
             continue
         if codes and codes[0]:
             # How many function words the term carries. For a managed name it
             # is also a ceiling on the span (None for a hand-typed term: that
             # side of the rule is a managed-tier gate).
-            fw_count = sum(w in _FUNCTION_WORDS for w in _WORD_RE.findall(low))
+            term_words = _WORD_RE.findall(spoken)
+            fw_count = sum(w in _FUNCTION_WORDS for w in term_words)
             term_fw = fw_count if managed else None
-            terms.append((term, low, codes, strict, term_fw, fw_count))
+            # Words Double Metaphone cannot hear at all: "H" and "W" encode to
+            # nothing, so "H & W Forklift" has exactly the code of "forklift",
+            # and every spoken "forklift" became "H & W Forklift" for anyone
+            # whose CRM held that company (term_bench, 2026-10-12). A term
+            # carrying such a word may only replace a span with at least as
+            # many words, or it adds words nobody said.
+            silent = any(not _silent_safe(dm, w) for w in term_words)
+            min_span = len(term_words) if silent else 1
+            terms.append((term, low, codes, strict, term_fw, fw_count, min_span,
+                          term_words, spoken.replace(" ", "")))
     if not terms:
         return text
 
@@ -498,7 +547,7 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
     # The costly part is Double Metaphone, so pay it once per word and prefilter
     # cheaply. Every term's primary phoneme starts with one of these characters;
     # a window whose first word does not can never match, so it skips the encode.
-    term_first = {c[0] for _t, _l, codes, _s, _f, _n in terms for c in codes if c}
+    term_first = {c[0] for _t, _l, codes, *_rest in terms for c in codes if c}
     word_dm = []
     for t in tokens:
         try:
@@ -552,10 +601,13 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
             span_fw = sum(word_fw[i:i + size])
             best = None
             best_jw = 0.0
-            for term, low, codes, strict, term_fw, term_fw_n in terms:
+            for (term, low, codes, strict, term_fw, term_fw_n, min_span,
+                 term_words, spoken_key) in terms:
                 if cand_low == low:          # already correct — leave casing to others
                     best = None
                     break
+                if size < min_span:
+                    continue
                 # No term, hand-typed or managed, may put a function word into
                 # the text that the span did not already hold. Metaphone cannot
                 # hear them ("it" adds only T), so a term that carries one
@@ -573,7 +625,7 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
                     continue
                 if not _phonetic_match(codes, cand_codes):
                     continue
-                term_key = low.replace(" ", "")
+                term_key = spoken_key
                 # Digits must match EXACTLY. Double Metaphone cannot see them
                 # at all — "company23" and "company342" both encode to KMPN —
                 # so the phonetic firewall, which is the primary gate, waves
@@ -586,6 +638,11 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
                 # the worst thing this pass can do.
                 if _digits(cand_key) != _digits(term_key):
                     continue
+                if (term_fw is not None and size > 1 and size == len(term_words)
+                        and any(sw != tw and sw in _COMMON_WORDS
+                                and _jaro_winkler(sw, tw) < MANAGED_WORD_JW
+                                for sw, tw in zip(word_low[i:i + size], term_words))):
+                    continue
                 # One spoken word becoming a multi-word managed name is a
                 # single-word match too, and takes the same strict tier: the
                 # loose multi-word floor rewrote "dark" as a CRM's "The Ark"
@@ -596,6 +653,9 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
                 len_lo, len_hi = ((MANAGED_LEN_LO, MANAGED_LEN_HI) if tight
                                   else (FUZZY_LEN_LO, FUZZY_LEN_HI))
                 if not (len_lo <= lr <= len_hi):
+                    continue
+                if (term_fw is not None and size < len(term_words)
+                        and lr < MANAGED_MERGE_COVER):
                     continue
                 jw = _jaro_winkler(cand_key, term_key)
                 floor = MANAGED_JW if tight else FUZZY_JW

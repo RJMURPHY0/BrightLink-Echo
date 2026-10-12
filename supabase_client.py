@@ -7,7 +7,9 @@ on a background thread — a Supabase outage will never block the app.
 import json
 import brand
 import data_paths
+import hashlib
 import os
+import re
 import threading
 import datetime
 from queue import Queue, Full
@@ -40,7 +42,9 @@ _STATE_TABLE = "echo_user_state"
 _SYNC_BUCKET = "echo-sync-audio"
 _SYNC_AUDIO_MAX = 25 * 1024 * 1024
 
-_local_history_lock = threading.Lock()
+# Re-entrant: loading the tombstone file may rewrite it (legacy upgrade) while
+# a caller already holds the lock to add a stone.
+_local_history_lock = threading.RLock()
 
 
 def _is_missing_column_error(exc, *column_names: str) -> bool:
@@ -70,9 +74,142 @@ def _tombstones_path() -> str:
                         "history-tombstones.json")
 
 
-# Days a deleted transcription stays in Supabase before the actual remote
-# delete happens (deletes are immediate in the UI, deferred remotely).
-_TOMBSTONE_GRACE_DAYS = 30
+def _deletions_cursor_path() -> str:
+    return os.path.join(os.path.dirname(_local_history_path()),
+                        "history-deletions-cursor.json")
+
+
+# ── Deleted history (tombstones) ─────────────────────────────────────────────
+#
+# A delete or Clear writes a stone here and, with Cloud Sync on, sends it to
+# echo_history_deletions (supabase/history_deletions.sql), which deletes the
+# cloud rows at once and refuses any later upload of them, including from
+# old Echo versions. Every PC pulls the stones and erases its own copies, so
+# a deleted dictation stays deleted everywhere. Up to v1.8.9 stones lived
+# only on the PC that made them, held the deleted words, and were dropped 30
+# days later, after which another PC's copy came back (issue #2).
+#
+# A stone holds no words: {v: 2, user_id, kind: "row" | "before",
+# created_at (the row's time, or the Clear cutoff), text_sha256, audio_key,
+# pending (not yet in the cloud), server_id}.
+#
+# Match rule, kept in step with echo_history_row_deleted in the SQL: a row is
+# deleted when a "before" stone is at or after its time, or a "row" stone has
+# exactly its time (Retry transcription rewrites the text, never the time),
+# or a "row" stone is within 10 s with the same text hash (builds before v1.8
+# minted separate local and remote timestamps).
+
+_STONE_TOLERANCE_S = 10
+_DELETE_BATCH = 500
+# A page cursor only moves past stones this much older than the newest one
+# seen, so a stone committed out of id order is still picked up next time.
+_STONE_SETTLE_S = 60
+_AUDIO_KEY_RE = re.compile(r"\d{20}")
+
+
+def text_sha256(text: str) -> str:
+    """The only trace of a deleted dictation's words a stone keeps. Equal to
+    Postgres encode(sha256(convert_to(text, 'UTF8')), 'hex')."""
+    return hashlib.sha256((text or "").encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _parse_time(iso):
+    try:
+        dt = datetime.datetime.fromisoformat(
+            str(iso or "").strip().replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=datetime.timezone.utc)
+    except Exception:
+        return None
+
+
+def _audio_key(created_at: str) -> str:
+    import audio_store
+    return audio_store.canonical_key(created_at)
+
+
+def _new_stone(owner: Optional[str], kind: str, created_at: str,
+               sha: Optional[str] = None, *, pending: Optional[bool] = None,
+               server_id=None, audio_key: str = "") -> dict:
+    return {"v": 2, "user_id": owner, "kind": kind, "created_at": created_at,
+            "text_sha256": sha if kind == "row" else None,
+            "audio_key": audio_key or _audio_key(created_at),
+            # Signed out there is no cloud to tell: the stone stays local.
+            "pending": bool(owner) if pending is None else pending,
+            "server_id": server_id}
+
+
+def _upgrade_stone(s) -> Optional[dict]:
+    """A stone from v1.8.9 or earlier ({text, created_at, id} or {all_before},
+    with purge_after) as a v2 stone without the words. Its remote delete
+    never happened or was deferred, so it goes to the cloud as pending."""
+    if not isinstance(s, dict):
+        return None
+    if s.get("v") == 2:
+        return s
+    owner = s.get("user_id") or None
+    if s.get("all_before"):
+        return _new_stone(owner, "before", s["all_before"])
+    if s.get("created_at"):
+        sha = text_sha256(s["text"]) if s.get("text") else None
+        return _new_stone(owner, "row", s["created_at"], sha)
+    return None     # no time: nothing it could ever match
+
+
+def _stone_identity(s: dict):
+    return (s.get("kind"), _parse_time(s.get("created_at")),
+            s.get("text_sha256") or None)
+
+
+class StoneIndex:
+    """One account's stones, ready to test rows and recording keys."""
+
+    def __init__(self, stones):
+        self.cutoff = None
+        self.exact = set()
+        self.near = []
+        self.audio_keys = set()
+        self.audio_cutoff = ""
+        for s in stones or ():
+            t = _parse_time(s.get("created_at"))
+            if t is None:
+                continue
+            if s.get("kind") == "before":
+                if self.cutoff is None or t > self.cutoff:
+                    self.cutoff = t
+                    self.audio_cutoff = s.get("audio_key") or _audio_key(s["created_at"])
+            else:
+                self.exact.add(t)
+                if s.get("text_sha256"):
+                    self.near.append((t, s["text_sha256"]))
+                self.audio_keys.add(s.get("audio_key") or _audio_key(s["created_at"]))
+
+    def __bool__(self):
+        return self.cutoff is not None or bool(self.exact)
+
+    def hides(self, row: dict) -> bool:
+        t = _parse_time(row.get("created_at"))
+        if t is None:
+            return False
+        if self.cutoff is not None and t <= self.cutoff:
+            return True
+        if t in self.exact:
+            return True
+        sha = None
+        for st, h in self.near:
+            if abs((t - st).total_seconds()) <= _STONE_TOLERANCE_S:
+                if sha is None:
+                    sha = text_sha256(row.get("transcribed_text") or "")
+                if sha == h:
+                    return True
+        return False
+
+    def hides_audio_key(self, key: str) -> bool:
+        if not key:
+            return False
+        if key in self.audio_keys:
+            return True
+        return bool(self.audio_cutoff and _AUDIO_KEY_RE.fullmatch(key)
+                    and key <= self.audio_cutoff)
 
 
 class SupabaseLogger:
@@ -80,6 +217,7 @@ class SupabaseLogger:
         self._url = url
         self._key = key
         self._client = None
+        self._client_lock = threading.Lock()
         self._enabled = bool(url and key)
         self._user_id: Optional[str] = None
         self._write_queue: Queue[dict] = Queue(maxsize=200)
@@ -101,6 +239,8 @@ class SupabaseLogger:
         # down while it is off. Before v1.8.0 this all ran for every signed-in
         # user with no switch; it is now opt-in on each PC.
         self._sync_enabled = False
+        # One delete flush at a time (a click and the periodic sync can race).
+        self._flush_lock = threading.Lock()
 
     @property
     def is_enabled(self) -> bool:
@@ -133,18 +273,32 @@ class SupabaseLogger:
                 print(f"[History] Listener failed: {exc}")
 
     def set_client(self, client) -> None:
-        """Share an already-authenticated Supabase client (bypasses RLS)."""
-        self._client = client
+        """Share the signed-in Supabase client, so requests carry the user's
+        session and RLS sees who they are."""
+        with self._client_lock:
+            self._client = client
         with self._history_lock:
             self._history_select_cols = None
             self._app_columns_supported = None
 
     def _get_client(self):
-        if self._client is None:
-            from supabase import create_client
+        """The shared signed-in client, or an anonymous one before sign-in.
 
-            self._client = create_client(self._url, self._key)
-        return self._client
+        Building the anonymous client is slow (it imports supabase), and a
+        startup call used to finish building it AFTER sign-in had shared the
+        real client, overwriting it: from then on every request went out
+        anonymously and every user-scoped write (usage stats, diagnostics)
+        was refused with 401 until Echo restarted. A client set meanwhile
+        now always wins."""
+        client = self._client
+        if client is not None:
+            return client
+        from supabase import create_client
+        fresh = create_client(self._url, self._key)
+        with self._client_lock:
+            if self._client is None:
+                self._client = fresh
+            return self._client
 
     # ------------------------------------------------------------------
     # Public API — all fire-and-forget
@@ -227,7 +381,12 @@ class SupabaseLogger:
 
         def _insert():
             try:
-                self._get_client().table("update_events").insert(payload).execute()
+                # returning=minimal: the default reads the row back, which
+                # needs SELECT, and clients only have INSERT on update_events
+                # (every report was refused with 401/403 until v1.8.10).
+                from postgrest.types import ReturnMethod
+                self._get_client().table("update_events").insert(
+                    payload, returning=ReturnMethod.minimal).execute()
                 print(f"[Supabase] update_event: {stage} ok={ok}")
             except Exception as e:
                 print(f"[Supabase] update_event log failed (non-fatal): {e}")
@@ -276,7 +435,12 @@ class SupabaseLogger:
 
         def _insert():
             try:
-                self._get_client().table("error_events").insert(payload).execute()
+                # returning=minimal: the default reads the row back, which
+                # needs SELECT, and clients only have INSERT on error_events
+                # (every report was refused with 401/403 until v1.8.10).
+                from postgrest.types import ReturnMethod
+                self._get_client().table("error_events").insert(
+                    payload, returning=ReturnMethod.minimal).execute()
                 print(f"[Supabase] error_event: {event_type}")
             except Exception as e:
                 print(f"[Supabase] error_event log failed (non-fatal): {e}")
@@ -511,6 +675,21 @@ class SupabaseLogger:
         scopes rows to the signed-in user."""
         if not self._enabled or not self._user_id or self._user_id == "local":
             return []
+        # The people and companies this user actually deals with, ranked by
+        # their own recent CRM activity, plus colleagues (echo_vocab_terms,
+        # supabase/vocab_terms.sql). The plain contacts read below took the
+        # first rows RLS returned, which for a team with scraped lead lists
+        # was 150 US forklift dealers and none of the names they dictate.
+        try:
+            rows = (self._get_client().rpc("echo_vocab_terms", {"p_limit": 150})
+                    .execute().data or [])
+            ranked = [" ".join((r.get("term") or "").split()) for r in rows]
+            ranked = [t for t in ranked if len(t) >= 3]
+            if ranked:
+                return ranked[:150]
+        except Exception as exc:
+            print(f"[Supabase] Ranked vocabulary unavailable, using contacts "
+                  f"(non-fatal): {exc}")
         shapes = ("first_name,last_name,company",
                   "first_name,last_name,company_name",
                   "name,company",
@@ -603,8 +782,7 @@ class SupabaseLogger:
         independent of network latency while preserving remote-only records.
         """
         items = self.get_cached_history(limit)
-        threading.Thread(target=self._purge_expired_tombstones,
-                         daemon=True, name="tombstone-purge").start()
+        self._flush_deletions_soon()
         self.refresh_history_async(limit=max(200, limit))
         return items
 
@@ -784,36 +962,35 @@ class SupabaseLogger:
         self._publish_history(owner, merged)
 
     def clear_history(self) -> bool:
-        """Soft-clear: history disappears from the app immediately; the actual
-        Supabase rows are deleted after a 30-day grace period (tombstone),
-        so an accidental clear is recoverable server-side."""
+        """Delete all of this account's history up to now: gone from this PC
+        at once, and (Cloud Sync on) from the cloud and every other PC, which
+        never upload it again. With Cloud Sync off the cutoff waits here and
+        goes up when it is turned on."""
         owner = self._history_owner()
-        # Stored audio is local-only and unrecoverable server-side, so drop
-        # exactly this owner's clips (a shared machine keeps other accounts').
+        # Drop exactly this owner's clips (a shared machine keeps other
+        # accounts').
         try:
             import audio_store
             with self._history_lock:
                 rows = [dict(r) for r in self._history_cache.get(owner, [])]
+            rows += self._fetch_local(200, user_id=owner)
             for row in rows:
                 audio_store.delete_for(row.get("created_at") or "")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[LocalHistory] Clearing recordings failed: {e}")
         local_ok = self._clear_local(owner)
-        now = datetime.datetime.now(datetime.timezone.utc)
-        stone = {
-            "all_before": now.isoformat(),
-            "purge_after": (now + datetime.timedelta(
-                days=_TOMBSTONE_GRACE_DAYS)).isoformat(),
-        }
-        if owner:
-            stone["user_id"] = owner
-        self._add_tombstone(stone)
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self._add_tombstone(_new_stone(owner, "before", now))
+        self._erase_orphan_clips(owner)
         self._publish_history(owner, [])
+        self._flush_deletions_soon()
         return local_ok or True
 
     def delete_transcription(self, item: dict) -> bool:
-        """Soft-delete one transcription: removed from the app immediately,
-        deleted from Supabase after the 30-day grace period."""
+        """Delete one transcription: gone from this PC at once, and (Cloud
+        Sync on) from the cloud and every other PC, which never upload it
+        again. With Cloud Sync off the delete waits here and goes up when it
+        is turned on."""
         text = item.get("transcribed_text") or ""
         created = item.get("created_at") or ""
         try:
@@ -821,46 +998,47 @@ class SupabaseLogger:
             audio_store.delete_for(created)
         except Exception:
             pass
-        now = datetime.datetime.now(datetime.timezone.utc)
-        stone = {
-            "id": item.get("id"),
-            "text": text,
-            "created_at": created,
-            "purge_after": (now + datetime.timedelta(
-                days=_TOMBSTONE_GRACE_DAYS)).isoformat(),
-        }
         owner = self._history_owner()
-        if owner:
-            stone["user_id"] = owner
-        self._add_tombstone(stone)
-        # Remove from the local history file too.
+        stone = None
+        if created:
+            stone = _new_stone(owner, "row", created,
+                               text_sha256(text) if text else None)
+            self._add_tombstone(stone)
+        # Remove from the local history file too: every copy the stone
+        # matches (a row read back from the cloud writes its time differently).
+        gone = StoneIndex([stone]) if stone else None
+
+        def _is_it(e: dict) -> bool:
+            if gone is not None and gone.hides(e):
+                return True
+            return (e.get("transcribed_text") == text
+                    and e.get("created_at") == created)
+
+        removed = []
         try:
             path = _local_history_path()
             with _local_history_lock:
                 if os.path.exists(path):
                     with open(path, "r", encoding="utf-8") as f:
                         entries = json.load(f)
-                    entries = [
-                        e for e in entries
-                        if not (
-                            ((e.get("user_id") == owner) if owner
-                             else not e.get("user_id"))
-                            and e.get("transcribed_text") == text
-                            and e.get("created_at") == created
-                        )
-                    ]
+                    keep = []
+                    for e in entries:
+                        mine = ((e.get("user_id") == owner) if owner
+                                else not e.get("user_id"))
+                        (removed if mine and _is_it(e) else keep).append(e)
                     with open(path, "w", encoding="utf-8") as f:
-                        json.dump(entries, f, ensure_ascii=False)
+                        json.dump(keep, f, ensure_ascii=False)
         except Exception as e:
             print(f"[LocalHistory] Delete failed: {e}")
+        self._pin_exact_stones(owner, removed)
         with self._history_lock:
             cached = [dict(row) for row in self._history_cache.get(owner, [])]
         cached = [row for row in cached
                   if not ((item.get("id") is not None
                            and row.get("id") == item.get("id"))
-                          or (row.get("transcribed_text") == text
-                              and row.get("created_at") == created))]
+                          or _is_it(row))]
         self._publish_history(owner, cached)
+        self._flush_deletions_soon()
         return True
 
     def update_transcription(self, item: dict, new_text: str) -> bool:
@@ -1156,27 +1334,16 @@ class SupabaseLogger:
         for i in range(0, len(names), 100):
             bucket.remove(names[i:i + 100])
 
-    def _purge_synced_audio(self, owner: str, stone: dict) -> None:
-        """A purged history row takes its synced recording with it."""
-        try:
-            import audio_store
-            if stone.get("all_before"):
-                cutoff = audio_store.canonical_key(stone["all_before"])
-                keys = self.list_synced_audio() or set()
-                self._remove_audio(owner, [k for k in keys if k <= cutoff])
-            elif stone.get("created_at"):
-                self._remove_audio(
-                    owner, [audio_store.canonical_key(stone["created_at"])])
-        except Exception as e:
-            print(f"[Sync] audio purge failed (non-fatal): {e}")
-
     def delete_cloud_data(self) -> dict:
         """Delete everything personal Echo keeps for this account in the
         cloud: history, vocabulary, snippets, settings, learned phrases and
         synced recordings. Works whether or not Cloud Sync is on (it is how
         someone who turned it off cleans up). The daily usage counts in
         user_daily_stats are left alone on purpose: they hold no words, and
-        BrightLink's Home dashboards read them. Returns {part: True/False};
+        BrightLink's Home dashboards read them. So are the deletion stones
+        (echo_history_deletions): they hold no words, and they are what
+        stops another PC uploading a deleted dictation again. Account
+        deletion removes them. Returns {part: True/False};
         RLS refusing a delete does not raise, so each table is read back to
         confirm it is empty."""
         owner = self._history_owner()
@@ -1217,127 +1384,341 @@ class SupabaseLogger:
             result["recordings"] = False
         return result
 
-    # ── Tombstones (deferred remote deletes) ──────────────────────────
+    # ── Tombstones (deleted history; see the notes at the top) ────────
 
     def _load_tombstones(self) -> list:
-        try:
-            path = _tombstones_path()
-            if not os.path.exists(path):
+        """Every stone on this PC, upgraded to v2. A file still holding
+        v1.8.9-or-earlier stones (with the deleted words) is rewritten
+        without them the first time it is read."""
+        with _local_history_lock:
+            try:
+                path = _tombstones_path()
+                if not os.path.exists(path):
+                    return []
+                with open(path, "r", encoding="utf-8") as f:
+                    raw = json.load(f) or []
+            except Exception as e:
+                print(f"[Tombstones] Read failed: {e}")
                 return []
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f) or []
-        except Exception:
-            return []
+            stones = [s for s in (_upgrade_stone(r) for r in raw) if s]
+            if any(not isinstance(r, dict) or r.get("v") != 2 for r in raw):
+                self._save_tombstones(stones)
+            return stones
 
-    def _save_tombstones(self, stones: list) -> None:
+    def _save_tombstones(self, stones: list) -> bool:
         try:
-            with open(_tombstones_path(), "w", encoding="utf-8") as f:
-                json.dump(stones, f, ensure_ascii=False)
+            with _local_history_lock:
+                with open(_tombstones_path(), "w", encoding="utf-8") as f:
+                    json.dump(stones, f, ensure_ascii=False)
+            return True
         except Exception as e:
             print(f"[Tombstones] Save failed: {e}")
+            return False
+
+    def _still_signed_in_as(self, owner: str) -> bool:
+        """Delete traffic is only sent through the client of the account the
+        stones belong to: a flush queued before an account switch must not
+        run with the next account's session."""
+        if self._history_owner() == owner:
+            return True
+        print("[Sync] account changed; deletes wait for their own account")
+        return False
 
     def _add_tombstone(self, stone: dict) -> None:
         with _local_history_lock:
             stones = self._load_tombstones()
-            stones.append(stone)
+            ident = _stone_identity(stone)
+            for s in stones:
+                if (s.get("user_id") == stone.get("user_id")
+                        and _stone_identity(s) == ident):
+                    s["pending"] = s.get("pending") or stone.get("pending")
+                    break
+            else:
+                stones.append(stone)
             self._save_tombstones(stones)
 
-    def _filter_tombstoned(self, items: list, user_id=_CURRENT_USER) -> list:
-        """Hide rows the user deleted (individually or via Clear) from any
-        fetched result — remote rows survive up to 30 days after deletion."""
-        stones = self._load_tombstones()
-        # A tombstone only hides rows for the account that created it — a
-        # Clear by one person must not blank another person's history on a
-        # shared machine.
+    def _stones_for(self, user_id=_CURRENT_USER) -> StoneIndex:
+        # A stone only applies to the account that made it: a Clear by one
+        # person must not blank another person's history on a shared PC.
         uid = self._history_owner(user_id)
-        stones = [s for s in stones if s.get("user_id") == uid]
-        if not stones or not items:
+        return StoneIndex(s for s in self._load_tombstones()
+                          if s.get("user_id") == uid)
+
+    def _filter_tombstoned(self, items: list, user_id=_CURRENT_USER) -> list:
+        """Hide rows the user deleted (one by one or with Clear)."""
+        if not items:
             return items
+        stones = self._stones_for(user_id)
+        if not stones:
+            return items
+        return [it for it in items if not stones.hides(it)]
 
-        def _dt(iso):
-            try:
-                return datetime.datetime.fromisoformat(
-                    (iso or "").replace("Z", "+00:00"))
-            except Exception:
-                return None
+    def tombstoned_audio_keys(self, keys) -> set:
+        """The recording keys (audio_store.canonical_key) among `keys` that
+        belong to deleted history, for this account."""
+        stones = self._stones_for()
+        return {k for k in keys or () if stones.hides_audio_key(k)}
 
-        cutoffs = [_dt(s.get("all_before")) for s in stones if s.get("all_before")]
-        cutoffs = [c for c in cutoffs if c]
-        row_ids = {s.get("id") for s in stones if s.get("id") is not None}
-        row_keys = {(s.get("text"), s.get("created_at"))
-                    for s in stones if s.get("id") is None and s.get("text")}
-
-        out = []
-        for it in items:
-            if it.get("id") is not None and it.get("id") in row_ids:
-                continue
-            if (it.get("transcribed_text"), it.get("created_at")) in row_keys:
-                continue
-            ts = _dt(it.get("created_at"))
-            if ts and cutoffs and any(ts <= c for c in cutoffs):
-                continue
-            out.append(it)
-        return out
-
-    def _purge_expired_tombstones(self) -> None:
-        """Execute remote deletes for tombstones past their grace period.
-        Best-effort: failures keep the tombstone for the next attempt."""
-        if getattr(self, "_purge_running", False):
-            return
-        self._purge_running = True
+    def remove_synced_audio(self, keys) -> bool:
+        owner = self._history_owner()
+        if not self.sync_active:
+            return False
         try:
-            now = datetime.datetime.now(datetime.timezone.utc)
+            self._remove_audio(owner, sorted(set(keys)))
+            return True
+        except Exception as e:
+            print(f"[Sync] removing deleted recordings failed (non-fatal): {e}")
+            return False
 
-            def _dt(iso):
-                try:
-                    return datetime.datetime.fromisoformat(
-                        (iso or "").replace("Z", "+00:00"))
-                except Exception:
-                    return None
+    def _flush_deletions_soon(self) -> None:
+        if self.sync_active:
+            threading.Thread(target=self.flush_deletions, daemon=True,
+                             name="history-deletes").start()
 
-            stones = self._load_tombstones()
-            if not stones:
-                return
-            keep = []
-            changed = False
-            for s in stones:
-                pa = _dt(s.get("purge_after"))
-                if pa is None or pa > now:
-                    keep.append(s)
-                    continue
-                owner = s.get("user_id")
-                if not owner:
-                    changed = True  # local-only rows: nothing remote to delete
-                    continue
-                # Only the owning account's client can (and should) delete,
-                # and only while Cloud Sync is on (off, the stone waits: the
-                # row is already hidden here, and "Delete my data from the
-                # cloud" removes everything at once).
-                if (not self._enabled or not self._sync_enabled
-                        or owner != self._user_id):
-                    keep.append(s)
-                    continue
-                try:
-                    q = self._get_client().table(_TABLE).delete().eq("user_id", owner)
-                    if s.get("all_before"):
-                        q = q.lte("created_at", s["all_before"])
-                    elif s.get("id") is not None:
-                        q = q.eq("id", s["id"])
+    def flush_deletions(self) -> bool:
+        """Send this account's pending deletes to the cloud. The RPC records
+        each stone and deletes the matching rows in one go; then the
+        recordings leave echo-sync-audio. A stone stops being pending only
+        when both landed, so a failure is retried next time (both steps are
+        idempotent). Blocking; True when nothing is left pending."""
+        owner = self._history_owner()
+        if not self.sync_active:
+            return False
+        with self._flush_lock:
+            if not self._still_signed_in_as(owner):
+                return False
+            pending = [s for s in self._load_tombstones()
+                       if s.get("user_id") == owner and s.get("pending")]
+            if not pending:
+                return True
+            sendable = [s for s in pending if _parse_time(s.get("created_at"))]
+            rows = [{"created_at": s["created_at"],
+                     "text_sha256": s.get("text_sha256")}
+                    for s in sendable if s.get("kind") == "row"]
+            cutoffs = [s for s in sendable if s.get("kind") == "before"]
+            latest = max(cutoffs, key=lambda s: _parse_time(s["created_at"]),
+                         default=None)
+            try:
+                client = self._get_client()
+                batches = [rows[i:i + _DELETE_BATCH]
+                           for i in range(0, len(rows), _DELETE_BATCH)] or [[]]
+                for i, batch in enumerate(batches):
+                    if not self._still_signed_in_as(owner):
+                        return False
+                    client.rpc("echo_history_delete", {
+                        "p_rows": batch,
+                        "p_before": (latest["created_at"]
+                                     if latest and i == 0 else None),
+                    }).execute()
+                keys = {s.get("audio_key") for s in sendable
+                        if s.get("kind") == "row" and s.get("audio_key")}
+                if not self._still_signed_in_as(owner):
+                    return False
+                if latest is not None:
+                    listed = self.list_synced_audio()
+                    if listed is None:
+                        raise RuntimeError("could not list recordings")
+                    cut = StoneIndex([latest])
+                    keys |= {k for k in listed if cut.hides_audio_key(k)}
+                self._remove_audio(owner, sorted(keys))
+            except Exception as e:
+                print(f"[Sync] sending deletes failed (will retry): {e}")
+                return False
+            sent = {_stone_identity(s) for s in pending}
+            with _local_history_lock:
+                stones = self._load_tombstones()
+                for s in stones:
+                    if s.get("user_id") == owner and _stone_identity(s) in sent:
+                        s["pending"] = False
+                self._save_tombstones(stones)
+            print(f"[Sync] deletes sent: {len(rows)} row(s)"
+                  + (", history cleared" if latest else ""))
+            return True
+
+    def _load_cursor(self, owner: str) -> int:
+        try:
+            with open(_deletions_cursor_path(), "r", encoding="utf-8") as f:
+                return int((json.load(f) or {}).get(owner) or 0)
+        except FileNotFoundError:
+            return 0
+        except Exception as e:
+            print(f"[Tombstones] Cursor read failed (starting over): {e}")
+            return 0
+
+    def _save_cursor(self, owner: str, after_id: int) -> None:
+        path = _deletions_cursor_path()
+        try:
+            with _local_history_lock:
+                data = {}
+                if os.path.exists(path):
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            data = json.load(f) or {}
+                    except Exception:
+                        data = {}
+                data[owner] = int(after_id)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+        except Exception as e:
+            print(f"[Tombstones] Cursor save failed: {e}")
+
+    def pull_deletions(self) -> bool:
+        """Fetch the deletes this account made on its other PCs (keyset
+        pages, so the 1,000-row PostgREST cap can never cut it short), add
+        them to this PC's stones and erase the matching history and
+        recordings here. Blocking; False when the fetch failed."""
+        owner = self._history_owner()
+        if not self.sync_active:
+            return False
+        cursor = self._load_cursor(owner)
+        fetched, after = [], cursor
+        try:
+            client = self._get_client()
+            while True:
+                if not self._still_signed_in_as(owner):
+                    return False
+                page = client.rpc("echo_history_deletions_page", {
+                    "p_after_id": after, "p_limit": _DELETE_BATCH,
+                }).execute().data or []
+                fetched.extend(page)
+                if len(page) < _DELETE_BATCH:
+                    break
+                after = page[-1]["id"]
+        except Exception as e:
+            print(f"[Sync] fetching deletes failed (non-fatal): {e}")
+            return False
+        # The pages came from whoever is signed in now: they must be this
+        # account's to be filed under it.
+        if not self._still_signed_in_as(owner):
+            return False
+
+        if fetched:
+            with _local_history_lock:
+                stones = self._load_tombstones()
+                mine = [s for s in stones if s.get("user_id") == owner]
+                known_ids = {s.get("server_id") for s in mine}
+                by_ident = {_stone_identity(s): s for s in mine}
+                for r in fetched:
+                    if r.get("id") in known_ids or not r.get("created_at"):
+                        continue
+                    stone = _new_stone(owner, r.get("kind") or "row",
+                                       r["created_at"], r.get("text_sha256"),
+                                       pending=False, server_id=r.get("id"),
+                                       audio_key=r.get("audio_key") or "")
+                    same = by_ident.get(_stone_identity(stone))
+                    if same is not None:
+                        same["server_id"] = r.get("id")
                     else:
-                        q = (q.eq("transcribed_text", s.get("text") or "")
-                              .eq("created_at", s.get("created_at") or ""))
-                    q.execute()
-                    self._purge_synced_audio(owner, s)
-                    changed = True
-                    print("[Supabase] Purged tombstoned history (30-day grace elapsed).")
-                except Exception as e:
-                    print(f"[Supabase] Tombstone purge failed (will retry): {e}")
-                    keep.append(s)
-            if changed:
-                with _local_history_lock:
-                    self._save_tombstones(keep)
-        finally:
-            self._purge_running = False
+                        stones.append(stone)
+                        by_ident[_stone_identity(stone)] = stone
+                if not self._save_tombstones(stones):
+                    return False    # cursor stays put: re-fetched next time
+            # Move the cursor only past stones well older than the newest
+            # seen: one committed out of id order is then still re-read.
+            times = [_parse_time(r.get("deleted_at")) for r in fetched]
+            newest = max((t for t in times if t), default=None)
+            if newest is not None:
+                settle = newest - datetime.timedelta(seconds=_STONE_SETTLE_S)
+                settled = [r["id"] for r, t in zip(fetched, times)
+                           if t and t <= settle and r.get("id")]
+                if settled and max(settled) > cursor:
+                    self._save_cursor(owner, max(settled))
+        self._erase_deleted_locally(owner)
+        return True
+
+    def _pin_exact_stones(self, owner: Optional[str], entries) -> None:
+        """A local copy removed only by the 10 s rule (a build before v1.8
+        gave it its own timestamp) also gets a stone at its exact time, and
+        its clip here goes too. Its recording is stored under that time, so
+        only such a stone removes it from the cloud and stops it coming back."""
+        stones = self._stones_for(owner)
+        for e in entries or ():
+            t = _parse_time(e.get("created_at"))
+            if t is None or t in stones.exact or (
+                    stones.cutoff is not None and t <= stones.cutoff):
+                continue
+            try:
+                import audio_store
+                audio_store.delete_for(e["created_at"])
+            except Exception as exc:
+                print(f"[LocalHistory] Deleting a recording failed: {exc}")
+            text = e.get("transcribed_text") or ""
+            self._add_tombstone(_new_stone(
+                owner, "row", e["created_at"], text_sha256(text) if text else None))
+
+    def _erase_orphan_clips(self, owner: Optional[str]) -> int:
+        """Recordings outlive their history rows here (audio keeps 400,
+        history 200), so a deleted dictation's clip can be on disk with no
+        row left to find it by. Remove every clip the stones cover that no
+        history row on this PC still uses; a clip another account's history
+        refers to is never touched."""
+        stones = self._stones_for(owner)
+        if not stones:
+            return 0
+        try:
+            import audio_store
+            folder = audio_store.audio_dir()
+            names = os.listdir(folder)
+            with _local_history_lock:
+                path = _local_history_path()
+                entries = []
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        entries = json.load(f) or []
+            used = {audio_store._key(e.get("created_at") or "") for e in entries}
+            removed = 0
+            for name in names:
+                stem = name[:-4] if name.endswith(".wav") else ""
+                if stem and stem not in used and stones.hides_audio_key(stem):
+                    os.remove(os.path.join(folder, name))
+                    removed += 1
+            if removed:
+                print(f"[Sync] recordings: erased {removed} deleted here")
+            return removed
+        except Exception as e:
+            print(f"[LocalHistory] Erasing deleted recordings failed: {e}")
+            return 0
+
+    def _erase_deleted_locally(self, owner: str) -> int:
+        """Remove this account's deleted rows from history.json, with their
+        recordings, so a delete made on another PC really leaves this one."""
+        stones = self._stones_for(owner)
+        if not stones:
+            return 0
+        gone = []
+        try:
+            path = _local_history_path()
+            with _local_history_lock:
+                entries = []
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        entries = json.load(f) or []
+                keep = []
+                for e in entries:
+                    if e.get("user_id") == owner and stones.hides(e):
+                        gone.append(e)
+                    else:
+                        keep.append(e)
+                if gone:
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(keep, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"[LocalHistory] Erasing deleted rows failed: {e}")
+            return 0
+        if gone:
+            try:
+                import audio_store
+                for e in gone:
+                    audio_store.delete_for(e.get("created_at") or "")
+            except Exception as e:
+                print(f"[LocalHistory] Erasing deleted recordings failed: {e}")
+            self._pin_exact_stones(owner, gone)
+            with self._history_lock:
+                self._history_cache.pop(owner, None)
+            self._publish_history(owner, self._local_snapshot(owner, 200))
+            print(f"[Sync] history: erased {len(gone)} row(s) deleted on another PC")
+        self._erase_orphan_clips(owner)
+        return len(gone)
 
     def _clear_local(self, owner: Optional[str]) -> bool:
         try:

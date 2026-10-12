@@ -1,5 +1,4 @@
 import unittest
-from unittest import mock
 
 import ai_refiner
 from ai_refiner import _restore_emoji
@@ -28,11 +27,11 @@ class RefineKeepsEmoji(unittest.TestCase):
             return "Up to you."
         r._refine_via_openrouter = fake
         r._apply_sender_name = lambda out, mode, name: out
-        type(r).is_available = property(lambda self: True)
-        try:
-            out = r.refine("up to you \U0001F60A", "punctuation")
-        finally:
-            del type(r).is_available
+        # openrouter_api_key makes is_available True already. This used to
+        # overwrite the property on the class and then `del` it, which removed
+        # AIRefiner.is_available for every later test in the run: the 23
+        # "known" refiner failures on clean main were this, not real bugs.
+        out = r.refine("up to you \U0001F60A", "punctuation")
         self.assertIn("emoji", seen["prompt"])
         self.assertIn("\U0001F60A", out)
 

@@ -21,12 +21,14 @@ class _FakeQuery:
         self._sink = sink
         self._table = table
 
-    def insert(self, payload):
+    def insert(self, payload, returning=None):
         self._payload = payload
+        self.returning = returning
         return self
 
     def execute(self):
         self._sink.append((self._table, self._payload))
+        self._returning.append(self.returning)
         self._sink_event.set()
         return self
 
@@ -34,11 +36,13 @@ class _FakeQuery:
 class _FakeClient:
     def __init__(self):
         self.inserts = []
+        self.returning = []
         self.event = threading.Event()
 
     def table(self, name):
         q = _FakeQuery(self.inserts, name)
         q._sink_event = self.event
+        q._returning = self.returning
         return q
 
 
@@ -75,6 +79,10 @@ class LogErrorEventTests(unittest.TestCase):
                          "2026-07-28T10:00:00+00:00")
         self.assertEqual(payload["user_id"], "uid-123")
         self.assertIn("created_at", payload)
+        # Clients have INSERT but not SELECT on error_events: asking for the
+        # row back got every report refused (401/403) up to v1.8.9.
+        from postgrest.types import ReturnMethod
+        self.assertEqual(fake.returning, [ReturnMethod.minimal])
 
     def test_empty_fields_omitted_and_local_user_unstamped(self):
         logger, fake = self._logger()

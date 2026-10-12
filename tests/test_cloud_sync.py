@@ -432,6 +432,24 @@ class _FakeDb:
         self.audio_down.append(key)
         return True
 
+    # Deleted history: nothing pending, nothing deleted elsewhere by default.
+    deleted_keys = frozenset()
+    removed_audio = None
+
+    def flush_deletions(self):
+        return True
+
+    def pull_deletions(self):
+        return True
+
+    def tombstoned_audio_keys(self, keys):
+        return {k for k in keys if k in self.deleted_keys}
+
+    def remove_synced_audio(self, keys):
+        self.removed_audio = set(keys)
+        self.remote_audio -= set(keys)
+        return True
+
 
 class SyncRunTests(unittest.TestCase):
 
@@ -480,6 +498,38 @@ class SyncRunTests(unittest.TestCase):
         cs._full_sync()
         self.assertEqual(db.pushed, {})
         self.assertEqual(statuses[-1][1], "signed_out")
+
+    def test_a_deleted_recording_is_removed_from_the_cloud_never_downloaded(self):
+        db = _FakeDb()
+        db.set_sync_enabled(True)
+        gone = audio_store.canonical_key("2026-09-28T09:00:00+00:00")
+        db.deleted_keys = {gone}
+        db.local = [r for r in db.local if r["transcribed_text"] != "old pc row"]
+        cs, _a, _s = self._sync(db)
+        with mock.patch.object(audio_store, "find", lambda c: None):
+            self.assertTrue(cs._step_audio())
+        self.assertEqual(db.removed_audio, {gone})
+        self.assertEqual(db.audio_down, [])
+
+    def test_history_pulls_other_pcs_deletes_before_uploading(self):
+        db = _FakeDb()
+        db.set_sync_enabled(True)
+        order = []
+        db.flush_deletions = lambda: order.append("flush") or True
+        db.pull_deletions = lambda: order.append("pull") or True
+        real_up = db.upload_history_rows
+        db.upload_history_rows = lambda rows: order.append("upload") or real_up(rows)
+        cs, _a, _s = self._sync(db)
+        self.assertTrue(cs._step_history())
+        self.assertEqual(order, ["flush", "pull", "upload"])
+
+    def test_no_upload_when_the_deletes_could_not_be_fetched(self):
+        db = _FakeDb()
+        db.set_sync_enabled(True)
+        db.pull_deletions = lambda: False
+        cs, _a, _s = self._sync(db)
+        self.assertFalse(cs._step_history())
+        self.assertEqual(db.uploaded_rows, [])
 
     def test_a_clip_is_uploaded_only_when_on(self):
         db = _FakeDb()

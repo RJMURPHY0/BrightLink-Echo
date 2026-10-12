@@ -1,6 +1,6 @@
 # BrightLink Echo privacy policy
 
-Last updated: 29 September 2026
+Last updated: 12 October 2026
 
 BrightLink Echo is a Windows dictation app published by BRIGHTLINK (OS) LTD,
 registered in England and Wales, company number 17459281. This policy covers
@@ -68,8 +68,11 @@ Face. We do not sell your data or use it for advertising.
 ## Your rights
 
 You can delete any dictation from History, and everything Cloud Sync stored
-from Settings. To get a copy of your data, have it corrected or have your
-account deleted, email
+from Settings. With Cloud Sync on, a deleted dictation is removed from the
+cloud straight away and from your other PCs when they next sync; Echo keeps
+only its time and a one-way fingerprint of the words (never the words) so no
+PC can upload it again. To get a copy of your data, have it corrected or have
+your account deleted, email
 [ryan.murphy@brightlink.io](mailto:ryan.murphy@brightlink.io). We reply
 within 30 days.
 

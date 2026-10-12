@@ -297,6 +297,74 @@ class FunctionWordTests(unittest.TestCase):
                 self.assertEqual(text, apply_vocabulary_fuzzy(text, managed(name)))
 
 
+class SilentWordTests(unittest.TestCase):
+    """Double Metaphone cannot hear a lone letter: "H" and "W" encode to
+    nothing, so "H & W Forklift" carries exactly the code of "forklift".
+    Found by tools/term_bench.py against a live CRM cache (2026-10-12): every
+    spoken "forklift" became "H & W Forklift"."""
+
+    def test_a_word_inside_a_name_never_becomes_the_whole_name(self):
+        for text in ("We need a new forklift for the warehouse.",
+                     "The forklift rental is due next week.",
+                     "Forklift repair parts are in stock."):
+            with self.subTest(text=text):
+                self.assertEqual(text, apply_vocabulary_fuzzy(
+                    text, managed("H & W Forklift Inc", "H & W Forklift")))
+
+    def test_a_hand_typed_term_is_held_to_the_same_rule(self):
+        self.assertEqual("the forklift is here", apply_vocabulary_fuzzy(
+            "the forklift is here", owned("H & W Forklift")))
+
+    def test_a_name_never_swallows_a_different_word_beside_it(self):
+        # Double Metaphone drops a leading W: "again" codes like "Wagon".
+        for text, name in (("Can you check the artisans again today?", "Artisans Way"),
+                           ("Can you check ali's again today?", "Ali's Wagon")):
+            with self.subTest(name=name):
+                self.assertEqual(text, apply_vocabulary_fuzzy(text, managed(name)))
+
+    def test_one_word_never_grows_into_a_longer_name(self):
+        self.assertEqual("Can you check the artisans today?", apply_vocabulary_fuzzy(
+            "Can you check the artisans today?", managed("Artisans Way")))
+
+    def test_a_slip_in_each_word_still_corrects(self):
+        self.assertEqual("book the visit with Van Wall Lifts",
+                         apply_vocabulary_fuzzy("book the visit with Van Waal Lifts",
+                                                managed("Van Wall Lifts")))
+
+    def test_a_stored_full_stop_never_lands_mid_sentence(self):
+        self.assertEqual(["Hinansho"], managed_variants("Hinansho."))
+        self.assertEqual("check the Hinansho order", apply_vocabulary_fuzzy(
+            "check the hinanshow order", managed(*managed_variants("Hinansho."))))
+
+    def test_an_ampersand_name_corrects_when_said_with_and(self):
+        # "&" is spoken "and"; the written form used to trip the
+        # function-word rule, so no such company was ever corrected.
+        self.assertEqual("send it to Fagan & Whalley by Friday", apply_vocabulary_fuzzy(
+            "send it to Fagan and Wally by Friday", managed("Fagan & Whalley")))
+        self.assertEqual("add Short & Tall to the meeting", apply_vocabulary_fuzzy(
+            "add short and tall to the meeting", managed("Short & Tall")))
+
+    def test_four_and_five_word_names_correct(self):
+        self.assertEqual("call Kennicott Glacier Lodge today", apply_vocabulary_fuzzy(
+            "call Kennycott Glacier Lodge today", managed("Kennicott Glacier Lodge")))
+        self.assertEqual("visit Orfila Vineyards & Winery soon", apply_vocabulary_fuzzy(
+            "visit Orphila Vineyards and Winery soon",
+            managed("Orfila Vineyards & Winery")))
+
+    def test_and_on_its_own_never_becomes_an_ampersand_name(self):
+        for text in ("Short and simple, please.", "We need tall ladders and short ones."):
+            with self.subTest(text=text):
+                self.assertEqual(text, apply_vocabulary_fuzzy(text, managed("Short & Tall")))
+
+    def test_names_without_silent_words_still_merge(self):
+        # One spoken word for a two-word name is fine when every word of the
+        # name is audible: nothing is added that the encoder could not hear.
+        self.assertEqual("the Bright Link rollout", apply_vocabulary_fuzzy(
+            "the brightlink rollout", owned("Bright Link")))
+        self.assertEqual("Call Fosseway Freight today", apply_vocabulary_fuzzy(
+            "Call fossway freight today", managed("Fosseway Freight")))
+
+
 class PrecedenceTests(unittest.TestCase):
 
     def test_user_entry_wins_when_it_collides_with_a_managed_one(self):
