@@ -390,6 +390,15 @@ _MODIFIER_VKS = frozenset({
 # capture is decided by the "Hide Popup in Screenshots" setting
 # (set_capture_hidden), not by this.
 _SCREENSHOT_VKS = frozenset({0x2C})
+# Keys our own injection sends on its own (typed text, Live Typing's
+# Backspace, the 0xFF dummy). Never counted as a fresh press already down
+# when the badge arms.
+_SYNTHETIC_VKS = frozenset({0xE7, 0x08, 0xFF})   # packet, our Backspace, dummy
+
+
+def _chord_modifier_held(state) -> bool:
+    """Ctrl or Shift down, read through the given key-state function."""
+    return any(state(vk) & 0x8000 for vk in (0x10, 0x11, 0xA0, 0xA1, 0xA2, 0xA3))
 _DISMISS_VKS = tuple(vk for vk in range(0x08, 0xFF)
                      if vk not in _MODIFIER_VKS and vk not in _SCREENSHOT_VKS)
 
@@ -1820,6 +1829,13 @@ class FloatingPopup:
 
         self._dismiss_poll = None
         self._key_state = _key_state
+        self._stop_keys = None          # keys down at the last stop press
+        self._stop_keys_at = 0.0
+        self._synthetic_enter_at = 0.0  # our own auto-Enter (config.auto_enter)
+        try:
+            _key_state(0x0D)            # load the WinDLL now, not on a stop press
+        except Exception:
+            pass
         self._fg_watch_tick = None
 
     # ── Refinement frame ───────────────────────────────────────────────────────
@@ -2119,6 +2135,9 @@ class FloatingPopup:
             # Always position on the monitor where the cursor is
             self._reposition(self._status_cx, self._status_cy)
             self._show_no_activate()
+            if recording:
+                # Read by the app's press timing (perf_counter, like its key-down stamp).
+                self.status_shown_at = time.perf_counter()
 
     def _reset_caption_widget(self, text: str = "") -> None:
         """Reset the caption bar to a single-line-tall paragraph block (start of a
@@ -2372,33 +2391,71 @@ class FloatingPopup:
         self._dismiss_poll = token
         state = self._key_state
 
-        # Keys already down when the badge appeared. The hotkey that just
-        # ended the dictation is still physically held at this moment; only a
-        # key that goes down AFTER this counts. Reading every key here also
-        # clears its "pressed since the last call" bit, so a press from before
-        # the badge is not mistaken for a tap between two polls.
+        # Keys already down when the badge appeared. Reading every key here
+        # also clears its "pressed since the last call" bit, so a press from
+        # before the badge is not mistaken for a tap between two polls.
         held = {vk for vk in _DISMISS_VKS if state(vk) & 0x8000}
+        # A held key stays ignored if it was already down when the stop hotkey
+        # went (the hotkey itself, still physically held). Any other key down
+        # now went down after the dictation ended: the user pressing Enter the
+        # instant the text landed, which used to leave the badge up (reported
+        # 2026-10-12). Not while Ctrl or Shift is down: our own paste (Ctrl+V)
+        # and typed line break (Shift+Enter) are those chords. Without a recent
+        # stop snapshot every held key stays ignored, as before.
+        stop_keys = getattr(self, "_stop_keys", None)
+        self._stop_keys = None          # one dictation, one badge
+        ours = set(_SYNTHETIC_VKS)
+        if time.time() - getattr(self, "_synthetic_enter_at", 0.0) < 2.0:
+            ours.add(0x0D)              # auto-Enter just sent by the app
+        fresh = [bool(stop_keys is not None
+                      and time.time() - getattr(self, "_stop_keys_at", 0.0) < 60.0
+                      and not _chord_modifier_held(state)
+                      and held - stop_keys - ours)]
+        # A key that goes down inside the grace window is not lost. It counts
+        # if it is seen down on two polls in a row (a person's tap lasts 80 ms
+        # or more; polls are 30 ms apart) or is still down when the window
+        # ends. Our own keystrokes landing as the badge arms are down and up
+        # within one batch, so they are never seen twice.
+        grace_down: dict = {}           # vk -> polls seen down in the grace
+        grace_tap = [False]
 
         def _poll():
             if self._dismiss_poll is not token:
                 return
+            in_grace = time.time() - armed_at < KEY_DISMISS_GRACE_SECS
             pressed = False
             for vk in _DISMISS_VKS:
                 s = state(vk)
                 if not s & 0x8000:
                     held.discard(vk)
-                    if s & 0x0001:
+                    if grace_down.pop(vk, 0) >= 2 and vk not in ours:
+                        grace_tap[0] = True
+                    if s & 0x0001 and not in_grace:
                         pressed = True      # a tap shorter than one poll
+                    continue
+                if vk in grace_down:
+                    grace_down[vk] += 1
+                    if grace_down[vk] >= 2 and vk not in ours:
+                        grace_tap[0] = True
                     continue
                 if vk in held:
                     continue                # still the key the user held
                 held.add(vk)
-                pressed = True
-            if (pressed and time.time() - armed_at >= KEY_DISMISS_GRACE_SECS
-                    and not _windows_key_held()):
-                self._unregister_key_dismiss()
-                self._do_hide()
-                return
+                if in_grace:
+                    grace_down[vk] = 1
+                else:
+                    pressed = True
+            if not in_grace:
+                if (grace_tap[0] or fresh[0]
+                        or any(vk not in ours for vk in grace_down)):
+                    pressed = True
+                grace_down.clear()
+                grace_tap[0] = False
+                fresh[0] = False
+                if pressed and not _windows_key_held():
+                    self._unregister_key_dismiss()
+                    self._do_hide()
+                    return
             try:
                 self.root.after(KEY_DISMISS_POLL_MS, _poll)
             except (tk.TclError, RuntimeError, AttributeError) as e:
@@ -2411,6 +2468,24 @@ class FloatingPopup:
 
     def _unregister_key_dismiss(self) -> None:
         self._dismiss_poll = None
+
+    def note_synthetic_enter(self) -> None:
+        """The app is about to send Enter itself (auto_enter): that Enter is
+        never the user dismissing the badge."""
+        self._synthetic_enter_at = time.time()
+
+    def note_dictation_stop_keys(self) -> None:
+        """Snapshot which keys are down as the stop hotkey fires (any thread:
+        only reads key state). The badge that follows ignores these if they are
+        still held when it appears, and counts every other held key as a fresh
+        press."""
+        try:
+            self._stop_keys = {vk for vk in _DISMISS_VKS
+                               if self._key_state(vk) & 0x8000}
+            self._stop_keys_at = time.time()
+        except Exception as e:
+            self._stop_keys = None
+            print(f"[Popup] Stop-key snapshot failed: {e}")
 
     # ── Dismiss when the user switches away ─────────────────────────────────
 

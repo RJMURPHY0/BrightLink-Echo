@@ -15,6 +15,7 @@ import app_search
 import tkinter as tk
 import tkinter.font as tkfont
 import bookmark_tabs
+from latest_worker import LatestWorker
 import ui_render
 from datetime import date as _date, datetime, timedelta
 from typing import Callable, Optional
@@ -2222,6 +2223,8 @@ class AppWindow:
         self._on_sign_in              = on_sign_in
         self._db                      = db
         self._stats                   = stats
+        self._status_worker           = LatestWorker(self._apply_status,
+                                                     "status-label")
         self._config                  = config
         self._get_input_devices       = get_input_devices
         self._recorder                = recorder
@@ -2523,9 +2526,15 @@ class AppWindow:
             self._root.focus_force()
 
     def update_status(self, state: str) -> None:
+        """Called on the hotkey thread at every press, before capture starts.
+        A Tk call from another thread waits until the Tk loop is free, so the
+        hand-off to the loop happens on a worker and this returns at once."""
         if self._root and hasattr(self, "_status_lbl"):
-            text, color = self._STATUS.get(state, ("● Ready", C["success"]))
-            self._ui_after(0, lambda: self._status_lbl.configure(text=text, fg=color))
+            self._status_worker.submit(state)
+
+    def _apply_status(self, state: str) -> None:
+        text, color = self._STATUS.get(state, ("● Ready", C["success"]))
+        self._ui_after(0, lambda: self._status_lbl.configure(text=text, fg=color))
 
     def _ui_after(self, delay_ms: int, callback, *args) -> None:
         """Schedule a UI callback from a background thread. Drops the update

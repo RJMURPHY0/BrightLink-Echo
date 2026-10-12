@@ -12,6 +12,8 @@ import pystray
 from pystray import MenuItem as item
 from PIL import Image, ImageDraw
 
+from latest_worker import LatestWorker
+
 
 
 def _resource_path(relative_path: str) -> str:
@@ -104,6 +106,7 @@ class TrayApp:
         self._icon: Optional[pystray.Icon] = None
         self._current_state = "idle"
         self._user_email: str = ""
+        self._icon_worker = LatestWorker(self._apply_icon, "tray-icon")
 
     def set_user_email(self, email: str) -> None:
         self._user_email = email
@@ -163,7 +166,12 @@ class TrayApp:
                 os.startfile(config_path)
 
     def update_icon(self, state: str) -> None:
+        """Called on the hotkey thread at every press: returns at once and
+        the repaint happens on the tray-icon thread (see latest_worker)."""
         self._current_state = state
+        self._icon_worker.submit(state)
+
+    def _apply_icon(self, state: str) -> None:
         if self._icon is not None:
             self._icon.icon  = ICON_IMAGES.get(state, ICON_IMAGES["idle"])
             self._icon.title = self.TOOLTIP_STATES.get(state, self.APP_NAME)

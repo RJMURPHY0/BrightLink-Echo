@@ -1068,6 +1068,81 @@ class WhisperFlowApp:
         except Exception as e:
             print(f"[App] Config reset announce failed (non-fatal): {e}")
 
+    # Press timing. Every press records, in ms from the key going down, when
+    # the start cue fired, when the pill was handed to the Tk loop, when
+    # capture started and when the pill was on screen. A slow press is
+    # reported (press_slow) so "it didn't start straight away" has numbers
+    # behind it; the hotkey thread only stores floats, never waits.
+    _PRESS_SLOW_MS = {"cue": 150, "pill_shown": 250, "capture": 500}
+
+    def _press_mark(self, name: str) -> None:
+        try:
+            t0 = getattr(self, "_press_t0", None)
+            marks = getattr(self, "_press_marks", None)
+            if t0 is not None and marks is not None and name not in marks:
+                marks[name] = int((time.perf_counter() - t0) * 1000)
+        except Exception:
+            pass
+
+    def press_timing(self) -> dict:
+        """The latest press's marks plus the pill's on-screen time."""
+        marks = dict(getattr(self, "_press_marks", None) or {})
+        t0 = getattr(self, "_press_t0", None)
+        shown = getattr(self.popup, "status_shown_at", None)
+        if t0 is not None and shown is not None and shown >= t0:
+            marks["pill_shown"] = int((shown - t0) * 1000)
+        return marks
+
+    def _schedule_press_report(self) -> None:
+        t0 = getattr(self, "_press_t0", None)
+
+        def _report():
+            if getattr(self, "_press_t0", None) is not t0:
+                return          # a newer press owns the marks now
+            marks = self.press_timing()
+            print(f"[Press] {marks}")
+            slow = {k: v for k, v in marks.items()
+                    if k in self._PRESS_SLOW_MS and v > self._PRESS_SLOW_MS[k]}
+            # A cue after capture is the cold-mic path by design (it waits for
+            # proven audio) and is already logged as mic_press_recovered.
+            if marks.get("cue", 0) >= marks.get("capture", 1 << 30):
+                slow.pop("cue", None)
+            if slow and self._telemetry_budget("press_slow"):
+                self._log_error_event("press_slow", {
+                    "marks_ms": marks, "slow": sorted(slow),
+                    "seed_ms": getattr(self.recorder, "last_seed_ms", 0),
+                })
+
+        try:
+            t = threading.Timer(1.5, _report)
+            t.daemon = True
+            t.start()
+        except Exception as e:
+            print(f"[Press] timing report not scheduled: {e}")
+
+    _TELEMETRY_CAP = 20     # per event type per run: a log, not a firehose
+
+    def _telemetry_budget(self, kind: str) -> bool:
+        counts = self.__dict__.setdefault("_telemetry_counts", {})
+        counts[kind] = counts.get(kind, 0) + 1
+        return counts[kind] <= self._TELEMETRY_CAP
+
+    def _report_empty_dictation(self, error: str) -> None:
+        """A dictation that came back empty is the symptom users describe as
+        "it didn't pick me up"; it was only ever written to the local log."""
+        if not self._telemetry_budget("dictation_empty"):
+            return
+        try:
+            self._log_error_event("dictation_empty", {
+                "error": error,
+                "seconds": round(float(getattr(
+                    self.recorder, "last_recording_seconds", 0.0) or 0.0), 2),
+                "seed_ms": getattr(self.recorder, "last_seed_ms", 0),
+                "marks_ms": self.press_timing(),
+            })
+        except Exception as e:
+            print(f"[App] empty-dictation report failed: {e}")
+
     # Benign end-of-dictation outcomes that already have deliberate feedback
     # (error buzz + idle icon) — logged, but not worth a popup notification.
     _EXPECTED_PIPELINE_ERRORS = ("Recording too short", "No speech detected")
@@ -1088,6 +1163,7 @@ class WhisperFlowApp:
         except Exception:
             pass
         if error in self._EXPECTED_PIPELINE_ERRORS:
+            self._report_empty_dictation(error)
             return
         if error == self._AUDIO_ENGINE_DOWN_MSG:
             self.app_window.show_action_toast(
@@ -1686,6 +1762,7 @@ class WhisperFlowApp:
             # speak, so audio must already be flowing when they hear it. (With
             # the warm mic this also captures ~0.8s of pre-roll.)
             self.recorder.start()
+            self._press_mark("capture")
             # Instant press = warm stream was live + pre-roll seeded: nothing
             # lost. Any other start had a window where speech was dropped —
             # log it so those events are countable in the fleet log instead of
@@ -1705,7 +1782,9 @@ class WhisperFlowApp:
             # where the cue waits until audio is proven to be flowing.
             if not getattr(self, "_start_cue_played", False):
                 self.feedback.recording_started()
+                self._press_mark("cue")
             self._start_cue_played = False
+            self._schedule_press_report()
             # The status pill went up as "Starting…" on the hotkey thread;
             # audio is now proven flowing, so flip it to "Recording".
             self.popup.set_status_text("Recording")
@@ -1757,6 +1836,13 @@ class WhisperFlowApp:
 
     def _on_stop_recording(self) -> None:
         self._last_dictation_ts = time.time()
+        # Which keys the stop press is holding, so the badge that follows can
+        # tell them from a key pressed after the text lands (Enter). Here, not
+        # on the hotkey thread: it reads every key's state (1-2 ms).
+        try:
+            self.popup.note_dictation_stop_keys()
+        except Exception as e:
+            print(f"[App] stop-key snapshot failed: {e}")
         self._cancel_recording_timer()
         session = self._session
         self._session = None
@@ -2186,6 +2272,10 @@ class WhisperFlowApp:
             if result and getattr(self.config, "auto_enter", False):
                 import keyboard as kb
                 time.sleep(0.05)
+                try:
+                    self.popup.note_synthetic_enter()
+                except Exception:
+                    pass
                 kb.send("enter")
 
             # Keep the dictation on the clipboard for a manual Ctrl+V fallback,
@@ -2792,6 +2882,9 @@ class WhisperFlowApp:
             print(f"[App] Email sign-off name: {name}")
 
     def _on_state_change(self, state: AppState) -> None:
+        if state == AppState.RECORDING:
+            self._press_t0 = time.perf_counter()
+            self._press_marks = {}
         self.app_window.update_status(
             state.value
         )  # "idle" / "recording" / "processing"
@@ -2815,6 +2908,7 @@ class WhisperFlowApp:
                 if _rec is not None and _rec.warm_capture_live:
                     self.feedback.recording_started()
                     self._start_cue_played = True
+                    self._press_mark("cue")
             except Exception as e:
                 print(f"[App] Early start cue skipped (non-fatal): {e}")
             # Capture cursor and foreground window RIGHT NOW, synchronously on the
@@ -2870,6 +2964,7 @@ class WhisperFlowApp:
                 cursor_x=ax,
                 cursor_y=ay,
             )
+            self._press_mark("pill_queued")
             # Always feed mic levels to the popup waveform while recording — the
             # waveform now animates in caption mode too (captions render in a bar
             # beneath it, no longer replacing it).

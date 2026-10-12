@@ -174,24 +174,25 @@ class Feedback:
         self.on_error_notify = on_error_notify
 
     def recording_started(self) -> None:
-        """Called when recording begins."""
-        if self.on_icon_change:
-            self.on_icon_change("recording")
-
+        """Called when recording begins. The cue goes first: it is what the
+        user waits for, and the tray repaint must never sit in front of it."""
         if self.sound_enabled:
             threading.Thread(
                 target=_play_sound, args=("start",), daemon=True
             ).start()
 
+        if self.on_icon_change:
+            self.on_icon_change("recording")
+
     def recording_stopped(self) -> None:
         """Called when recording ends and processing begins."""
-        if self.on_icon_change:
-            self.on_icon_change("processing")
-
         if self.sound_enabled:
             threading.Thread(
                 target=_play_sound, args=("stop",), daemon=True
             ).start()
+
+        if self.on_icon_change:
+            self.on_icon_change("processing")
 
     def transcription_complete(self, text: str) -> None:
         """Called when transcription is done and text has been injected.

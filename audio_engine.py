@@ -128,9 +128,31 @@ def _tool(name: str) -> str:
                         "System32", name)
 
 
+_REAL_SUBPROCESS_RUN = subprocess.run
+
+
+def _under_tests() -> bool:
+    """A source test run. Windows Audio crashed twice on Ryan's laptop
+    (2026-10-12) while this module was being worked on; whatever the cause, a
+    test must never be able to stop the real service, kill audiodg.exe or
+    raise a UAC prompt. The installed (frozen) app is never affected."""
+    return (not getattr(sys, "frozen", False)
+            and ("unittest" in sys.modules or "pytest" in sys.modules)
+            and os.environ.get("ECHO_REAL_AUDIO_RESTART") != "1")
+
+
+def _refuse_in_tests(what: str) -> None:
+    if _under_tests():
+        raise RuntimeError(f"refusing to {what} from a test run "
+                           "(set ECHO_REAL_AUDIO_RESTART=1 to allow)")
+
+
 def _run(args: list, log_path: str = "", timeout: float = 15.0) -> str:
     """stdout of a windowless native tool, or "" when it could not run.
     errors="replace": tasklist prints localised text on some machines."""
+    if (subprocess.run is _REAL_SUBPROCESS_RUN
+            and os.path.basename(args[0]).lower() == "taskkill.exe"):
+        _refuse_in_tests("kill an audio process")
     try:
         return subprocess.run(
             args, capture_output=True, text=True, errors="replace",
@@ -201,6 +223,7 @@ def _status(name: str) -> tuple:
 
 def _stop(name: str) -> int:
     """Ask service *name* to stop without waiting. 0 or a Windows error code."""
+    _refuse_in_tests(f"stop {name}")
     with _Service(name, _SERVICE_STOP) as s:
         st = _SERVICE_STATUS()
         return 0 if s.a.ControlService(s.h, _SERVICE_CONTROL_STOP, ctypes.byref(st)) \
@@ -389,6 +412,8 @@ def _shell_execute(verb: str, file: str, params: str, timeout: float,
     """Start *file* hidden through ShellExecuteExW and wait for it. Returns its
     exit code, CANCELLED when the user says No to the UAC prompt, or 1 when it
     could not start or did not finish within *timeout* seconds."""
+    if verb == "runas":
+        _refuse_in_tests("start an elevated audio restart")
     shell32 = ctypes.WinDLL("shell32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     ole32 = ctypes.WinDLL("ole32")
