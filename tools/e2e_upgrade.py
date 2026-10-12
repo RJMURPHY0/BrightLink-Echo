@@ -211,8 +211,18 @@ def check_migrated(rep: Report, version: str, label: str):
     rep.check(f"{label}: canonical exe is the installed layout", il.is_installed_layout_exe(exe))
     rep.check(f"{label}: installed layout is whole", il.layout_ok(exe))
     rep.check(f"{label}: app runs {version}", ping_version() == version, ping_version())
-    rep.check(f"{label}: no pending folder left",
-              not [d for d in os.listdir(il.install_dir()) if d.startswith(brand.PENDING_DIR_PREFIX)])
+    # activate.ps1 removes pending-<version> as its LAST step, after the new
+    # version has reported healthy and been re-registered (~1-2 s later). The
+    # app answering ping_version() is therefore not the end of activation:
+    # checking at that instant raced the cleanup and failed on fast runners
+    # (v1.8.11 dry run, 2026-10-12) while the folder was gone a second later.
+    # Wait for activation to finish, then demand the folder is gone.
+    def _pending():
+        return [d for d in os.listdir(il.install_dir())
+                if d.startswith(brand.PENDING_DIR_PREFIX)]
+    wait_for(lambda: not _pending(), 60, every=0.5)
+    left = _pending()
+    rep.check(f"{label}: no pending folder left", not left, ", ".join(left))
     rep.check(f"{label}: one Installed apps entry", uninstall_entries() == [brand.UNINSTALL_KEY_NAME],
               uninstall_entries())
     for scheme in (brand.URL_SCHEME, brand.LEGACY_URL_SCHEME):
