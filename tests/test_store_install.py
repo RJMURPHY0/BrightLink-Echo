@@ -9,6 +9,7 @@ is enabled only when it is on, and Task Manager's Startup apps lists it.
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -122,6 +123,168 @@ class LockedInstalledCopyTests(unittest.TestCase):
 
     def test_broken_install_falls_back_to_current(self):
         self.assertEqual(self._copy(intact=False), "download.exe")
+
+
+class SilentInstallVersionTests(unittest.TestCase):
+    """Issue #1: `--install /S` returned 0 and registered the incoming
+    version while the installed exe was still an older release (the replace
+    failed because that exe was running). Success now means the installed copy
+    IS this version; otherwise the exit code is non-zero and Installed apps
+    gets the version actually on disk. Real files; only the copy, the version
+    resource reader and the registry steps are faked."""
+
+    NEW = app_mod.APP_VERSION
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.src = os.path.join(self.dir, "Downloads", "BrightLink-Echo.exe")
+        self.dst = os.path.join(self.dir, "install", "BrightLink Echo.exe")
+
+    @staticmethod
+    def _older(version: str) -> str:
+        parts = [int(p) for p in version.split(".")]
+        parts[-1] -= 1
+        return ".".join(map(str, parts))
+
+    @staticmethod
+    def _write(path: str, version: str, mtime=None) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"MZ VER=" + version.encode() + b";" + b"\0" * 64)
+        if mtime is not None:
+            os.utime(path, (mtime, mtime))
+
+    @staticmethod
+    def _file_version(path: str) -> tuple:
+        # Stands in for the Windows FileVersion resource of the fake exe.
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError:
+            return (0, 0, 0, 0)
+        if b"VER=" not in data:
+            return (0, 0, 0, 0)
+        text = data.split(b"VER=", 1)[1].split(b";", 1)[0].decode()
+        return app_mod._version4(text)
+
+    def _install(self, locked: bool):
+        calls = []
+        real_copy = shutil.copy2
+
+        def copy2(a, b, *k, **kw):
+            if locked:
+                raise PermissionError("in use")
+            return real_copy(a, b, *k, **kw)
+
+        with mock.patch.object(sys, "frozen", True, create=True), \
+             mock.patch.object(sys, "executable", self.src), \
+             mock.patch.object(sys, "argv", ["x", "--install", "/S"]), \
+             mock.patch.object(app_mod, "_stable_exe_path", lambda: self.dst), \
+             mock.patch.object(app_mod, "_file_version_tuple", self._file_version), \
+             mock.patch("updater.pyi_archive_intact", lambda p: os.path.exists(p)), \
+             mock.patch("shutil.copy2", copy2), \
+             mock.patch.object(app_mod, "_apply_installer_choices", lambda: None), \
+             mock.patch.object(app_mod, "_task_manager_startup_state", lambda: None), \
+             mock.patch.object(app_mod, "_installed_start_with_windows", lambda: True), \
+             mock.patch.object(app_mod, "_register_application",
+                               lambda version="": calls.append(("register", version))), \
+             mock.patch.object(app_mod, "_register_url_protocol",
+                               lambda: calls.append("url")), \
+             mock.patch.object(app_mod, "_sync_startup",
+                               lambda on: calls.append(("startup", on))), \
+             mock.patch.object(app_mod.install_layout, "log", lambda m, root="": None), \
+             mock.patch.object(app_mod, "_log_startup_error", lambda e: None):
+            code = app_mod._run_silent_install()
+        return code, calls
+
+    def test_older_copy_that_could_not_be_replaced_fails_and_registers_what_is_on_disk(self):
+        old = self._older(self.NEW)
+        self._write(self.src, self.NEW)
+        self._write(self.dst, old, mtime=1)          # older: a replace is attempted
+        code, calls = self._install(locked=True)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(code, 3)
+        self.assertIn(("register", old), calls)
+        self.assertNotIn(("register", ""), calls)     # never the incoming version
+        self.assertIn("url", calls)                  # the copy that works stays reachable
+        with open(self.dst, "rb") as f:
+            self.assertIn(b"VER=" + old.encode(), f.read())
+
+    def test_a_successful_replace_returns_0_and_registers_the_new_version(self):
+        self._write(self.src, self.NEW)
+        self._write(self.dst, self._older(self.NEW), mtime=1)
+        code, calls = self._install(locked=False)
+        self.assertEqual(code, 0)
+        self.assertIn(("register", ""), calls)        # default: APP_VERSION
+        with open(self.dst, "rb") as f:
+            self.assertIn(b"VER=" + self.NEW.encode(), f.read())
+
+    def test_a_newer_version_with_an_older_timestamp_still_replaces(self):
+        self._write(self.src, self.NEW, mtime=1)
+        self._write(self.dst, self._older(self.NEW))  # newer mtime, older version
+        code, calls = self._install(locked=False)
+        self.assertEqual(code, 0)
+        with open(self.dst, "rb") as f:
+            self.assertIn(b"VER=" + self.NEW.encode(), f.read())
+
+    def test_same_version_reinstall_while_running_returns_0(self):
+        self._write(self.src, self.NEW, mtime=1)
+        self._write(self.dst, self.NEW)               # running, locked, same version
+        code, calls = self._install(locked=True)
+        self.assertEqual(code, 0)
+        self.assertIn(("register", ""), calls)
+
+    def test_reinstall_from_the_installed_copy_itself_returns_0(self):
+        self._write(self.dst, self.NEW)
+        self.src = self.dst
+        code, calls = self._install(locked=True)
+        self.assertEqual(code, 0)
+        self.assertIn(("register", ""), calls)
+
+    def test_a_newer_installed_copy_is_kept_and_registered_as_itself(self):
+        newer = self.NEW + ".1"
+        self._write(self.src, self.NEW, mtime=1)
+        self._write(self.dst, newer)
+        code, calls = self._install(locked=True)
+        self.assertEqual(code, 0)
+        self.assertIn(("register", newer), calls)
+
+    def test_an_older_installed_layout_is_not_reported_as_this_version(self):
+        # A onefile copy never overwrites a whole installed layout, so the
+        # layout keeps its version and the install must say so.
+        import install_layout as il
+        root = os.path.dirname(self.dst)
+        old = "1.8.0"
+        contents = il.contents_dir_name(old)
+        os.makedirs(os.path.join(root, contents))
+        with open(os.path.join(root, contents, "python311.dll"), "wb") as f:
+            f.write(b"dll")
+        with open(self.dst, "wb") as f:
+            f.write(b"MZ" + b"\0" * 5000 + b"pyi-contents-directory "
+                    + contents.encode() + b"\0" * 8)
+        il.write_manifest(root, old)
+        self.assertTrue(il.is_installed_layout_exe(self.dst))
+        self._write(self.src, self.NEW)
+        code, calls = self._install(locked=False)
+        self.assertEqual(code, 3)
+        self.assertIn(("register", old), calls)
+
+    def test_unreadable_version_counts_only_the_same_file(self):
+        os.makedirs(os.path.dirname(self.src), exist_ok=True)
+        os.makedirs(os.path.dirname(self.dst), exist_ok=True)
+        with open(self.src, "wb") as f:
+            f.write(b"MZ new build")
+        with open(self.dst, "wb") as f:
+            f.write(b"MZ old build")
+        os.utime(self.dst, (1, 1))
+        code, calls = self._install(locked=True)
+        self.assertEqual(code, 3)
+        self.assertFalse([c for c in calls if isinstance(c, tuple) and c[0] == "register"])
+        # ...and the very same file passes.
+        code, calls = self._install(locked=False)
+        self.assertEqual(code, 0)
+        self.assertIn(("register", ""), calls)
 
 
 class InstalledConfigTests(unittest.TestCase):
