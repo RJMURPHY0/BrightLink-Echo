@@ -3930,6 +3930,32 @@ def _app_data_dir() -> str:
     return d
 
 
+def _scrub_old_logs() -> None:
+    """Once per install, rewrite echo.log, its rotated copy and
+    auth-restore.log as this version would have written them: v1.8.12 and
+    earlier could leave dictated words and email addresses in them.
+
+    Runs after the single-instance mutex (so no other copy of the app is
+    writing these files) on its own thread; runtime_log holds each writer's
+    lock while it swaps a file in, so lines printed meanwhile are kept. Both
+    data folders are covered, current and legacy, without creating either.
+    Never raises; a failure is logged by error type only and retried next
+    launch."""
+    try:
+        import auth as _auth
+        result = runtime_log.scrub_old_logs(
+            data_paths.all_local_dirs(), data_paths.local_dir(),
+            restore_lock=_auth.RESTORE_LOG_LOCK)
+        if result["errors"]:
+            print(f"[App] Old log scrub incomplete, will retry next launch: "
+                  f"{', '.join(sorted(set(result['errors'])))}")
+        elif not result["skipped"]:
+            print(f"[App] Old logs scrubbed: {result['rewritten']} rewritten, "
+                  f"{result['deleted']} deleted")
+    except Exception as e:
+        print(f"[App] Old log scrub failed: {type(e).__name__}")
+
+
 def _clean_stale_runtime_dirs() -> None:
     """Remove leftover onefile unpack folders.
 
@@ -4854,6 +4880,9 @@ def _main() -> None:
         # must not be holding the single-instance mutex when the new exe starts.
         _handoff_to_canonical_if_newer()
         _ensure_single_instance()
+        threading.Thread(
+            target=_scrub_old_logs, daemon=True, name="log-scrub"
+        ).start()
         config = Config.load()
         # Off the UI thread: schtasks can be slow on first launch.
         threading.Thread(

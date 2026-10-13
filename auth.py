@@ -15,6 +15,8 @@ import threading
 import time
 from typing import Optional
 
+import runtime_log
+
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +141,18 @@ def _restore_log_path() -> str:
     return os.path.join(folder, "auth-restore.log")
 
 
+# Held for every write to auth-restore.log, so the once-per-install scrub of
+# old copies (runtime_log.scrub_old_logs) never loses a line written meanwhile.
+RESTORE_LOG_LOCK = threading.Lock()
+
+
+def _who(user, email: str = "") -> str:
+    """An account as the logs may name it: the start of its user id and a
+    masked email (first character and domain), never the full address."""
+    uid = str(getattr(user, "id", "") or "")[:8] or "?"
+    return f"user {uid} ({runtime_log.mask_email(getattr(user, 'email', None) or email)})"
+
+
 def _restore_log(msg: str) -> None:
     """Append one line recording a session-restore outcome.
 
@@ -146,21 +160,24 @@ def _restore_log(msg: str) -> None:
     "[Auth] Session restore failed …" print vanished and the real reason a
     reboot dropped the user back to the login form could never be diagnosed.
     This makes the outcome durable and inspectable. Best-effort, size-capped
-    (~128 KB, keeping the tail), and never raises."""
+    (~128 KB, keeping the tail), and never raises. Email addresses are masked
+    and tokens hidden, whatever the message (an error text can carry them)."""
     try:
+        msg = runtime_log.mask_identifiers(str(msg))
         path = _restore_log_path()
-        try:
-            if os.path.getsize(path) > 128 * 1024:
-                with open(path, "rb") as f:
-                    f.seek(-64 * 1024, os.SEEK_END)
-                    tail = f.read()
-                with open(path, "wb") as f:
-                    f.write(b"...trimmed...\n" + tail)
-        except OSError:
-            pass
-        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(f"[{stamp}] {msg}\n")
+        with RESTORE_LOG_LOCK:
+            try:
+                if os.path.getsize(path) > 128 * 1024:
+                    with open(path, "rb") as f:
+                        f.seek(-64 * 1024, os.SEEK_END)
+                        tail = f.read()
+                    with open(path, "wb") as f:
+                        f.write(b"...trimmed...\n" + tail)
+            except OSError:
+                pass
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"[{stamp}] {msg}\n")
     except Exception:
         pass
 
@@ -409,8 +426,8 @@ class AuthManager:
                         },
                     )()
                 )
-                print(f"[Auth] Restored session for {self._user.email}")
-                _restore_log(f"OK: restored session for {self._user.email}")
+                print(f"[Auth] Restored session for {_who(self._user)}")
+                _restore_log(f"OK: restored session for {_who(self._user)}")
                 return True
             _restore_log("FAIL: set_session returned no user — kept")
             return False
@@ -583,7 +600,7 @@ class AuthManager:
         for attempt in (1, 2):
             try:
                 client = self._get_client()
-                print(f"[Auth] Signing in as {email}...")
+                print(f"[Auth] Signing in as {runtime_log.mask_email(email)}...")
                 result = client.auth.sign_in_with_password(
                     {"email": email, "password": password}
                 )
@@ -592,7 +609,7 @@ class AuthManager:
                     self._save_session(result.session)
                     _write_last_email(result.user.email or email)
                     _restore_log(f"MANUAL sign-in succeeded for "
-                                 f"{result.user.email or email}")
+                                 f"{_who(result.user, email)}")
                     return True, f"Welcome back, {result.user.email}"
                 return False, "Sign-in failed — please check your email and password."
             except Exception as e:
