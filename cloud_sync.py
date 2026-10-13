@@ -72,6 +72,8 @@ SYNCED_SETTINGS = (
 )
 
 PERIODIC_SECONDS = 15 * 60
+# After a failed run, one early try instead of waiting the full interval.
+RETRY_SECONDS = 60
 _HISTORY_DOWN = 200
 _TIME_TOLERANCE_S = 10
 _MAX_FORGOTTEN = 600
@@ -231,6 +233,9 @@ class CloudSync:
         self._again = False
         self._timer: Optional[threading.Timer] = None
         self._push_timer: Optional[threading.Timer] = None
+        self._retry_timer: Optional[threading.Timer] = None
+        self._retry_next = False      # the next run is the early retry
+        self._run_is_retry = False    # the run in progress is the early retry
         self.last_status = ("", "off")
 
     # -- state --------------------------------------------------------------
@@ -299,7 +304,34 @@ class CloudSync:
     def _cancel_timers(self) -> None:
         self._cancel_timer(self._timer)
         self._cancel_timer(self._push_timer)
+        with self._lock:
+            retry, self._retry_timer = self._retry_timer, None
+        self._cancel_timer(retry)
         self._timer = self._push_timer = None
+
+    def _schedule_retry(self) -> None:
+        """A run failed (often a token that expired while the PC slept, or a
+        network still waking up): try once more in RETRY_SECONDS instead of
+        waiting the full interval. A failed retry waits for the regular
+        timer, and only one retry is ever pending, so failures never storm."""
+        if self._run_is_retry or not self.enabled:
+            return
+        with self._lock:
+            if self._retry_timer is not None:
+                return
+            t = threading.Timer(RETRY_SECONDS, self._retry)
+            t.daemon = True
+            self._retry_timer = t
+        print(f"[Sync] will try again in {RETRY_SECONDS} s")
+        t.start()
+
+    def _retry(self) -> None:
+        with self._lock:
+            self._retry_timer = None
+            if not self.enabled:
+                return
+            self._retry_next = True
+        self.sync_now()
 
     # -- full sync ----------------------------------------------------------
 
@@ -327,8 +359,11 @@ class CloudSync:
             with self._lock:
                 self._running = False
             self._status("Couldn't sync just now. It will try again.", "error")
+            self._schedule_retry()
 
     def _full_sync(self) -> None:
+        with self._lock:
+            self._run_is_retry, self._retry_next = self._retry_next, False
         if not self.enabled:
             self.refresh_status()
             return
@@ -336,6 +371,9 @@ class CloudSync:
             self.refresh_status()
             return
         self._status("Syncing…", "busy")
+        # Before any request: a token that expired while the PC slept is
+        # refreshed here, not discovered as a 401 on every step.
+        self._db.ensure_session()
         steps =(("libraries", self._step_libraries),
                  ("settings", self._step_settings),
                  ("phrases", self._step_phrases),
@@ -360,6 +398,7 @@ class CloudSync:
             print(f"[Sync] incomplete: {', '.join(failed)}")
             self._status(f"On. Synced at {stamp}, but some items could not "
                          f"sync ({', '.join(failed)}).", "error")
+            self._schedule_retry()
 
     def _step_libraries(self):
         self._sync_libraries()
@@ -502,6 +541,7 @@ class CloudSync:
 
         def _go():
             import audio_store
+            self._db.ensure_session()
             path = audio_store.find(created_at)
             key = audio_store.canonical_key(created_at)
             if path and not self._db.tombstoned_audio_keys({key}):

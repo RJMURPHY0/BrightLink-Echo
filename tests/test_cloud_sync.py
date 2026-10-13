@@ -392,6 +392,12 @@ class _FakeDb:
     def set_sync_enabled(self, on):
         self.sync = on
 
+    session_checks = 0
+
+    def ensure_session(self):
+        self.session_checks += 1
+        return True
+
     @property
     def sync_active(self):
         return self.active and self.sync
@@ -539,6 +545,157 @@ class SyncRunTests(unittest.TestCase):
                                side_effect=AssertionError("spawned")):
             cs._config.cloud_sync = False
             cs.upload_clip("2026-09-29T09:00:00+00:00")
+
+
+class _RecordingClient(_FakeClient):
+    """A signed-in client that notes the order of auth and table calls."""
+
+    def __init__(self, calls, refresh_error=None):
+        super().__init__()
+        self.calls = calls
+        self.refresh_error = refresh_error
+        self.auth = types.SimpleNamespace(get_session=self._get_session)
+
+    def _get_session(self):
+        self.calls.append("get_session")
+        if self.refresh_error:
+            raise self.refresh_error
+        return types.SimpleNamespace(access_token="fresh")
+
+    def table(self, t):
+        self.calls.append(f"table:{t}")
+        return super().table(t)
+
+
+class _InlineThread:
+    """threading.Thread stand-in that runs its target at start()."""
+
+    def __init__(self, target=None, daemon=None, name=None, **_k):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
+class _FakeTimer:
+    made = []
+
+    def __init__(self, interval, fn):
+        self.interval, self.fn, self.daemon = interval, fn, False
+        self.cancelled = False
+        _FakeTimer.made.append(self)
+
+    def start(self):
+        pass
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class SessionRefreshTests(TempHistory):
+    """After sleep the access token can be expired when the timer fires:
+    every step then got a 401 (JWT expired, PGRST303) for 15 minutes."""
+
+    def _cloud_sync(self, log):
+        cfg = types.SimpleNamespace(cloud_sync=True, sync_stamps={},
+                                    save_async=lambda: None)
+        return cloud_sync.CloudSync(log, None, cfg)
+
+    def test_the_session_is_refreshed_before_the_first_table_call(self):
+        calls = []
+        log = _logger(sync=True)
+        log._client = _RecordingClient(calls)
+        cs = self._cloud_sync(log)
+        with mock.patch.object(audio_store, "find", lambda c: None), \
+                mock.patch.object(audio_store, "prune", lambda: None), \
+                mock.patch.object(cloud_sync.threading, "Timer", _FakeTimer):
+            cs._full_sync()
+        tables = [i for i, c in enumerate(calls) if c.startswith("table:")]
+        self.assertTrue(tables, calls)
+        self.assertEqual(calls[0], "get_session")
+        self.assertLess(calls.index("get_session"), tables[0])
+
+    def test_a_failed_refresh_is_logged_without_the_token_and_never_raises(self):
+        calls = []
+        log = _logger(sync=True)
+        log._client = _RecordingClient(
+            calls, refresh_error=RuntimeError("Invalid Refresh Token: Already Used"))
+        with mock.patch("builtins.print") as printed:
+            self.assertFalse(log.ensure_session())
+        text = " ".join(str(a) for c in printed.call_args_list for a in c.args)
+        self.assertIn("session refresh failed", text)
+        self.assertIn("RuntimeError", text)
+
+    def test_no_client_is_built_just_to_refresh(self):
+        log = SupabaseLogger("https://x.supabase.co", "anon")
+        self.assertFalse(log.ensure_session())
+        self.assertIsNone(log._client)
+
+    def test_a_clip_upload_refreshes_the_session_first(self):
+        calls = []
+        db = _FakeDb()
+        db.set_sync_enabled(True)
+        db.ensure_session = lambda: calls.append("ensure") or True
+        db.upload_audio = lambda key, path: calls.append("upload") or True
+        cs = self._cloud_sync(db)
+        with mock.patch.object(cloud_sync.threading, "Thread", _InlineThread), \
+                mock.patch.object(audio_store, "find", lambda c: "x.wav"):
+            cs.upload_clip("2026-09-29T09:00:00+00:00")
+        self.assertEqual(calls, ["ensure", "upload"])
+
+
+class EarlyRetryTests(unittest.TestCase):
+
+    def setUp(self):
+        _FakeTimer.made = []
+        for target, name, value in ((cloud_sync.threading, "Timer", _FakeTimer),
+                                    (cloud_sync.threading, "Thread", _InlineThread),
+                                    (audio_store, "find", lambda c: None),
+                                    (audio_store, "prune", lambda: None)):
+            p = mock.patch.object(target, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.db = _FakeDb()
+        self.db.set_sync_enabled(True)
+        self.cs = cloud_sync.CloudSync(
+            self.db, None, types.SimpleNamespace(cloud_sync=True, sync_stamps={},
+                                                 save_async=lambda: None))
+
+    def fail_recordings(self, on=True):
+        self.db.list_synced_audio = (lambda: None) if on else (lambda: set())
+
+    def test_a_failed_run_schedules_exactly_one_early_retry(self):
+        self.fail_recordings()
+        self.cs.sync_now()
+        self.assertEqual([t.interval for t in _FakeTimer.made],
+                         [cloud_sync.RETRY_SECONDS])
+        # Another failure while that retry is pending adds no second one.
+        self.cs.sync_now()
+        self.assertEqual(len(_FakeTimer.made), 1)
+
+    def test_a_failed_retry_waits_for_the_regular_timer(self):
+        self.fail_recordings()
+        self.cs.sync_now()
+        _FakeTimer.made[0].fn()          # the retry fires, and fails again
+        self.assertEqual(self.db.session_checks, 2)
+        self.assertEqual(len(_FakeTimer.made), 1)
+        # The next ordinary run that fails gets its own one retry.
+        self.cs.sync_now()
+        self.assertEqual(len(_FakeTimer.made), 2)
+
+    def test_a_good_run_schedules_nothing(self):
+        self.fail_recordings(False)
+        self.cs.sync_now()
+        self.assertEqual(_FakeTimer.made, [])
+
+    def test_turning_sync_off_cancels_a_pending_retry(self):
+        self.fail_recordings()
+        self.cs.sync_now()
+        self.cs._config.cloud_sync = False
+        self.cs.set_enabled(False)
+        self.assertTrue(_FakeTimer.made[0].cancelled)
+        _FakeTimer.made[0].fn()
+        self.assertEqual(self.db.session_checks, 1)
 
 
 class SettingsCopyTests(unittest.TestCase):

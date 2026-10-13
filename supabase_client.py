@@ -300,6 +300,27 @@ class SupabaseLogger:
                 self._client = fresh
             return self._client
 
+    def ensure_session(self) -> bool:
+        """Refresh the signed-in session when its access token has expired.
+
+        After the PC sleeps, the access token can be past its expiry when
+        Cloud Sync's timer fires, and every request then fails with 401 (JWT
+        expired, PGRST303) until the next run. auth.get_session() refreshes
+        an expired token, and the client sends the new one on every later
+        request. True when there is a usable session. Never builds a client:
+        before sign-in there is nothing to refresh."""
+        client = self._client
+        if client is None:
+            return False
+        try:
+            return client.auth.get_session() is not None
+        except Exception as e:
+            # The error names the failure (expired or reused refresh token,
+            # no network); it carries no token, and the log masks any anyway.
+            print(f"[Sync] session refresh failed (non-fatal): "
+                  f"{type(e).__name__}: {str(e)[:200]}")
+            return False
+
     # ------------------------------------------------------------------
     # Public API — all fire-and-forget
     # ------------------------------------------------------------------
