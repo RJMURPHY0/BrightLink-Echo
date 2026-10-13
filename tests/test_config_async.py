@@ -49,6 +49,10 @@ class ConfigAsyncSaveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             config = Config()
             config._config_path = os.path.join(folder, "config.json")
+            # A debounce window far longer than the loop below means the burst
+            # can never straddle it, however slow the machine is. flush_async()
+            # ends the window explicitly, so the test depends on no sleeps.
+            config._save_debounce_s = 60.0
             calls = []
             original_write = config._write_snapshot
 

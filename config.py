@@ -216,6 +216,11 @@ class Config:
         self._save_condition = threading.Condition(self._save_state_lock)
         self._save_io_lock = threading.Lock()
         self._save_pending = None
+        self._save_pending_at = 0.0
+        self._save_debounce_s = _ASYNC_SAVE_DEBOUNCE_S
+        # Set by flush_async() so a waiting caller (shutdown, tests) does not
+        # have to sit out the debounce window before the pending write runs.
+        self._save_flush_now = False
         self._save_thread = None
         self._save_sequence = 0
         self._save_last_written_sequence = 0
@@ -305,16 +310,17 @@ class Config:
             with self._save_condition:
                 if self._save_pending is None:
                     self._save_thread = None
+                    self._save_flush_now = False
                     self._save_condition.notify_all()
                     return
 
                 # Restart the quiet window whenever another save_async() call
                 # replaces the pending snapshot.
                 remaining = (
-                    self._save_pending_at + _ASYNC_SAVE_DEBOUNCE_S
+                    self._save_pending_at + self._save_debounce_s
                     - time.monotonic()
                 )
-                if remaining > 0:
+                if remaining > 0 and not self._save_flush_now:
                     self._save_condition.wait(remaining)
                     continue
 
@@ -335,6 +341,11 @@ class Config:
         while True:
             with self._save_condition:
                 worker = self._save_thread
+                if worker is not None and self._save_pending is not None:
+                    # Write the pending snapshot now instead of waiting out the
+                    # debounce window; nothing is dropped, only the delay.
+                    self._save_flush_now = True
+                    self._save_condition.notify_all()
             if worker is None:
                 return True
             if worker is threading.current_thread():
