@@ -164,7 +164,7 @@ class StreamingSession:
                             self._committed_texts.append(text)
                             self._para_flags.append(brk)
                     if preview:
-                        print(f"[Stream] Committed {boundary / rate:.1f}s: '{preview[:60]}…'")
+                        print(f"[Stream] Committed {boundary / rate:.1f}s: {len(preview)} chars")
                     # Advance even when the chunk transcribed empty (pure noise) so
                     # a noisy environment can't make the window grow unbounded.
                     # Sink write sits inside the same locked commit: a tick that

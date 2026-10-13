@@ -559,7 +559,8 @@ class AuthManager:
             if data:
                 payload["options"] = {"data": data}
             result = client.auth.sign_up(payload)
-            print(f"[Auth] Sign-up result: user={result.user}, session={result.session}")
+            print(f"[Auth] Sign-up result: user={getattr(result.user, 'id', None)}, "
+                  f"session={'yes' if result.session else 'no'}")
             if result.user:
                 if result.session:
                     self._user = result.user

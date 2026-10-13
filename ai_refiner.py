@@ -35,10 +35,20 @@ _KEEP_ESSENCE = (
 )
 
 
-# Emoji and pictographs (incl. skin-tone/ZWJ sequences and variation selectors).
+# Emoji and pictographs (incl. skin-tone/ZWJ sequences, variation selectors,
+# keycaps (#, * and 0-9 with U+20E3) and the tag sequences of the England,
+# Scotland and Wales flags). Written as escapes so the ranges can be read.
 _EMOJI = re.compile(
-    "[🀀-🫿☀-➿⬀-⯿←-⇿"
-    "⌀-⏿‍️©®‼⁉™ℹ]+")
+    "(?:[#*0-9]\ufe0f?\u20e3"          # keycap: base, optional VS16, U+20E3
+    "|[\U0001f000-\U0001faff"           # pictographs, flags, faces
+    "\u2600-\u27bf\u2b00-\u2bff\u2190-\u21ff\u2300-\u23ff"
+    "\u25a0-\u25ff\u2900-\u297f"        # geometric shapes, supplemental arrows
+    "\u3030\u303d\u24c2\u3297\u3299"
+    "\u20e3\u200d\ufe0f\xa9\xae\u203c\u2049\u2122\u2139"
+    "\U000e0020-\U000e007f])+")         # tag characters (subdivision flags)
+
+# A match made only of joiners and variation selectors is not an emoji.
+_EMOJI_GLUE = frozenset("\u200d\ufe0f")
 
 _KEEP_EMOJI = (
     " Keep every emoji exactly as written, in the same place in the text. "
@@ -51,7 +61,7 @@ def _restore_emoji(original: str, out: str) -> str:
     Emoji missing from the result are appended to the end, so they are never
     silently lost even when the model ignores the instruction."""
     missing = [e for e in _EMOJI.findall(original or "")
-               if e not in (out or "")]
+               if not set(e) <= _EMOJI_GLUE and e not in (out or "")]
     if not missing:
         return out
     return (out.rstrip() + " " + " ".join(missing)).strip()
@@ -472,7 +482,7 @@ class AIRefiner:
                 result = self._refine_via_openrouter(text, prompt, mode, system)
                 if result:
                     result = _finish(result)
-                    print(f"[AIRefiner] Refined via OpenRouter ({mode}): '{result}'")
+                    print(f"[AIRefiner] Refined via OpenRouter ({mode}): {len(result)} chars")
                     return result
                 # Empty result (e.g. openai not installed) — fall through to Anthropic
             except Exception as e:
@@ -499,7 +509,7 @@ class AIRefiner:
                 ],
             )
             result = _finish(message.content[0].text.strip())
-            print(f"[AIRefiner] Refined via Anthropic ({mode}): '{result}'")
+            print(f"[AIRefiner] Refined via Anthropic ({mode}): {len(result)} chars")
             return result
 
         except Exception as e:

@@ -648,7 +648,7 @@ class ParakeetTranscriber:
         if not text:
             return ""
         if self._FILLER_ONLY.match(text):
-            print(f"[ParakeetEngine] Filler-only result suppressed: '{text}'")
+            print(f"[ParakeetEngine] Filler-only result suppressed: {len(text)} chars")
             return ""
 
         # Degenerate repetition ("no, no, no, no, …"). An RNN-T decoder can stay

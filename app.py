@@ -70,6 +70,7 @@ import cloud_sync  # noqa: F401  (top-level so PyInstaller always bundles it)
 from list_format import format_lists
 from email_format import format_email, format_signoff, is_email_app
 import sentence_end
+import runtime_log
 from hotkey_manager import HotkeyManager, TriggerHotkeyManager, AppState
 from feedback import Feedback
 from popup import FloatingPopup, _MONITORINFO, _monitor_user32
@@ -1472,7 +1473,7 @@ class WhisperFlowApp:
 
     def _on_settings_change(self, key: str, value) -> None:
         """Called when the user saves a setting in the Settings panel."""
-        print(f"[App] Setting changed: {key} = {value!r}")
+        print(f"[App] Setting changed: {key} = {runtime_log.safe_value(value)}")
         setattr(self.config, key, value)
         # Cloud Sync: remember when a synced preference changed here, so the
         # newer change wins on the user's other PCs.
@@ -1502,7 +1503,7 @@ class WhisperFlowApp:
         """Adopt a preference Cloud Sync brought from another PC. Same effect
         as the user changing it here, minus the new timestamp (the change was
         made there, at the time it carries)."""
-        print(f"[Sync] Setting from another PC: {key} = {value!r}")
+        print(f"[Sync] Setting from another PC: {key} = {runtime_log.safe_value(value)}")
         setattr(self.config, key, value)
         self.config.save_async()
         if self._core_ready.is_set():
@@ -1911,7 +1912,7 @@ class WhisperFlowApp:
                     _peak = (float(_np.max(_np.abs(tail_audio)))
                              if tail_audio is not None and len(tail_audio) else 0.0)
                     if _peak < 0.004:
-                        print(f"[App] Discarding near-silence result '{text}' "
+                        print(f"[App] Discarding near-silence result ({len(text)} chars) "
                               f"(peak={_peak:.4f}) — mic delivered no speech.")
                         text = ""
                 if not text:
@@ -1920,7 +1921,7 @@ class WhisperFlowApp:
                         # real hypotheses — keep what's on screen rather than
                         # backspacing it out. Reconcile below becomes a no-op.
                         text = _streamed
-                        print(f"[App] Empty final pass; keeping streamed text '{_streamed}'.")
+                        print(f"[App] Empty final pass; keeping streamed text ({len(_streamed)} chars).")
                     else:
                         if total_samples < capture_rate * 0.3:
                             if not self._handle_dead_capture(
@@ -1947,7 +1948,7 @@ class WhisperFlowApp:
                 # local whisper models on English accuracy, so a whisper
                 # re-pass would usually be a downgrade — skip it.
                 upgrading = self.ai_refiner.is_available and len(text.split()) >= 4
-                print(f"[App] Transcription (parakeet): '{text}'")
+                print(f"[App] Transcription (parakeet): {len(text)} chars")
             else:
                 # ── Whisper fallback path ──
                 audio = self.recorder.stop()
@@ -1992,7 +1993,7 @@ class WhisperFlowApp:
                 if fast_text:
                     transcribed_text = fast_text
                     upgrading = True
-                    print(f"[App] Fast transcription: '{fast_text}'")
+                    print(f"[App] Fast transcription: {len(fast_text)} chars")
                 else:
                     # Fast model found nothing. If the clip is essentially
                     # silence, report immediately — the old behaviour queued a
@@ -2029,7 +2030,7 @@ class WhisperFlowApp:
                         return
                     transcribed_text = text
                     self._update_context(text)
-                    print(f"[App] Transcription: '{text}'")
+                    print(f"[App] Transcription: {len(text)} chars")
 
         except Exception as e:
             print(f"[App] Transcription pipeline error: {e}")
@@ -2060,7 +2061,7 @@ class WhisperFlowApp:
         if transcribed_text and not getattr(self.config, "live_inject", False):
             _hf = self._fix_homophones(transcribed_text, "assembled")
             if _hf != transcribed_text:
-                print(f"[App] Sound-alike fix: '{transcribed_text}' -> '{_hf}'")
+                print(f"[App] Sound-alike fix: {len(transcribed_text)} -> {len(_hf)} chars")
                 transcribed_text = _hf
 
         # Spoken symbol commands: "slash settings" -> "/settings". Applied once
@@ -2069,7 +2070,7 @@ class WhisperFlowApp:
         if transcribed_text and getattr(self.config, "spoken_punctuation", True):
             _sc = apply_spoken_commands(transcribed_text)
             if _sc != transcribed_text:
-                print(f"[App] Spoken symbols: '{transcribed_text}' -> '{_sc}'")
+                print(f"[App] Spoken symbols: {len(transcribed_text)} -> {len(_sc)} chars")
                 transcribed_text = _sc
 
         # Spoken lists: "first … second …" becomes a numbered list, an
@@ -2440,7 +2441,7 @@ class WhisperFlowApp:
                         fixed = sentence_end.match_ending(
                             self.ai_refiner.context_fix(_text), _text)
                         if fixed and fixed != _text:
-                            print(f"[App] LLM context-fix: '{_text}' -> '{fixed}'")
+                            print(f"[App] LLM context-fix: {len(_text)} -> {len(fixed)} chars")
                             final = fixed
                             self.popup.set_upgrade_result(final, session=_seq)
                         else:
@@ -2478,7 +2479,7 @@ class WhisperFlowApp:
                     offered = False
                     # Show Whisper result immediately so the upgrade button appears fast
                     if accurate != _ft:
-                        print(f"[App] Accurate transcription: '{accurate}'")
+                        print(f"[App] Accurate transcription: {len(accurate)} chars")
                         self.popup.set_upgrade_result(accurate, session=_seq)
                         offered = True
                     final = accurate
@@ -2487,7 +2488,7 @@ class WhisperFlowApp:
                             fixed = sentence_end.match_ending(
                                 self.ai_refiner.context_fix(accurate), accurate)
                             if fixed and fixed != accurate:
-                                print(f"[App] LLM context-fix: '{accurate}' -> '{fixed}'")
+                                print(f"[App] LLM context-fix: {len(accurate)} -> {len(fixed)} chars")
                                 final = fixed
                                 self.popup.set_upgrade_result(final, session=_seq)
                                 offered = True
@@ -2697,12 +2698,12 @@ class WhisperFlowApp:
                     rescued = phrase_learning.apply_learned_phrases(
                         fixed, store.phrases(), word_conf)
                     if rescued != fixed:
-                        print(f"[App] Learned phrases: '{fixed}' -> '{rescued}'")
+                        print(f"[App] Learned phrases: {len(fixed)} -> {len(rescued)} chars")
                         word_conf = phrase_learning.align(rescued, conf)
                         fixed = rescued
                     learned = store.observe(fixed, word_conf)
                     if learned:
-                        print(f"[App] Phrases learned: {learned}")
+                        print(f"[App] Phrases learned: {len(learned)}")
             except Exception as exc:
                 print(f"[App] Learned phrases failed (non-fatal): {exc}")
             fixed = apply_snippets(fixed, self._user_entries("snippets"))
@@ -2710,7 +2711,7 @@ class WhisperFlowApp:
             print(f"[App] User libraries failed (non-fatal): {exc}")
             return text
         if fixed != text:
-            print(f"[App] User libraries: '{text}' -> '{fixed}'")
+            print(f"[App] User libraries: {len(text)} -> {len(fixed)} chars")
         return fixed
 
     def _managed_entries(self) -> list:
@@ -2879,7 +2880,7 @@ class WhisperFlowApp:
         if name:
             self._sender_name = name
             self.popup.set_sender_name(name)
-            print(f"[App] Email sign-off name: {name}")
+            print(f"[App] Email sign-off name set ({len(name)} chars)")
 
     def _on_state_change(self, state: AppState) -> None:
         if state == AppState.RECORDING:
@@ -3426,7 +3427,7 @@ class WhisperFlowApp:
                 kb.send("ctrl+z")
                 time.sleep(0.05)
         self.injector.inject(new_text)
-        print(f"[App] Replaced with refined text: '{new_text}'")
+        print(f"[App] Replaced with refined text: {len(new_text)} chars")
         self._record_refine_applied()
         if original_text:
             _app = getattr(self, "_recording_app", None) or {}

@@ -384,7 +384,7 @@ def destutter(text: str, source: str = "") -> str:
     cleaned = "".join(out)
     print(f"[Disfluency] Collapsed {len(dropped)} stutter(s)"
           f"{f' ({source})' if source else ''}: "
-          f"'{text[:60]}' -> '{cleaned[:60]}'")
+          f"{len(text)} -> {len(cleaned)} chars")
     _report({"source": source, "dropped": len(dropped),
              "words_before": len(toks), "words_after": len(toks) - len(dropped),
              "sample": text[:200]})

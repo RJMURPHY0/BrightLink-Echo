@@ -206,7 +206,7 @@ def clean(text: str, source: str = "") -> str:
 
     if is_pure_loop(text):
         print(f"[Hallucination] Pure repetition loop suppressed"
-              f"{f' ({source})' if source else ''}: '{text[:80]}…'"
+              f"{f' ({source})' if source else ''}: {len(text)} chars"
               f" [{len(tokens)} words]")
         _report({"action": "suppressed", "source": source,
                  "words": len(tokens), "sample": text[:200]})
@@ -222,7 +222,7 @@ def clean(text: str, source: str = "") -> str:
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     print(f"[Hallucination] Collapsed a {worst}x repetition"
           f"{f' ({source})' if source else ''}: "
-          f"'{text[:60]}…' -> '{cleaned[:60]}'")
+          f"{len(text)} -> {len(cleaned)} chars")
     _report({"action": "collapsed", "source": source, "repeats": worst,
              "words_before": len(text.split()), "words_after": len(tokens),
              "sample": text[:200]})

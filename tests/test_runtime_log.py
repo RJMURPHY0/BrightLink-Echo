@@ -3,9 +3,11 @@
 import base64
 import io
 import os
+import re
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -55,6 +57,89 @@ class RedactTests(unittest.TestCase):
             self.assertNotIn("0123456789abcdef", out)
 
 
+class AwkwardTextTests(unittest.TestCase):
+    """Dictation is full of apostrophes. The old pattern ended the quoted
+    span at the first one, so everything after "it's" went to disk."""
+
+    SECRET = ("dentist", "Jason", "invoice", "worry", "tomorrow", "mine",
+              "pay it", "said", "paid", "they're", "their")
+
+    def assertHidden(self, out):
+        for word in self.SECRET:
+            self.assertNotIn(word, out)
+
+    def test_contractions_do_not_end_the_redaction(self):
+        for line in (
+                "[App] Transcription: 'it's fine, don't worry about it'",
+                "[App] Transcription (parakeet): 'I'll see the dentist, won't I'",
+                "[AIRefiner] Refined via OpenRouter (punctuation): 'Jason's invoice isn't paid'",
+                "[App] Discarding near-silence result 'it's fine' (peak=0.0010), no speech.",
+                "[App] Sound-alike fix: 'they're fine' -> 'their fine'",
+                "KeyError: \"it's mine\""):
+            with self.subTest(line=line):
+                self.assertHidden(redact(line))
+        self.assertIn("(peak=0.0010)", redact(
+            "[App] Discarding near-silence result 'it's fine' (peak=0.0010)"))
+
+    def test_curly_and_nested_quotes(self):
+        for line in (
+                "[App] Transcription: \u2018it\u2019s fine, don\u2019t worry\u2019",
+                "[App] Transcription: \u201cmeet Jason at the dentist\u201d",
+                "[App] Transcription: 'he said \"don't\" to Jason'",
+                "[App] Transcription: \"she said 'it's mine' and left tomorrow\"",
+                "[App] Transcription: \u00abmeet Jason\u00bb"):
+            with self.subTest(line=line):
+                self.assertHidden(redact(line))
+
+    def test_emoji_and_line_breaks(self):
+        self.assertHidden(redact("[App] Transcription: 'see you tomorrow \U0001F60A it's fine'"))
+        out = redact("[App] Transcription: 'Dear Jason,\nThanks for the invoice.\n"
+                     "I'll pay it tomorrow.'\n")
+        self.assertHidden(out)
+        self.assertTrue(out.startswith("[App] Transcription: <"))
+
+    def test_a_traceback_frame_keeps_its_line_number(self):
+        out = redact('  File "C:\\Echo\\app.py", line 1950, in _transcribe\n'
+                     "    print(f\"[App] got '{t}'\")\n")
+        self.assertIn("line 1950, in _transcribe", out)
+
+    def test_email_addresses_are_masked_whatever_the_tag(self):
+        for line in ("[App] Signed in as jo.bloggs+echo@example.co.uk",
+                     "[Recorder] odd jo@example.com"):
+            self.assertNotIn("example", redact(line))
+
+    def test_setting_values_are_logged_by_size_only(self):
+        self.assertEqual(runtime_log.safe_value(True), "True")
+        self.assertEqual(runtime_log.safe_value(3), "3")
+        self.assertEqual(runtime_log.safe_value(None), "None")
+        self.assertEqual(runtime_log.safe_value("Ryan Murphy"), "<11 chars>")
+        self.assertEqual(runtime_log.safe_value(["brb", "be right back"]),
+                         "<list, 2 items>")
+        self.assertEqual(runtime_log.safe_value({"a": 1}), "<dict, 1 items>")
+
+
+class CallSiteTests(unittest.TestCase):
+    """Structure first: no runtime module prints user text in quotes. The
+    redaction above is only the safety net behind this."""
+
+    USER_TEXT = re.compile(
+        r"""(?<![fFrRbB])['"\u2018\u201c]\{(?:text|_text|transcribed_text|fast_text|accurate|"""
+        r"""fixed|rescued|_streamed|new_text|result|preview|cleaned|_hf|_sc|"""
+        r"""original|refined|clip\w*|selection)\b[^}]*\}""")
+
+    def test_no_module_logs_dictated_text(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        found = []
+        for name in sorted(os.listdir(root)):
+            if not name.endswith(".py"):
+                continue
+            with open(os.path.join(root, name), encoding="utf-8") as f:
+                for n, line in enumerate(f, 1):
+                    if self.USER_TEXT.search(line):
+                        found.append(f"{name}:{n}: {line.strip()}")
+        self.assertEqual(found, [])
+
+
 class LogFileTests(unittest.TestCase):
 
     def setUp(self):
@@ -76,6 +161,40 @@ class LogFileTests(unittest.TestCase):
         self.assertNotIn("secret words", text)
         self.assertRegex(text, r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] \[App\] Transcription: <12 chars>\n")
         self.assertIn("[Recorder] partial line", text)
+
+    def test_a_multi_line_dictation_is_redacted_whole(self):
+        log = runtime_log._LogFile(self.path)
+        print("[App] Transcription: 'Dear Jason,\nThanks for the invoice.\n"
+              "I'll pay it tomorrow, it's fine.'", file=log)
+        print("[App] Transcription: ‘it’s mine\nsaid Jason’ (3 words)", file=log)
+        text = self.read()
+        for word in ("Jason", "invoice", "pay it", "tomorrow", "mine", "said"):
+            self.assertNotIn(word, text)
+        self.assertIn("(3 words)", text)
+        self.assertEqual(text.count("[App] Transcription: <"), 2)
+
+    def test_two_threads_never_share_a_block(self):
+        log = runtime_log._LogFile(self.path)
+        log.write("[Recorder] Warm mic stream open ('Headset Mic')")
+        other = threading.Thread(
+            target=lambda: print("[App] Transcription: 'it's Jason'", file=log))
+        other.start()
+        other.join()
+        log.write("\n")
+        text = self.read()
+        self.assertNotIn("Jason", text)
+        self.assertIn("'Headset Mic'", text)
+
+    def test_a_print_with_no_line_end_is_dropped_not_split(self):
+        log = runtime_log._LogFile(self.path)
+        log.write("[App] Transcription: 'it's " + "Jason " * 20000)
+        log.write("more words'\n")
+        print("[Recorder] next line", file=log)
+        text = self.read()
+        self.assertNotIn("Jason", text)
+        self.assertNotIn("more words", text)
+        self.assertIn("no line end dropped", text)
+        self.assertIn("[Recorder] next line", text)
 
     def test_the_file_is_capped_with_one_previous_kept(self):
         log = runtime_log._LogFile(self.path, max_bytes=200)

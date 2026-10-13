@@ -238,10 +238,10 @@ class Transcriber:
             norm = lambda s: re.sub(
                 r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", s.lower())).strip()
             if norm(text) and norm(text) in norm(prompt_sources):
-                print(f"[Transcriber] Discarding prompt echo: '{text}'")
+                print(f"[Transcriber] Discarding prompt echo: {len(text)} chars")
                 _report_echo(text)
                 return ""
-        print(f"[Transcriber] '{text}'")
+        print(f"[Transcriber] {len(text)} chars")
         return text
 
     # Bracketed/symbol tokens can never be dictated speech — safe to strip anywhere.
