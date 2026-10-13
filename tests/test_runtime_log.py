@@ -108,6 +108,23 @@ class AwkwardTextTests(unittest.TestCase):
                      "[Recorder] odd jo@example.com"):
             self.assertNotIn("example", redact(line))
 
+    def test_no_part_of_an_unusual_email_address_survives(self):
+        # Issue #4: every character RFC 5322 allows in the local part, an
+        # apostrophe included, so "o'" or "a#" never stays behind.
+        for address in ("o'neil@example.com", "a#b@example.com",
+                        "first!last@example.co.uk", "x%y&z@mail.example.org",
+                        "tom{1}@example.com", "o’neil@example.com"):
+            for tag in ("App", "Recorder"):
+                out = redact(f"[{tag}] Signed in as {address}")
+                self.assertEqual(out, f"[{tag}] Signed in as <email>", address)
+
+    def test_a_quoted_email_still_hides_the_whole_quote(self):
+        # Masking the address must never eat the quote mark that hides the
+        # dictated words around it.
+        out = redact("[App] got 'bob@example.com and see you at four'")
+        self.assertNotIn("see you", out)
+        self.assertNotIn("example", out)
+
     def test_setting_values_are_logged_by_size_only(self):
         self.assertEqual(runtime_log.safe_value(True), "True")
         self.assertEqual(runtime_log.safe_value(3), "3")

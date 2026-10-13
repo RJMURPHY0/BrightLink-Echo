@@ -42,7 +42,9 @@ _QUOTED_SPAN = re.compile(
 # A traceback frame ('  File "x.py", line 3, in f' plus its source line) is
 # program text: redact it line by line so the line numbers stay readable.
 _FRAME = re.compile(r'^\s*File "')
-_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# Every character RFC 5322 allows before the @, apostrophes (straight and
+# curly) included, so no "o'" or "a#" of an address stays behind (issue #4).
+_EMAIL = re.compile(r"[\w.!#$%&'’*+/=?^`{|}~-]+@[\w-]+(?:\.[\w-]+)+")
 # A print that never ends its line is dropped past this size, never split.
 _MAX_PENDING = 64 * 1024
 _SECRETS = (
@@ -66,13 +68,16 @@ def redact(text: str) -> str:
             text = pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
         else:
             text = pattern.sub("<redacted>", text)
-    text = _EMAIL.sub("<email>", text)
     m = _TAG.match(text)
     if m and m.group(1) in _KEEP_QUOTES:
-        return text
-    if _FRAME.match(text):
-        return "\n".join(_hide_quoted(line) for line in text.split("\n"))
-    return _hide_quoted(text)
+        pass
+    elif _FRAME.match(text):
+        text = "\n".join(_hide_quoted(line) for line in text.split("\n"))
+    else:
+        text = _hide_quoted(text)
+    # Last: an address can now start with a quote mark, and masking it first
+    # would take that mark from the quoted words it opens.
+    return _EMAIL.sub("<email>", text)
 
 
 def safe_value(value) -> str:

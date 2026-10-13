@@ -781,7 +781,7 @@ class WhisperFlowApp:
         self.stats.set_user(auth.user_id)
         self.tray.set_user_email(auth.user_email or "")
 
-        print(f"[App] Authenticated as {auth.user_email}")
+        print(f"[App] Authenticated as {runtime_log.mask_email(auth.user_email)}")
 
         # Vocabulary/snippets are per account. Anything typed while signed out
         # belongs to whoever just signed in, and a pre-existing comma-separated
@@ -3708,7 +3708,7 @@ class WhisperFlowApp:
         self.stats.set_user(auth.user_id)
         if self.tray:
             self.tray.set_user_email(auth.user_email or "")
-        print(f"[App] Signed in as {auth.user_email}")
+        print(f"[App] Signed in as {runtime_log.mask_email(auth.user_email)}")
         if self.db.is_enabled:
             threading.Thread(
                 target=self._fetch_remote_api_keys, daemon=True, name="api-key-fetch"

@@ -353,6 +353,16 @@ class AuthWritesTests(unittest.TestCase):
                if re.search(r"\{(?:[\w.]*\.)?email(?:\s+or\s+email)?\}", c)]
         self.assertEqual(bad, [])
 
+    def test_app_sign_in_prints_never_name_a_raw_email(self):
+        # Issue #4: "Authenticated as" and "Signed in as" printed
+        # auth.user_email verbatim; the log redactor was the only guard.
+        with open(os.path.join(_ROOT, "app.py"), encoding="utf-8") as f:
+            src = f.read()
+        calls = re.findall(r"print\((?:[^()]|\([^()]*\))*\)", src)
+        bad = [c for c in calls if re.search(r"\{[\w.]*user_email[^}]*\}", c)]
+        self.assertEqual(bad, [])
+        self.assertIn("mask_email(auth.user_email)", src)
+
 
 class AppWiringTests(unittest.TestCase):
 
