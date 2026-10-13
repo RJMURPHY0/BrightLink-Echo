@@ -4065,7 +4065,10 @@ def _ensure_installed_copy() -> str:
                 not pyi_archive_intact(target)) or (
                 # An installed-layout exe whose folder is gone cannot start.
                 not install_layout.layout_ok(target)) or (
-                os.path.getmtime(current) > os.path.getmtime(target)
+                os.path.getmtime(current) > os.path.getmtime(target)) or (
+                # A newer version with an older timestamp (a copy that kept
+                # its build time) still replaces an older installed copy.
+                _file_version_tuple(current) > _file_version_tuple(target)
             )
             if needs_copy:
                 # Copy to a temp name then atomically replace — a crash mid-copy
@@ -4126,6 +4129,53 @@ def _file_version_tuple(path: str) -> tuple:
         return (ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF)
     except Exception:
         return (0, 0, 0, 0)
+
+
+def _version4(version: str) -> tuple:
+    """'1.8.12' as a FileVersion-shaped tuple: (1, 8, 12, 0)."""
+    from updater import _version_tuple
+    parts = tuple(_version_tuple(version))[:4]
+    return parts + (0,) * (4 - len(parts))
+
+
+def _version_text(v: tuple) -> str:
+    """(1, 8, 12, 0) as '1.8.12', the form APP_VERSION and Installed apps use."""
+    parts = list(v)
+    while len(parts) > 3 and parts[-1] == 0:
+        parts.pop()
+    return ".".join(str(p) for p in parts)
+
+
+def _exe_version(path: str) -> tuple:
+    """The version the exe at *path* runs, (0, 0, 0, 0) when unknown. An
+    installed-layout exe runs its app-<version> folder, so that name decides;
+    any other exe is read from its FileVersion resource."""
+    name = install_layout.exe_contents_dir(path)
+    if name.startswith(brand.CONTENTS_DIR_PREFIX):
+        v = _version4(name[len(brand.CONTENTS_DIR_PREFIX):])
+        if v != (0, 0, 0, 0):
+            return v
+    return _file_version_tuple(path)
+
+
+def _installed_copy_version(target: str) -> tuple:
+    """(ok, version on disk) for the installed copy at *target* after an
+    install by this exe. ok when it is this exe, this version or newer; the
+    version is "" when it cannot be read. An older copy left in place (the
+    replace failed because it is running) is not ok: reporting success then
+    left a Store install on the old release (issue #1)."""
+    current = os.path.abspath(sys.executable)
+    if os.path.normcase(current) == os.path.normcase(os.path.abspath(target)):
+        return True, APP_VERSION
+    on_disk = _exe_version(target)
+    if on_disk != (0, 0, 0, 0):
+        return on_disk >= _version4(APP_VERSION), _version_text(on_disk)
+    # No version to read: only the very same file counts.
+    try:
+        same = install_layout.file_sha256(current) == install_layout.file_sha256(target)
+    except OSError:
+        same = False
+    return same, (APP_VERSION if same else "")
 
 
 def _handoff_to_canonical_if_newer() -> None:
@@ -4412,10 +4462,14 @@ def _run_silent_install() -> int:
     The Microsoft Store runs the installer silently (policy 10.2.9), so this
     must never show UI, open the mic or register hotkeys. It puts the
     canonical copy in place, registers the Start-menu entry, Installed apps
-    entry, URL protocol and (if enabled) the logon task, then exits. Returns 0
-    when an intact installed copy exists afterwards: if the app is already
-    installed and running, the locked exe cannot be replaced, but the install
-    is still good and the in-app updater moves it forward."""
+    entry, URL protocol and (if enabled) the logon task, then exits.
+
+    Returns 0 only when an intact installed copy of THIS version (or a newer
+    one) is in place afterwards. If the app is running, its locked exe cannot
+    be replaced and the older copy stays: everything is still registered
+    against that copy, under the version actually on disk, and the exit code
+    is 3, so the Store or updater retries instead of recording the new
+    version as installed (issue #1). 1 = no intact copy at all."""
     if not getattr(sys, "frozen", False):
         print("[App] --install only applies to the packaged exe.")
         return 2
@@ -4428,6 +4482,15 @@ def _run_silent_install() -> int:
             and install_layout.layout_ok(target)):
         _log_startup_error(RuntimeError(f"install failed: no intact copy at {target}"))
         return 1
+    current_ok, on_disk = _installed_copy_version(target)
+    if current_ok:
+        print(f"[Install] Installed copy is v{on_disk}; this installer is v{APP_VERSION}.")
+    else:
+        msg = (f"Installed copy is v{on_disk or 'unknown'}, not v{APP_VERSION}: it was not "
+               f"replaced (in use, or an installed layout this copy never overwrites). "
+               f"Registering v{on_disk or 'unknown'} and exiting 3 so the install is retried.")
+        print(f"[Install] {msg}")
+        install_layout.log(msg)
     _apply_installer_choices()
     # Before _register_application(), which deletes the legacy-named Run
     # entry: with no tick passed, a disable made in Task Manager under the
@@ -4439,9 +4502,18 @@ def _run_silent_install() -> int:
                 enabled = False
         except Exception as e:
             print(f"[App] Could not read Start with Windows from the registry: {e}")
-    _register_application()
+    if on_disk == APP_VERSION:
+        _register_application()
+    elif on_disk:
+        # Installed apps shows what is really there (older after a failed
+        # replace, or newer), never a version this installer did not put there.
+        _register_application(version=on_disk)
+    else:
+        print("[Install] Installed apps entry left as it was: the installed version is unreadable.")
     _register_url_protocol()
     _sync_startup(enabled)
+    if not current_ok:
+        return 3
     print(f"[App] Installed at {target}")
     return 0
 
@@ -4550,7 +4622,7 @@ def _uninstall_silent() -> bool:
     return any(a.lower() in ("/s", "--silent") for a in sys.argv[1:])
 
 
-def _register_application() -> None:
+def _register_application(version: str = "") -> None:
     """Register the installed copy with Windows: Start-menu entry, a first-run
     desktop shortcut, an Installed-apps entry with a working uninstaller, and
     App Paths. Frozen builds only: a source run has no canonical exe to point
@@ -4559,15 +4631,18 @@ def _register_application() -> None:
     Everything points at the CANONICAL exe path, which the auto-updater swaps
     in place, so no shortcut or registry value goes stale after an update; the
     version shown in Installed apps is refreshed here on the next launch.
+    *version* is what Installed apps shows (default APP_VERSION): a silent
+    install that could not replace an older copy passes the one on disk.
     """
     if not getattr(sys, "frozen", False):
         return
+    version = version or APP_VERSION
     watchdog = None
     try:
         import app_install
 
         target = _startup_target()
-        install_layout.log(f"Registering {APP_VERSION} with Windows from {target}.")
+        install_layout.log(f"Registering {version} with Windows from {target}.")
         # CI saw this thread stop before its first registry write (2026-10-08,
         # 1 run in 4). If it ever takes 90 s, every thread's stack goes to
         # register-hang.log beside the exe, so the cause can be read.
@@ -4578,8 +4653,8 @@ def _register_application() -> None:
             faulthandler.dump_traceback_later(90, repeat=False, file=watchdog)
         except Exception:
             watchdog = None
-        app_install.register(target, APP_VERSION)
-        install_layout.log(f"Registered {APP_VERSION} with Windows.")
+        app_install.register(target, version)
+        install_layout.log(f"Registered {version} with Windows.")
     except Exception as e:
         print(f"[App] Application registration skipped (non-fatal): {e}")
         # In update.log, not just stdout: a windowed build has no console, and a
