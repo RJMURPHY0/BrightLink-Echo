@@ -87,6 +87,10 @@ class Transcriber:
         self.model_size = model_size
         self.language = language
         self._model: Optional["WhisperModel"] = None
+        # Text of the last load failure, for speech_health to classify (empty
+        # when never attempted or last attempt succeeded). A runtime string
+        # (DLL/module names), never user speech.
+        self.last_load_error = ""
         self._load_lock = threading.Lock()
         # Prevents streaming preview and final transcription running at the same time
         self._transcribe_lock = threading.Lock()
@@ -117,16 +121,26 @@ class Transcriber:
         with self._load_lock:
             if self._model is not None:
                 return
-            from faster_whisper import WhisperModel  # lazy — called from daemon thread
-            print(f"[Transcriber] Loading '{self.model_size}'…")
-            self._model = WhisperModel(
-                self.model_size,
-                device=self._device,
-                compute_type=self._compute_type,
-                cpu_threads=self._cpu_threads,
-                num_workers=self._num_workers,
-            )
-            print("[Transcriber] Model ready.")
+            try:
+                from faster_whisper import WhisperModel  # lazy — called from daemon thread
+                print(f"[Transcriber] Loading '{self.model_size}'…")
+                self._model = WhisperModel(
+                    self.model_size,
+                    device=self._device,
+                    compute_type=self._compute_type,
+                    cpu_threads=self._cpu_threads,
+                    num_workers=self._num_workers,
+                )
+                print("[Transcriber] Model ready.")
+                self.last_load_error = ""
+            except Exception as e:
+                # Record why before re-raising. The whisper load has always
+                # raised to its caller (daemon preload threads catch and
+                # print); keeping that contract means no caller changes, while
+                # speech_health can now read the signature of a quarantined
+                # ctranslate2 DLL instead of a vanished print.
+                self.last_load_error = f"{type(e).__name__}: {e}"
+                raise
 
     def transcribe(
         self, audio: np.ndarray, sample_rate: int = 16000, blocking: bool = True,

@@ -81,7 +81,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.8.13"
+APP_VERSION = "1.8.14"
 
 
 class _RECT(ctypes.Structure):
@@ -205,6 +205,13 @@ class WhisperFlowApp:
         self.injector = None
         self.tray = None
         self._recording_timer: threading.Timer | None = None
+        # Speech-engine health: set when NO engine can transcribe (a
+        # quarantined runtime DLL, a blocked download, a removed model) so the
+        # silence has a visible, logged cause. Cleared the moment an engine
+        # loads. See _evaluate_speech_health / _note_speech_blocked.
+        self._speech_blocked_cause = ""
+        self._speech_blocked_detail: dict = {}
+        self._speech_blocked_last_notified = 0.0
 
         # ── AI + logging ───────────────────────────────────────────────
         self.ai_refiner = AIRefiner(
@@ -549,6 +556,18 @@ class WhisperFlowApp:
                     "attempt": attempt,
                     "error": errors[0] if errors else "",
                 })
+            # If whisper is also unavailable the user has NO engine while this
+            # download keeps failing — surface it, don't just log it. When
+            # whisper is carrying dictation _note_speech_blocked no-ops (an
+            # engine is ready), so this never alarms a working machine.
+            err_text = errors[0] if errors else ""
+            import speech_health
+            self._note_speech_blocked(
+                speech_health.classify_download_error(err_text),
+                "parakeet", err_text,
+                files_present=model_files_present(version=version),
+                download_tamper=speech_health.download_error_is_tamper(err_text),
+            )
             waits = self._PARAKEET_RETRY_WAITS_S
             wait = (waits[attempt - 1] if attempt <= len(waits)
                     else self._PARAKEET_RETRY_EVERY_S)
@@ -599,6 +618,9 @@ class WhisperFlowApp:
                 self._release_whisper_fallback()
             else:
                 self._load_whisper_fallback()
+            # Loads have settled: either an engine is ready, or none is and the
+            # user needs to know why instead of pressing into silence.
+            self._evaluate_speech_health()
 
     def _parakeet_expected(self) -> bool:
         """True when Parakeet should take over English dictation within
@@ -1205,6 +1227,146 @@ class WhisperFlowApp:
         except Exception as e:
             print(f"[App] error-event log failed (non-fatal): {e}")
 
+    # ── Speech-engine health (visible + logged when nothing can transcribe) ──
+
+    # Re-show the "speech blocked" notice at most this often while the user
+    # keeps pressing the hotkey into a dead engine: enough to explain the
+    # silence, not so often it becomes the new nuisance.
+    _SPEECH_BLOCKED_RENOTIFY_S = 180
+
+    def _any_engine_ready(self) -> bool:
+        """True when at least one engine can transcribe right now."""
+        for eng in (self.parakeet, self.fast_transcriber, self.transcriber):
+            if eng is not None and getattr(eng, "is_loaded", False):
+                return True
+        return False
+
+    def _note_speech_blocked(self, cause: str, engine: str, exc_text: str,
+                             files_present=None, download_tamper: bool = False,
+                             force_notify: bool = False) -> None:
+        """Record and (when nothing can transcribe) surface a speech-engine
+        failure. Logs once per distinct cause to the fleet error log, and
+        shows an actionable toast the first time then at most every
+        _SPEECH_BLOCKED_RENOTIFY_S while the block persists. Never raises and
+        never blocks — this is the whole point: a silent failure becomes a
+        visible, logged one."""
+        try:
+            import speech_health
+            if not speech_health.is_blocked(cause):
+                return
+            # Only alarm when the user truly has no engine. Parakeet blocked
+            # but whisper carrying dictation is not a user-visible failure.
+            if self._any_engine_ready():
+                return
+            detail = speech_health.log_detail(
+                cause, engine=engine, exc_text=exc_text,
+                files_present=files_present, download_tamper=download_tamper)
+            new_cause = (cause != self._speech_blocked_cause)
+            self._speech_blocked_cause = cause
+            self._speech_blocked_detail = detail
+            if new_cause:
+                self._log_error_event("speech_engine_blocked", detail)
+                try:
+                    with open(_startup_log_path(), "a", encoding="utf-8") as f:
+                        f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                                f"Speech engine blocked: {detail}\n")
+                except Exception:
+                    pass
+            now = time.monotonic()
+            if force_notify or new_cause or (
+                    now - self._speech_blocked_last_notified
+                    >= self._SPEECH_BLOCKED_RENOTIFY_S):
+                self._speech_blocked_last_notified = now
+                headline, hint = speech_health.message_for(
+                    cause, download_tamper=download_tamper)
+                self._show_speech_blocked_toast(cause, headline, hint, detail)
+        except Exception as e:
+            print(f"[App] speech-health note failed (non-fatal): {e}")
+
+    def _show_speech_blocked_toast(self, cause: str, headline: str, hint: str,
+                                   detail: dict) -> None:
+        """An action toast carrying the plain-English cause and a one-click
+        'Send report', with a tray-notice fallback. Thread-safe."""
+        msg = f"{headline} {hint}"
+
+        def _report():
+            try:
+                from error_reporter import report_error
+                _auth = getattr(self, "_auth", None)
+                report_error(
+                    f"Speech engine blocked: {cause}",
+                    context=detail,
+                    user_email=getattr(_auth, "user_email", "") or None,
+                )
+            except Exception:
+                pass
+            try:
+                self.app_window.show_toast(
+                    f"{brand.PRODUCT_NAME}: report sent — thank you. We'll see "
+                    "what's being blocked and fix it.", 6000)
+            except Exception:
+                pass
+
+        def _notify():
+            try:
+                self.app_window.show_action_toast(
+                    msg, "Send report", _report, 30000)
+            except Exception:
+                try:
+                    self.tray.notify(headline, brand.PRODUCT_NAME)
+                except Exception:
+                    pass
+
+        try:
+            self.app_window._ui_after(0, _notify)
+        except Exception:
+            pass
+
+    def _clear_speech_blocked(self) -> None:
+        """An engine loaded after a block — recovery. Record it once and tell
+        the user dictation is back, so a notice they saw is not left hanging."""
+        if not self._speech_blocked_cause:
+            return
+        prev = self._speech_blocked_cause
+        self._speech_blocked_cause = ""
+        self._speech_blocked_detail = {}
+        try:
+            self._log_error_event("speech_engine_recovered", {"from": prev})
+        except Exception:
+            pass
+        try:
+            self.app_window.show_toast(
+                f"{brand.PRODUCT_NAME}: speech recognition is ready.", 4000)
+        except Exception:
+            pass
+
+    def _evaluate_speech_health(self) -> None:
+        """Called once the startup engine loads have settled. If at least one
+        engine is ready, clear any prior block; otherwise classify why nothing
+        can transcribe and surface it. Never raises."""
+        try:
+            if self._any_engine_ready():
+                self._clear_speech_blocked()
+                return
+            import speech_health
+            from asr_engine import model_files_present
+            _ver = getattr(self.config, "parakeet_version", "v2")
+            try:
+                files = bool(model_files_present(version=_ver))
+            except Exception:
+                files = False
+            # Prefer whichever engine recorded a failure; the Parakeet error is
+            # the most informative on the English path.
+            par_err = getattr(self.parakeet, "last_load_error", "") or ""
+            exc = (par_err
+                   or getattr(self.fast_transcriber, "last_load_error", "")
+                   or getattr(self.transcriber, "last_load_error", ""))
+            engine = "parakeet" if par_err else "whisper"
+            cause = speech_health.classify_load_error(exc, files_present=files)
+            self._note_speech_blocked(cause, engine, exc, files_present=files)
+        except Exception as e:
+            print(f"[App] speech-health evaluation failed (non-fatal): {e}")
+
     def _wire_hallucination_reporter(self) -> None:
         """Route degenerate-repetition detections into the fleet error log.
 
@@ -1778,6 +1940,17 @@ class WhisperFlowApp:
             if _silent:
                 self.recorder.last_silence_recovery = None
                 self._log_error_event("mic_stream_silent", dict(_silent))
+            # No engine can turn this recording into text. Remind the user why
+            # (throttled, no disk I/O) so a press into silence is explained
+            # rather than mysterious — the exact symptom users report.
+            if self._speech_blocked_cause and not self._any_engine_ready():
+                _d = self._speech_blocked_detail or {}
+                self._note_speech_blocked(
+                    self._speech_blocked_cause,
+                    _d.get("engine", ""), _d.get("signature", ""),
+                    files_present=_d.get("files_present"),
+                    download_tamper=bool(_d.get("tamper")),
+                )
             # Normally already played on the hotkey thread the moment the key
             # went down (see _on_state_change). This is the cold/recovered path,
             # where the cue waits until audio is proven to be flowing.

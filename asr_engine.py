@@ -394,6 +394,10 @@ class ParakeetTranscriber:
         self._load_lock = threading.Lock()
         self._transcribe_lock = threading.Lock()
         self._load_failed = False
+        # Text of the last load failure, for speech_health to classify (empty
+        # when never attempted or last attempt succeeded). A runtime string
+        # (DLL/module names), never user speech.
+        self.last_load_error = ""
         # Timestamped/log-prob adapter, built on first use. Strictly additive:
         # if this onnx-asr build has no with_timestamps(), the flag latches and
         # every later call takes the plain text path unchanged.
@@ -440,9 +444,11 @@ class ParakeetTranscriber:
                 )
                 _shrink_arena_after_long_runs(self._model, ort)
                 print("[ParakeetEngine] Model ready.")
+                self.last_load_error = ""
                 return True
             except Exception as e:
                 print(f"[ParakeetEngine] Load failed ({e}) — falling back to Whisper.")
+                self.last_load_error = f"{type(e).__name__}: {e}"
                 self._load_failed = True
                 self._model = None
                 return False
