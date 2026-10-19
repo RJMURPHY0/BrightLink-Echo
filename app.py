@@ -212,6 +212,16 @@ class WhisperFlowApp:
         self._speech_blocked_cause = ""
         self._speech_blocked_detail: dict = {}
         self._speech_blocked_last_notified = 0.0
+        # The cause we've already sent a (user-consented) false-positive report
+        # for, so repeated "Fix speech recognition" clicks don't spam the log.
+        self._speech_reported_cause = ""
+        # Guards the four fields above against the preload, hotkey and clear
+        # threads that all touch them.
+        self._speech_lock = threading.Lock()
+        # True once the whisper fallback load has finished (loaded or failed),
+        # so the parakeet download-retry loop never raises a false "no engine"
+        # alarm while whisper is still coming up on a PC where it works fine.
+        self._whisper_settled = False
 
         # ── AI + logging ───────────────────────────────────────────────
         self.ai_refiner = AIRefiner(
@@ -558,17 +568,21 @@ class WhisperFlowApp:
                     "error": errors[0] if errors else "",
                 })
             # If whisper is also unavailable the user has NO engine while this
-            # download keeps failing — surface it, don't just log it. When
-            # whisper is carrying dictation _note_speech_blocked no-ops (an
-            # engine is ready), so this never alarms a working machine.
-            err_text = errors[0] if errors else ""
-            import speech_health
-            self._note_speech_blocked(
-                speech_health.classify_download_error(err_text),
-                "parakeet", err_text,
-                files_present=model_files_present(version=version),
-                download_tamper=speech_health.download_error_is_tamper(err_text),
-            )
+            # download keeps failing — surface it, don't just log it. Wait for
+            # whisper to settle first: it loads on its own thread and takes a
+            # second or two, and a download refused in well under that must not
+            # raise a false alarm on a PC where whisper carries dictation fine.
+            # Once settled, _note_speech_blocked's own readiness check no-ops
+            # when whisper is up, so this only ever alarms a truly dead machine.
+            if self._whisper_settled:
+                err_text = errors[0] if errors else ""
+                import speech_health
+                self._note_speech_blocked(
+                    speech_health.classify_download_error(err_text),
+                    "parakeet", err_text,
+                    files_present=model_files_present(version=version),
+                    download_tamper=speech_health.download_error_is_tamper(err_text),
+                )
             waits = self._PARAKEET_RETRY_WAITS_S
             wait = (waits[attempt - 1] if attempt <= len(waits)
                     else self._PARAKEET_RETRY_EVERY_S)
@@ -648,6 +662,10 @@ class WhisperFlowApp:
                 eng.load_model()
             except Exception as e:
                 print(f"[App] Whisper preload failed ({e}).")
+        # Whisper has now either loaded or failed; the download-retry loop may
+        # judge "no engine" from this point without racing a still-loading
+        # whisper on a machine where whisper works.
+        self._whisper_settled = True
 
     # Waits between attempts to free the whisper models while a dictation
     # that began on whisper (pressed during Parakeet's load) is still running.
@@ -1236,8 +1254,17 @@ class WhisperFlowApp:
     _SPEECH_BLOCKED_RENOTIFY_S = 180
 
     def _any_engine_ready(self) -> bool:
-        """True when at least one engine can transcribe right now."""
-        for eng in (self.parakeet, self.fast_transcriber, self.transcriber):
+        """True when an engine that can serve the CONFIGURED language is
+        loaded. Parakeet is English only, so a loaded Parakeet does not help a
+        French user — they route through whisper (see _use_parakeet). Checking
+        raw is_loaded across all engines would call a non-English user 'ready'
+        while their whisper engine is quarantined: the exact silent failure
+        this feature exists to catch."""
+        if self._use_parakeet():
+            return True
+        # Non-English, or Parakeet not up yet: a whisper model must be loaded
+        # (whisper also carries English dictation while Parakeet is loading).
+        for eng in (self.fast_transcriber, self.transcriber):
             if eng is not None and getattr(eng, "is_loaded", False):
                 return True
         return False
@@ -1262,9 +1289,20 @@ class WhisperFlowApp:
             detail = speech_health.log_detail(
                 cause, engine=engine, exc_text=exc_text,
                 files_present=files_present, download_tamper=download_tamper)
-            new_cause = (cause != self._speech_blocked_cause)
-            self._speech_blocked_cause = cause
-            self._speech_blocked_detail = detail
+            # Decide under the lock; do all I/O (log, toast) outside it so the
+            # fire-and-forget calls never serialise on this state. Multiple
+            # threads reach here — the parakeet-preload retry loop, the hotkey
+            # start path — plus _clear_speech_blocked.
+            with self._speech_lock:
+                new_cause = (cause != self._speech_blocked_cause)
+                self._speech_blocked_cause = cause
+                self._speech_blocked_detail = detail
+                now = time.monotonic()
+                do_notify = force_notify or new_cause or (
+                    now - self._speech_blocked_last_notified
+                    >= self._SPEECH_BLOCKED_RENOTIFY_S)
+                if do_notify:
+                    self._speech_blocked_last_notified = now
             if getattr(self, "tray", None) is not None:
                 try:
                     self.tray.set_speech_blocked(True)
@@ -1278,11 +1316,7 @@ class WhisperFlowApp:
                                 f"Speech engine blocked: {detail}\n")
                 except Exception:
                     pass
-            now = time.monotonic()
-            if force_notify or new_cause or (
-                    now - self._speech_blocked_last_notified
-                    >= self._SPEECH_BLOCKED_RENOTIFY_S):
-                self._speech_blocked_last_notified = now
+            if do_notify:
                 headline, hint = speech_health.message_for(
                     cause, download_tamper=download_tamper)
                 self._show_speech_blocked_toast(cause, headline, hint, detail)
@@ -1319,24 +1353,32 @@ class WhisperFlowApp:
         richer, user-consented report. Safe from any thread (tray or UI)."""
         try:
             import av_report
-            cause = self._speech_blocked_cause or ""
-            detail = self._speech_blocked_detail or {}
-            try:
-                from error_reporter import report_error
-                _auth = getattr(self, "_auth", None)
-                report = av_report.build_report(
-                    cause=cause, detail=detail, app_version=APP_VERSION)
-                report_error(
-                    f"AV false positive: {cause or 'speech blocked'}",
-                    context=report,
-                    user_email=getattr(_auth, "user_email", "") or None,
-                )
-            except Exception:
-                pass
+            # Snapshot the shared state, and decide whether to report, under
+            # the lock — repeated clicks must not each POST a duplicate report.
+            with self._speech_lock:
+                cause = self._speech_blocked_cause or ""
+                detail = dict(self._speech_blocked_detail or {})
+                should_report = bool(cause) and cause != self._speech_reported_cause
+                if should_report:
+                    self._speech_reported_cause = cause
+            if should_report:
+                try:
+                    from error_reporter import report_error
+                    _auth = getattr(self, "_auth", None)
+                    report = av_report.build_report(
+                        cause=cause, detail=detail, app_version=APP_VERSION)
+                    report_error(
+                        f"AV false positive: {cause or 'speech blocked'}",
+                        context=report,
+                        user_email=getattr(_auth, "user_email", "") or None,
+                    )
+                except Exception:
+                    pass
             folder = av_report.primary_allowlist_dir()
             self._open_folder(folder)
-            msg = (f"Allow this folder in your antivirus, then restart "
-                   f"{brand.PRODUCT_NAME}:\n{folder}")
+            # Single source of the fix copy (av_report), so it carries the
+            # "restore any quarantined file" step and never drifts from the doc.
+            msg = av_report.fix_message_compact()
 
             def _notify():
                 try:
@@ -1367,11 +1409,14 @@ class WhisperFlowApp:
     def _clear_speech_blocked(self) -> None:
         """An engine loaded after a block — recovery. Record it once and tell
         the user dictation is back, so a notice they saw is not left hanging."""
-        if not self._speech_blocked_cause:
-            return
-        prev = self._speech_blocked_cause
-        self._speech_blocked_cause = ""
-        self._speech_blocked_detail = {}
+        with self._speech_lock:
+            if not self._speech_blocked_cause:
+                return
+            prev = self._speech_blocked_cause
+            self._speech_blocked_cause = ""
+            self._speech_blocked_detail = {}
+            # Allow a fresh report if it breaks again later this session.
+            self._speech_reported_cause = ""
         if getattr(self, "tray", None) is not None:
             try:
                 self.tray.set_speech_blocked(False)

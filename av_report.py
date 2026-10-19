@@ -93,6 +93,15 @@ def fix_message() -> str:
     return "\n".join(lines)
 
 
+def fix_message_compact() -> str:
+    """A short fix for a toast: the three actions on one line plus the folder.
+    Includes 'restore any quarantined file' — allow-listing alone does not put
+    back a DLL the antivirus already removed, so the fix fails without it."""
+    return (f"Allow this folder in your antivirus, restore any quarantined "
+            f"file, then restart {brand.PRODUCT_NAME}:\n"
+            f"{primary_allowlist_dir()}")
+
+
 def vendor_form_urls() -> list:
     """(vendor name, submission URL) pairs for the developer to report to."""
     return list(VENDOR_FORMS)

@@ -54,6 +54,15 @@ class FixGuidanceTests(unittest.TestCase):
     def test_fix_message_includes_the_folder(self):
         self.assertIn(av_report.primary_allowlist_dir(), av_report.fix_message())
 
+    def test_compact_message_has_folder_and_the_restore_step(self):
+        # The toast uses the compact form; it must still tell the user to
+        # restore a quarantined file (allow-listing alone won't put a removed
+        # DLL back) and name the folder.
+        msg = av_report.fix_message_compact()
+        self.assertIn(av_report.primary_allowlist_dir(), msg)
+        self.assertIn("restore", msg.lower())
+        self.assertIn(brand.PRODUCT_NAME, msg)
+
 
 class VendorFormTests(unittest.TestCase):
 
