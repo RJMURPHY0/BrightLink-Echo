@@ -110,13 +110,27 @@ Don't undo these — each one exists to keep the detection rate down:
 
 ### If a user is still blocked
 
-Ask them to allow-list the two stable paths rather than the exe alone:
+Ask them to allow-list the stable data folder rather than the exe alone — that
+one folder covers the exe, the unpack folder and the model. Since v1.8.5 it is:
 
 ```
-%LOCALAPPDATA%\FTC Whisper\
+%LOCALAPPDATA%\BrightLink Echo\
 ```
 
-That single folder covers the exe, the unpack folder and the model.
+(A machine that has not migrated yet is still on the legacy
+`%LOCALAPPDATA%\FTC Whisper\` folder; `data_paths.py` knows which, so never
+quote a folder name by hand.)
+
+**The app now tells the user this itself.** From v1.8.14, when no speech engine
+can load (`speech_health.py`), the app logs a `speech_engine_blocked` event to
+the fleet error log with the exact blocked file signature, shows an actionable
+toast, and adds a **"Fix speech recognition…"** tray item. Both open the
+self-service fix (`av_report.py`): the precise folder for *that* machine
+(resolved through `data_paths`, so never stale), opened in Explorer, plus a
+detailed false-positive report sent to the error endpoint. The recovery is
+logged as `speech_engine_recovered`. So "I installed it but speaking does
+nothing" is no longer silent — it names what is blocked, on screen and in the
+logs.
 
 ---
 

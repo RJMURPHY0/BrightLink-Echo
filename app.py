@@ -442,6 +442,7 @@ class WhisperFlowApp:
                 on_sign_out=self._sign_out,
                 on_open=self.app_window.show,
                 on_restart_audio=self._restart_audio_engine,
+                on_fix_speech=self._show_speech_fix,
             )
 
             # Late-bind the settings tab's device tools now the recorder exists.
@@ -1264,6 +1265,11 @@ class WhisperFlowApp:
             new_cause = (cause != self._speech_blocked_cause)
             self._speech_blocked_cause = cause
             self._speech_blocked_detail = detail
+            if getattr(self, "tray", None) is not None:
+                try:
+                    self.tray.set_speech_blocked(True)
+                except Exception:
+                    pass
             if new_cause:
                 self._log_error_event("speech_engine_blocked", detail)
                 try:
@@ -1286,31 +1292,14 @@ class WhisperFlowApp:
     def _show_speech_blocked_toast(self, cause: str, headline: str, hint: str,
                                    detail: dict) -> None:
         """An action toast carrying the plain-English cause and a one-click
-        'Send report', with a tray-notice fallback. Thread-safe."""
+        'How to fix' (the self-service allow-list flow), with a tray-notice
+        fallback. Thread-safe."""
         msg = f"{headline} {hint}"
-
-        def _report():
-            try:
-                from error_reporter import report_error
-                _auth = getattr(self, "_auth", None)
-                report_error(
-                    f"Speech engine blocked: {cause}",
-                    context=detail,
-                    user_email=getattr(_auth, "user_email", "") or None,
-                )
-            except Exception:
-                pass
-            try:
-                self.app_window.show_toast(
-                    f"{brand.PRODUCT_NAME}: report sent — thank you. We'll see "
-                    "what's being blocked and fix it.", 6000)
-            except Exception:
-                pass
 
         def _notify():
             try:
                 self.app_window.show_action_toast(
-                    msg, "Send report", _report, 30000)
+                    msg, "How to fix", self._show_speech_fix, 30000)
             except Exception:
                 try:
                     self.tray.notify(headline, brand.PRODUCT_NAME)
@@ -1322,6 +1311,59 @@ class WhisperFlowApp:
         except Exception:
             pass
 
+    def _show_speech_fix(self) -> None:
+        """The self-service fix for an antivirus block: show the exact folder
+        to allow-list, open it in Explorer, and send a detailed false-positive
+        report so the detection is also cleared at source. The fleet error log
+        already has the bare event (see _note_speech_blocked); this is the
+        richer, user-consented report. Safe from any thread (tray or UI)."""
+        try:
+            import av_report
+            cause = self._speech_blocked_cause or ""
+            detail = self._speech_blocked_detail or {}
+            try:
+                from error_reporter import report_error
+                _auth = getattr(self, "_auth", None)
+                report = av_report.build_report(
+                    cause=cause, detail=detail, app_version=APP_VERSION)
+                report_error(
+                    f"AV false positive: {cause or 'speech blocked'}",
+                    context=report,
+                    user_email=getattr(_auth, "user_email", "") or None,
+                )
+            except Exception:
+                pass
+            folder = av_report.primary_allowlist_dir()
+            self._open_folder(folder)
+            msg = (f"Allow this folder in your antivirus, then restart "
+                   f"{brand.PRODUCT_NAME}:\n{folder}")
+
+            def _notify():
+                try:
+                    self.app_window.show_action_toast(
+                        msg, "Open folder",
+                        lambda: self._open_folder(folder), 60000)
+                except Exception:
+                    try:
+                        self.tray.notify(msg, brand.PRODUCT_NAME)
+                    except Exception:
+                        pass
+
+            try:
+                self.app_window._ui_after(0, _notify)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[App] speech-fix flow failed (non-fatal): {e}")
+
+    def _open_folder(self, path: str) -> None:
+        """Open a folder in Explorer. Windows-only (os.startfile); a no-op with
+        a logged note anywhere else. Never raises."""
+        try:
+            os.startfile(path)
+        except Exception as e:
+            print(f"[App] open folder failed (non-fatal): {e}")
+
     def _clear_speech_blocked(self) -> None:
         """An engine loaded after a block — recovery. Record it once and tell
         the user dictation is back, so a notice they saw is not left hanging."""
@@ -1330,6 +1372,11 @@ class WhisperFlowApp:
         prev = self._speech_blocked_cause
         self._speech_blocked_cause = ""
         self._speech_blocked_detail = {}
+        if getattr(self, "tray", None) is not None:
+            try:
+                self.tray.set_speech_blocked(False)
+            except Exception:
+                pass
         try:
             self._log_error_event("speech_engine_recovered", {"from": prev})
         except Exception:

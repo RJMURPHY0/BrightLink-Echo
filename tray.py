@@ -97,19 +97,35 @@ class TrayApp:
         on_sign_out: Optional[Callable] = None,
         on_open: Optional[Callable] = None,
         on_restart_audio: Optional[Callable] = None,
+        on_fix_speech: Optional[Callable] = None,
     ):
         self.on_quit        = on_quit
         self.on_open_config = on_open_config
         self.on_sign_out    = on_sign_out
         self.on_open        = on_open
         self.on_restart_audio = on_restart_audio
+        self.on_fix_speech  = on_fix_speech
         self._icon: Optional[pystray.Icon] = None
         self._current_state = "idle"
         self._user_email: str = ""
+        # True while no speech engine can transcribe (a quarantined runtime,
+        # a blocked model download): adds a prominent "Fix speech recognition"
+        # item so the user has a way back to the fix after the toast is gone.
+        self._speech_blocked = False
         self._icon_worker = LatestWorker(self._apply_icon, "tray-icon")
 
     def set_user_email(self, email: str) -> None:
         self._user_email = email
+        if self._icon:
+            self._icon.update_menu()
+
+    def set_speech_blocked(self, blocked: bool) -> None:
+        """Show or hide the 'Fix speech recognition' menu item. Called from
+        the app when speech becomes unavailable or recovers."""
+        blocked = bool(blocked)
+        if blocked == self._speech_blocked:
+            return
+        self._speech_blocked = blocked
         if self._icon:
             self._icon.update_menu()
 
@@ -118,6 +134,10 @@ class TrayApp:
 
         if self.on_open:
             items.append(item(f"Open {brand.PRODUCT_NAME}", self._on_open, default=True))
+            items.append(pystray.Menu.SEPARATOR)
+
+        if self.on_fix_speech and self._speech_blocked:
+            items.append(item("Fix speech recognition…", self._on_fix_speech))
             items.append(pystray.Menu.SEPARATOR)
 
         if self._user_email:
@@ -146,6 +166,10 @@ class TrayApp:
     def _on_restart_audio(self, _icon, _item) -> None:
         if self.on_restart_audio:
             self.on_restart_audio()
+
+    def _on_fix_speech(self, _icon, _item) -> None:
+        if self.on_fix_speech:
+            self.on_fix_speech()
 
     def _on_sign_out(self, _icon, _item) -> None:
         if self.on_sign_out:
