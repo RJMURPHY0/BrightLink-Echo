@@ -574,7 +574,10 @@ class WhisperFlowApp:
             # raise a false alarm on a PC where whisper carries dictation fine.
             # Once settled, _note_speech_blocked's own readiness check no-ops
             # when whisper is up, so this only ever alarms a truly dead machine.
-            if self._whisper_settled:
+            # The `attempt >= 2` fallback bounds the wait: by the second failure
+            # (30s+ in) whisper has had ample time even if slow, so a whisper
+            # load that hangs can never suppress the alarm forever.
+            if self._whisper_settled or attempt >= 2:
                 err_text = errors[0] if errors else ""
                 import speech_health
                 self._note_speech_blocked(
@@ -1303,7 +1306,9 @@ class WhisperFlowApp:
                     >= self._SPEECH_BLOCKED_RENOTIFY_S)
                 if do_notify:
                     self._speech_blocked_last_notified = now
-            if getattr(self, "tray", None) is not None:
+            if new_cause and getattr(self, "tray", None) is not None:
+                # Only on a new cause: the item stays shown until recovery, so
+                # re-notify calls need not re-touch the tray cross-thread.
                 try:
                     self.tray.set_speech_blocked(True)
                 except Exception:
@@ -1378,7 +1383,9 @@ class WhisperFlowApp:
             self._open_folder(folder)
             # Single source of the fix copy (av_report), so it carries the
             # "restore any quarantined file" step and never drifts from the doc.
-            msg = av_report.fix_message_compact()
+            # Pass the resolved folder so it is not re-walked and the opened
+            # folder and the message can never disagree.
+            msg = av_report.fix_message_compact(folder)
 
             def _notify():
                 try:
@@ -2034,11 +2041,15 @@ class WhisperFlowApp:
                 self._log_error_event("mic_stream_silent", dict(_silent))
             # No engine can turn this recording into text. Remind the user why
             # (throttled, no disk I/O) so a press into silence is explained
-            # rather than mysterious — the exact symptom users report.
-            if self._speech_blocked_cause and not self._any_engine_ready():
-                _d = self._speech_blocked_detail or {}
+            # rather than mysterious — the exact symptom users report. Snapshot
+            # the shared state under the lock so a concurrent recovery can't
+            # hand us a set cause with an already-cleared detail.
+            with self._speech_lock:
+                _cause = self._speech_blocked_cause
+                _d = dict(self._speech_blocked_detail or {})
+            if _cause and not self._any_engine_ready():
                 self._note_speech_blocked(
-                    self._speech_blocked_cause,
+                    _cause,
                     _d.get("engine", ""), _d.get("signature", ""),
                     files_present=_d.get("files_present"),
                     download_tamper=bool(_d.get("tamper")),
