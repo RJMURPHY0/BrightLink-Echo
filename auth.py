@@ -669,7 +669,11 @@ class AuthManager:
         def _revoke():
             try:
                 if client:
-                    client.auth.sign_out()
+                    # Local scope: end THIS session only. The SDK default is
+                    # "global", which deletes every session the user has in
+                    # the shared Supabase project, signing them out of the CRM
+                    # and Notetaker too (and theirs out of Echo, 2026-10-21).
+                    client.auth.sign_out({"scope": "local"})
             except Exception:
                 pass
 
