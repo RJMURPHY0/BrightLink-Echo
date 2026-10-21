@@ -10,9 +10,10 @@
 -- ============================================================================
 
 -- ── app_settings ───────────────────────────────────────────────────────────
--- Server-side config the desktop client fetches AFTER sign-in (the public
--- release exe ships with the AI keys stripped, so this table is the ONLY source
--- of AI-refinement keys for released users — it must be populated, see bottom).
+-- Shared, non-secret settings every signed-in user can read (window size,
+-- dashboard defaults). Never a key: since 2026-10-05 a CHECK constraint refuses
+-- credential-shaped rows, and AI refine goes through the BrightLink relay
+-- (POST /api/whisper/ai), which keeps the model key on the server.
 create table if not exists public.app_settings (
   key   text primary key,
   value text
@@ -68,12 +69,4 @@ create policy "transcriptions owner delete"
 create index if not exists transcriptions_user_created_idx
   on public.transcriptions (user_id, created_at desc);
 
--- ── Populate the AI keys ─────────────────────────────────────────────────────
--- REQUIRED for AI refinement to work in released builds. Copy the values from
--- the OLD whisper project (mbxwqtsesxgpcfyicphs → Table editor → app_settings),
--- or paste your own keys, then run this block. Uncomment and fill in:
---
--- insert into public.app_settings (key, value) values
---   ('openrouter_api_key', 'sk-or-...'),
---   ('anthropic_api_key',  'sk-ant-...')
--- on conflict (key) do update set value = excluded.value;
+-- AI keys never go in this table (2026-10-05): see the app_settings note above.

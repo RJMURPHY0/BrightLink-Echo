@@ -229,6 +229,10 @@ class WhisperFlowApp:
             openrouter_api_key=config.openrouter_api_key,
             openrouter_model=(getattr(config, "openrouter_model", "") or "").strip()
             or AIRefiner.DEFAULT_OPENROUTER_MODEL,
+            # No local key (every released build): refine goes through the
+            # BrightLink relay as the signed-in user, key kept on the server.
+            token_provider=lambda: auth.access_token,
+            signed_in=lambda: auth.is_authenticated,
         )
         self.db = SupabaseLogger(url=config.supabase_url, key=config.supabase_key)
         # Cloud Sync is opt-in per PC (off by default): the logger uploads and
@@ -833,13 +837,7 @@ class WhisperFlowApp:
         # idempotent, so they run inline before any sync can race them.
         self._adopt_user_libraries(auth.user_email or "")
 
-        # If no local API key, fetch from Supabase app_settings — in a daemon
-        # thread: these are two sequential network calls and used to gate
-        # hotkey registration, delaying time-to-first-dictation by seconds.
         if self.db.is_enabled:
-            threading.Thread(
-                target=self._fetch_remote_api_keys, daemon=True, name="api-key-fetch"
-            ).start()
             # Accuracy: fold the user's CRM contact/company names into the
             # hotwords (needs the authenticated client for RLS).
             threading.Thread(
@@ -860,10 +858,12 @@ class WhisperFlowApp:
         # that it may upload the user's voice.
         self.voice_trainer.refresh_consent(callback=self._on_voice_consent)
 
-        if self.ai_refiner.is_available:
-            print("[App] AI refinement enabled.")
+        if self.ai_refiner.has_local_key:
+            print("[App] AI refinement enabled (local key).")
+        elif self.ai_refiner.is_available:
+            print("[App] AI refinement enabled (BrightLink relay).")
         else:
-            print("[App] AI refinement disabled — set anthropic_api_key or openrouter_api_key in config or Supabase app_settings.")
+            print("[App] AI refinement needs sign-in (BrightLink relay).")
 
         if self.db.is_enabled:
             print(f"[App] Supabase logging enabled.")
@@ -904,25 +904,6 @@ class WhisperFlowApp:
 
         # If config.json was corrupt and reset to defaults, tell the user
         self._announce_config_reset_if_any()
-
-    def _fetch_remote_api_keys(self) -> None:
-        try:
-            if not self.ai_refiner.openrouter_api_key:
-                or_key = self.db.fetch_app_setting("openrouter_api_key")
-                if or_key:
-                    self.ai_refiner.update_openrouter_key(or_key)
-                    self.popup.set_ai_refiner(self.ai_refiner)
-                    print("[App] Loaded OpenRouter API key from Supabase.")
-            if not self.ai_refiner.api_key:
-                key = self.db.fetch_app_setting("anthropic_api_key")
-                if key:
-                    self.ai_refiner.update_api_key(key)
-                    self.popup.set_ai_refiner(self.ai_refiner)
-                    print("[App] Loaded Anthropic API key from Supabase.")
-            if self.ai_refiner.is_available:
-                print("[App] AI refinement enabled.")
-        except Exception as e:
-            print(f"[App] Remote API key fetch failed: {e}")
 
     def _start_update_check(self) -> None:
         """Check GitHub at launch and every 6 h. Starts ONCE per process, as
@@ -3985,10 +3966,6 @@ class WhisperFlowApp:
         if self.tray:
             self.tray.set_user_email(auth.user_email or "")
         print(f"[App] Signed in as {runtime_log.mask_email(auth.user_email)}")
-        if self.db.is_enabled:
-            threading.Thread(
-                target=self._fetch_remote_api_keys, daemon=True, name="api-key-fetch"
-            ).start()
         self._adopt_user_libraries(auth.user_email or "")
         self.cloud_sync.start()
 

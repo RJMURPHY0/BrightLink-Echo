@@ -2864,7 +2864,7 @@ class FloatingPopup:
             self._ai_status.pack(anchor="w")
             return
         if not self._ai_refiner or not self._ai_refiner.is_available:
-            self._ai_status.configure(text="⚠  Set anthropic_api_key in config to enable AI")
+            self._ai_status.configure(text="⚠  Sign in to use AI")
             self._ai_status.pack(anchor="w")
             return
         if self._ai_busy:
@@ -2881,7 +2881,11 @@ class FloatingPopup:
 
         def _worker():
             result = self._ai_refiner.refine(text, mode, sender_name=self._sender_name)
-            self.root.after(0, self._show_ai_result, result, token)
+            failed = self._ai_refiner.relay_failure_message()
+            if failed:
+                self.root.after(0, self._show_ai_failure, failed, token)
+            else:
+                self.root.after(0, self._show_ai_result, result, token)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -2899,7 +2903,7 @@ class FloatingPopup:
             self._ai_status.pack(anchor="w")
             return
         if not self._ai_refiner or not self._ai_refiner.is_available:
-            self._ai_status.configure(text="⚠  Set anthropic_api_key in config to enable AI")
+            self._ai_status.configure(text="⚠  Sign in to use AI")
             self._ai_status.pack(anchor="w")
             return
         if self._ai_busy:
@@ -2924,9 +2928,25 @@ class FloatingPopup:
 
         def _worker():
             result = self._ai_refiner.refine(text, custom_prompt=custom_prompt)
-            self.root.after(0, self._show_ai_result, result, token)
+            failed = self._ai_refiner.relay_failure_message()
+            if failed:
+                self.root.after(0, self._show_ai_failure, failed, token)
+            else:
+                self.root.after(0, self._show_ai_result, result, token)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_ai_failure(self, message: str, session: int = 0) -> None:
+        """The relay refused or could not be reached: say why in the status
+        row instead of showing the untouched text as if it were a result."""
+        self._ai_busy = False
+        self._touch_panel_activity()
+        if self._mode is None:
+            return
+        if session and session != self._session_token:
+            return
+        self._ai_status.configure(text=f"⚠  {message}")
+        self._ai_status.pack(anchor="w")
 
     def _show_ai_result(self, text: str, session: int = 0) -> None:
         self._ai_busy = False

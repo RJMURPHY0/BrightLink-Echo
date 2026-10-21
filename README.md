@@ -80,8 +80,8 @@ first run.)
 | `inject_method` | `clipboard` | `clipboard` (paste) or `keystrokes` (typed key events) |
 | `sound_feedback` | `true` | Beep sounds on start/stop |
 | `auto_start` | `false` | Reserved, unused: `start_with_windows` controls the Run entry |
-| `anthropic_api_key` | *(empty)* | [Anthropic API key](https://console.anthropic.com/) — enables AI refinement |
-| `openrouter_api_key` | *(empty)* | OpenRouter API key — alternative to Anthropic for AI refinement |
+| `anthropic_api_key` | *(empty)* | Dev builds only. Released builds refine through the BrightLink relay when signed in |
+| `openrouter_api_key` | *(empty)* | Dev builds only. A local key wins over the relay |
 | `openrouter_model` | `google/gemini-2.5-flash-lite` | OpenRouter model used for refinement/context-fix |
 | `warm_mic` | `true` | Keep the mic stream warm with a ~1.5 s pre-roll — instant start, first syllable never lost |
 | `auto_update` | `true` | Silently download new releases and install them when the app is idle |
@@ -145,7 +145,7 @@ After a transcription, click the badge near your cursor to open the refinement p
 | ✂ Short | Makes it as concise as possible |
 | ⚡ Optimise | Rewrites as an optimised AI prompt |
 
-Requires `anthropic_api_key` in `config.json`.
+Needs you signed in: refine runs through the BrightLink relay, which holds the model key. A local key in `config.json` (dev builds) is used instead when set.
 
 ---
 

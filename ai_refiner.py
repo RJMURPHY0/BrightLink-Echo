@@ -1,12 +1,32 @@
 """
-AI text refinement using the Claude API.
+AI text refinement.
 Rewrites transcribed text in various styles (email, formal, casual, punctuation fix).
-Requires ANTHROPIC_API_KEY environment variable or api_key in config.
+
+Released builds hold no model key: a signed-in user's calls go through the
+BrightLink relay (POST {relay_url}/api/whisper/ai with their Supabase token),
+which keeps the key on the server. A key in config or the environment
+(OPENROUTER_API_KEY / ANTHROPIC_API_KEY) still wins, for dev builds.
 """
 
+import json
 import os
 import re
-from typing import Optional
+import threading
+import urllib.error
+import urllib.request
+from typing import Callable, Optional
+
+# The CRM's public origin, which hosts the relay. Overridable so a dev build
+# can point at a local API server.
+DEFAULT_RELAY_URL = "https://app.brightlink.io"
+RELAY_PATH = "/api/whisper/ai"
+# Same budget as the direct calls: a transcript fix is worthless after ~20s,
+# and the relay itself gives OpenRouter 20s.
+_RELAY_TIMEOUT = 25.0
+
+
+def relay_url() -> str:
+    return (os.environ.get("BRIGHTLINK_APP_URL") or DEFAULT_RELAY_URL).rstrip("/")
 
 # A bracketed sign-off placeholder the model sometimes emits despite being told
 # not to (e.g. "[Sender's Name]", "[Your Name]", "[Name]", "[Signature]"). Post-
@@ -261,7 +281,8 @@ class AIRefiner:
     """
     Refines transcribed text using the Claude API or OpenRouter.
 
-    Priority: OpenRouter (if key set) > Anthropic direct (if key set) > unavailable.
+    Priority: OpenRouter (if key set) > Anthropic direct (if key set) >
+    BrightLink relay (if signed in) > unavailable.
 
     Usage:
         refiner = AIRefiner(api_key="sk-ant-...", openrouter_api_key="sk-or-...")
@@ -282,10 +303,21 @@ class AIRefiner:
         api_key: Optional[str] = None,
         openrouter_api_key: Optional[str] = None,
         openrouter_model: str = DEFAULT_OPENROUTER_MODEL,
+        token_provider: Optional[Callable[[], str]] = None,
+        signed_in: Optional[Callable[[], bool]] = None,
     ):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.openrouter_api_key = openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "")
         self.openrouter_model = openrouter_model or self.DEFAULT_OPENROUTER_MODEL
+        # Returns the signed-in user's Supabase access token, "" when signed out.
+        self._token_provider = token_provider
+        # Cheap "is anyone signed in" check for is_available, which runs on the
+        # dictation path: reading the token itself may refresh it over the network.
+        self._signed_in = signed_in
+        # Why this thread's last relay call failed ("" after a success). Per
+        # thread: context_fix runs beside a popup refine, and one must never
+        # report the other's failure.
+        self._relay_state = threading.local()
         self._client = None
         self._openrouter_client = None
 
@@ -299,8 +331,97 @@ class AIRefiner:
         self._openrouter_client = None
 
     @property
-    def is_available(self) -> bool:
+    def last_relay_error(self) -> str:
+        return getattr(self._local_relay_state(), "error", "")
+
+    @last_relay_error.setter
+    def last_relay_error(self, value: str) -> None:
+        self._local_relay_state().error = value
+
+    def _local_relay_state(self) -> threading.local:
+        # Lazily, so a refiner built without __init__ (test stubs) still works.
+        state = self.__dict__.get("_relay_state")
+        if state is None:
+            state = self.__dict__.setdefault("_relay_state", threading.local())
+        return state
+
+    # What the popup shows when a relay refine came back with the original text.
+    _RELAY_MESSAGES = {
+        "signed_out": "Sign in to use AI",
+        "unauthorised": "Your sign-in has expired. Sign in again to use AI",
+        "restricted": "AI is switched off for your organisation",
+        "rate_limited": "Too many AI requests just now. Try again in a few minutes",
+        "network": "Could not reach BrightLink. Check your connection and try again",
+    }
+
+    def relay_failure_message(self) -> str:
+        """A plain message for this thread's last relay failure, "" if none."""
+        err = self.last_relay_error
+        if not err:
+            return ""
+        return self._RELAY_MESSAGES.get(err, "AI is unavailable right now. Try again shortly")
+
+    @property
+    def has_local_key(self) -> bool:
         return bool(self.openrouter_api_key or self.api_key)
+
+    def _relay_token(self) -> str:
+        provider = getattr(self, "_token_provider", None)
+        if not provider:
+            return ""
+        try:
+            return provider() or ""
+        except Exception as e:
+            print(f"[AIRefiner] Could not read the sign-in token: {e}")
+            return ""
+
+    @property
+    def is_available(self) -> bool:
+        if self.has_local_key:
+            return True
+        signed_in = getattr(self, "_signed_in", None)
+        if signed_in is not None:
+            try:
+                return bool(getattr(self, "_token_provider", None)) and bool(signed_in())
+            except Exception:
+                return False
+        return bool(self._relay_token())
+
+    def _relay_chat(self, system: str, user: str, max_tokens: int,
+                    temperature: float) -> str:
+        """One chat turn through the BrightLink relay as the signed-in user.
+        The server picks the model. Returns the reply, or "" on any failure
+        (signed out, 401/403/429, server or network error) with the reason in
+        last_relay_error, so every caller falls back to the original text."""
+        token = self._relay_token()
+        if not token:
+            self.last_relay_error = "signed_out"
+            return ""
+        body = json.dumps({"system": system, "user": user,
+                           "max_tokens": int(max_tokens),
+                           "temperature": float(temperature)}).encode("utf-8")
+        req = urllib.request.Request(
+            relay_url() + RELAY_PATH, data=body, method="POST",
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=_RELAY_TIMEOUT) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            text = (data.get("text") or "").strip() if isinstance(data, dict) else ""
+            self.last_relay_error = "" if text else "empty"
+            if not text:
+                print("[AIRefiner] Relay returned no text")
+            return text
+        except urllib.error.HTTPError as e:
+            reason = {401: "unauthorised", 403: "restricted",
+                      429: "rate_limited"}.get(e.code, f"http_{e.code}")
+            self.last_relay_error = reason
+            print(f"[AIRefiner] Relay refused ({e.code} {reason})")
+            return ""
+        except Exception as e:
+            self.last_relay_error = "network"
+            print(f"[AIRefiner] Relay call failed: {type(e).__name__}: {e}")
+            return ""
 
     _STYLE_SYSTEM_PROMPT = (
         "You are a text refinement assistant. Write in plain prose only. "
@@ -400,11 +521,13 @@ class AIRefiner:
         Returns:
             Refined text, or original text if API call fails
         """
+        self.last_relay_error = ""
         if not text.strip():
             return text
 
         if not self.is_available:
-            print("[AIRefiner] No API key set — returning original text.")
+            self.last_relay_error = "signed_out"
+            print("[AIRefiner] No API key and not signed in — returning original text.")
             return text
 
         prompt = custom_prompt or REFINE_PROMPTS.get(mode, REFINE_PROMPTS["punctuation"])
@@ -491,6 +614,16 @@ class AIRefiner:
                 if not self.api_key:
                     return text
 
+        # No local key: the BrightLink relay, as the signed-in user.
+        if not self.has_local_key:
+            result = self._relay_chat(system, f"{prompt}\n\n{text}",
+                                      self._max_tokens_for(text), 0)
+            if not result:
+                return text
+            result = _finish(result)
+            print(f"[AIRefiner] Refined via relay ({mode}): {len(result)} chars")
+            return result
+
         # Anthropic direct path
         if not self.api_key:
             return text
@@ -520,6 +653,8 @@ class AIRefiner:
         """A plain system+user chat turn, OpenRouter first then Anthropic, same
         timeouts/fallbacks as refine(). Returns the reply text, or "" on no key or
         error. Used off the dictation hot path only."""
+        if not self.has_local_key:
+            return self._relay_chat(system, user, max_tokens, 0.2)
         if self.openrouter_api_key:
             try:
                 import openai  # type: ignore
