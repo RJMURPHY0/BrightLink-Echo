@@ -9580,7 +9580,7 @@ class AppWindow:
     # ── Cloud Sync ───────────────────────────────────────────────────────────
 
     _CLOUD_SYNC_TITLE = "Cloud Sync"
-    _CLOUD_SYNC_DESC = ("Keeps your history, recordings, words and settings on "
+    _CLOUD_SYNC_DESC = ("Keeps your history, recordings and settings on "
                         "every PC you sign in to.")
 
     def set_cloud_sync(self, cloud_sync) -> None:
@@ -9634,9 +9634,10 @@ class AppWindow:
         self._cloud_confirm = tk.Frame(card, bg=C["surface"])
         msg = tk.Label(
             self._cloud_confirm,
-            text=("Delete everything Echo keeps in your BrightLink account: "
-                  "history, recordings, words, phrases and settings. This PC "
-                  "keeps its own copy. This can't be undone."),
+            text=("Delete the history, recordings and settings Echo keeps in "
+                  "your BrightLink account. Your words, snippets and phrases "
+                  "stay backed up. This PC keeps its own copy. This can't be "
+                  "undone."),
             fg=C["text"], bg=C["surface"], font=("Segoe UI", 8),
             anchor="w", justify="left")
         msg.pack(fill="x")
@@ -9687,8 +9688,8 @@ class AppWindow:
                 else "Sign in to sync with your other PCs.",
                 "busy" if self._signed_in() else "signed_out")
         else:
-            self._apply_cloud_status(
-                "Off. Nothing you dictate leaves this PC.", "off")
+            from cloud_sync import OFF_STATUS
+            self._apply_cloud_status(OFF_STATUS, "off")
             # Turning it off is exactly when someone wants to be asked about
             # what is already up there.
             if self._signed_in():

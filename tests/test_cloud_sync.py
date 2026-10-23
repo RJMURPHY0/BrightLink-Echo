@@ -87,12 +87,37 @@ class DefaultOffTests(TempHistory):
             log.refresh_history(user_id="user-a")
             log.refresh_history_async()
 
-    def test_vocabulary_and_snippets_neither_push_nor_pull(self):
+    def test_vocabulary_and_snippets_back_up_with_sync_off(self):
+        # Always-on backup: words, snippets and phrases do not need the switch.
         log = _logger(sync=False)
+        client = _FakeClient()
+        log._client = client
+        self.assertTrue(log.library_active)
+        self.assertFalse(log.sync_active)
+        log.push_library("vocabulary", [{"id": "1", "term": "Vercel",
+                                         "updated_at": "2026-10-23T10:00:00+00:00"}])
+        self.assertEqual(client.upserts["user_vocabulary"][0]["term"], "Vercel")
+        client.rows["user_snippets"] = [{"id": "s1", "user_id": "user-a",
+                                         "name": "n", "trigger": "t", "body": "b"}]
+        self.assertEqual(log.fetch_library("snippets")[0]["id"], "s1")
+
+    def test_signed_out_vocabulary_never_touches_the_network(self):
+        log = _logger(sync=False, user=None)
         with mock.patch.object(log, "_get_client",
                                side_effect=AssertionError("network")):
             log.push_library("vocabulary", [{"id": "1", "term": "Vercel"}])
             self.assertEqual(log.fetch_library("snippets"), [])
+        self.assertFalse(log.library_active)
+
+    def test_phrases_back_up_with_sync_off_but_settings_do_not(self):
+        log = _logger(sync=False)
+        client = _FakeClient()
+        log._client = client
+        self.assertTrue(log.push_state("phrases", {"phrases": {}}))
+        self.assertEqual(client.upserts["echo_user_state"][0]["key"], "phrases")
+        self.assertFalse(log.push_state("settings", {"values": {}}))
+        self.assertEqual(log.fetch_state("settings"), (None, False))
+        self.assertEqual(len(client.upserts["echo_user_state"]), 1)
 
     def test_everything_is_uploaded_when_the_user_turns_it_on(self):
         log = _logger(sync=True)
@@ -299,6 +324,17 @@ class PersistHistoryTests(TempHistory):
 class _Q:
     def __init__(self, client, table):
         self.c, self.t, self.op = client, table, "select"
+        self.skip_key = None
+
+    def upsert(self, rows, **_k):
+        self.op = "upsert"
+        self.rows_in = rows if isinstance(rows, list) else [rows]
+        return self
+
+    def neq(self, col, val):
+        if col == "key":
+            self.skip_key = val
+        return self
 
     def delete(self):
         self.op = "delete"
@@ -314,11 +350,20 @@ class _Q:
         return self
 
     def execute(self):
+        if self.op == "upsert":
+            self.c.upserts.setdefault(self.t, []).extend(self.rows_in)
+            return types.SimpleNamespace(data=[])
         if self.op == "delete":
             self.c.deleted.append(self.t)
+            if self.skip_key:
+                self.c.delete_skipped_keys.append(self.skip_key)
             if self.t not in self.c.refuse:
-                self.c.rows[self.t] = []
-        return types.SimpleNamespace(data=list(self.c.rows.get(self.t, [])))
+                self.c.rows[self.t] = [r for r in self.c.rows.get(self.t, [])
+                                       if self.skip_key and r.get("key") == self.skip_key]
+        data = list(self.c.rows.get(self.t, []))
+        if self.skip_key:
+            data = [r for r in data if r.get("key") != self.skip_key]
+        return types.SimpleNamespace(data=data)
 
 
 class _Bucket:
@@ -336,9 +381,12 @@ class _Bucket:
 class _FakeClient:
     def __init__(self, refuse=()):
         self.deleted, self.refuse = [], set(refuse)
+        self.upserts, self.delete_skipped_keys = {}, []
         self.rows = {t: [{"user_id": "user-a"}] for t in
                      ("transcriptions", "user_vocabulary", "user_snippets",
                       "echo_user_state", "user_daily_stats")}
+        self.rows["echo_user_state"] = [{"user_id": "user-a", "key": "settings"},
+                                        {"user_id": "user-a", "key": "phrases"}]
         self.objects = {"20260929100000000000.wav"}
         self.storage = types.SimpleNamespace(from_=lambda _b: _Bucket(self))
 
@@ -348,16 +396,19 @@ class _FakeClient:
 
 class DeleteCloudDataTests(unittest.TestCase):
 
-    def test_deletes_every_personal_part_and_the_recordings(self):
+    def test_deletes_history_settings_and_recordings_not_the_library_backup(self):
         client = _FakeClient()
         log = _logger(sync=False)
         log._client = client
         result = log.delete_cloud_data()
         self.assertTrue(all(result.values()), result)
         self.assertEqual(client.objects, set())
-        self.assertEqual(set(client.deleted),
-                         {"transcriptions", "user_vocabulary", "user_snippets",
-                          "echo_user_state"})
+        self.assertEqual(set(client.deleted), {"transcriptions", "echo_user_state"})
+        self.assertEqual(set(client.delete_skipped_keys), {"phrases"})
+        # vocabulary, snippets and learned phrases are still up there
+        self.assertEqual(len(client.rows["user_vocabulary"]), 1)
+        self.assertEqual(len(client.rows["user_snippets"]), 1)
+        self.assertEqual([r["key"] for r in client.rows["echo_user_state"]], ["phrases"])
 
     def test_a_refused_delete_is_reported_not_claimed(self):
         client = _FakeClient(refuse=("transcriptions",))
@@ -365,7 +416,7 @@ class DeleteCloudDataTests(unittest.TestCase):
         log._client = client
         result = log.delete_cloud_data()
         self.assertFalse(result["history"])
-        self.assertTrue(result["vocabulary"])
+        self.assertTrue(result["settings"])
 
     def test_turning_sync_off_is_not_turned_back_on_by_deleting(self):
         log = _logger(sync=False)
@@ -401,6 +452,10 @@ class _FakeDb:
     @property
     def sync_active(self):
         return self.active and self.sync
+
+    @property
+    def library_active(self):
+        return self.active
 
     def fetch_state(self, key):
         return self.state.get(key), True
@@ -497,6 +552,62 @@ class SyncRunTests(unittest.TestCase):
         cs._full_sync()
         self.assertEqual((db.pushed, db.uploaded_rows, db.audio_up), ({}, [], []))
         self.assertEqual(statuses[-1][1], "off")
+        self.assertEqual(statuses[-1][0], cloud_sync.OFF_STATUS)
+
+    def test_off_backs_up_only_words_and_phrases_never_history(self):
+        db = _FakeDb()
+        cfg = types.SimpleNamespace(cloud_sync=False, sync_stamps={},
+                                    save_async=lambda: None)
+        libs = []
+        store = types.SimpleNamespace(
+            snapshot=lambda: {"phrases": [{"phrase": "a b", "count": 3, "learned_at": "2026-10-01"}],
+                              "candidates": {"secret dictated words": [4, "x"]},
+                              "fumbled": {}, "forgotten": {}, "version": 1},
+            replace_with=lambda d: libs.append(d))
+        cs, applied, statuses = self._sync(db, cfg, store)
+        cs._sync_libraries = lambda: libs.append("libraries")
+        db.state["phrases"] = {"phrases": [{"phrase": "c d", "count": 2, "learned_at": "2026-10-02"}],
+                               "candidates": {"already up there": [9, "y"]},
+                               "fumbled": {}, "forgotten": {}, "version": 1}
+        cs._full_sync()
+        self.assertEqual(libs[0], "libraries")
+        # nothing from the switch-controlled parts
+        self.assertNotIn("settings", db.pushed)
+        self.assertEqual((db.uploaded_rows, db.audio_up, db.audio_down,
+                          db.persisted), ([], [], [], []))
+        # the local candidates (dictated fragments) are not uploaded, and the
+        # copy already in the cloud is carried through untouched
+        up = db.pushed["phrases"]
+        self.assertEqual({r["phrase"] for r in up["phrases"]}, {"a b", "c d"})
+        self.assertEqual(up["candidates"], {"already up there": [9, "y"]})
+        # and the cloud's candidates are not pulled down into this PC
+        down = libs[1]
+        self.assertEqual(down["candidates"], {"secret dictated words": [4, "x"]})
+        self.assertEqual({r["phrase"] for r in down["phrases"]}, {"a b", "c d"})
+        self.assertEqual(statuses[-1][1], "off")
+
+    def test_turning_it_on_still_syncs_candidates(self):
+        db = _FakeDb()
+        db.set_sync_enabled(True)
+        got = []
+        store = types.SimpleNamespace(
+            snapshot=lambda: {"phrases": [], "candidates": {"x y": [1, "t"]},
+                              "fumbled": {}, "forgotten": {}, "version": 1},
+            replace_with=got.append)
+        cs, _a, _s = self._sync(db, None, store)
+        self.assertTrue(cs._step_phrases())
+        self.assertIn("x y", db.pushed["phrases"]["candidates"])
+
+    def test_start_runs_the_library_backup_even_with_the_switch_off(self):
+        db = _FakeDb()
+        cfg = types.SimpleNamespace(cloud_sync=False, sync_stamps={},
+                                    save_async=lambda: None)
+        cs, _a, _s = self._sync(db, cfg)
+        started = []
+        cs.sync_now = lambda: started.append("now")
+        cs._arm_timer = lambda: started.append("timer")
+        cs.start()
+        self.assertEqual(started, ["now", "timer"])
 
     def test_signed_out_says_so_and_does_nothing(self):
         db = _FakeDb(active=False)

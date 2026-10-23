@@ -10,13 +10,26 @@ what the app does with your data.
 
 Speech recognition runs on your own computer. Your recordings, the text of
 your dictations, your vocabulary, snippets, learned phrases and settings are
-saved in your Windows user folder. None of it leaves your computer unless you
-switch on one of these yourself:
+saved in your Windows user folder. Your vocabulary, snippets and learned
+phrases are also backed up to your BrightLink account when you are signed in
+(see "Your words are always backed up" below). The text of your dictations and
+your recordings never leave your computer unless you switch on one of these
+yourself:
 
 - **Cloud Sync** (Settings > Account, off by default), described below.
 - **Voice training**, if you turn it on.
 - **A feedback report** from History, when you choose to send one (and its
   recording, when you tick "Include the recording").
+
+## Your words are always backed up
+
+When you are signed in, Echo backs up the words you teach it so a new or
+reinstalled computer gets them back: your custom vocabulary, your snippets and
+the phrases it has learned that you say often. This does not need Cloud Sync.
+It never includes your history, your recordings, or the fragments of speech
+Echo is still counting before it decides a phrase is worth learning. To remove
+them, delete the entries in Echo (they are removed from your account on the
+next backup) or ask for your account data to be deleted.
 
 ## Cloud Sync (off unless you turn it on)
 
@@ -26,12 +39,11 @@ While it is on, these are stored in your account and copied to your other
 computers that also have it on:
 
 - The text of your dictations (your History) and their recordings
-- Your custom vocabulary and snippets
-- Phrases the app has learned from how you talk
+- The fragments of speech Echo counts to learn phrases
 - Your preferences (not machine settings such as your microphone or hotkeys)
 
 Turning Cloud Sync off stops it straight away, and Echo offers to delete
-everything it has stored in your account. You can also delete it at any time
+the history, recordings and preferences it has stored in your account. You can also delete it at any time
 from Settings > Account > "Delete my data from the cloud". Copies on your own
 computer are kept.
 

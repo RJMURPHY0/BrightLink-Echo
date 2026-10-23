@@ -71,6 +71,12 @@ SYNCED_SETTINGS = (
     "vocab_fuzzy", "learned_phrases", "managed_vocab",
 )
 
+# What the card says while the switch is off. Words, snippets and learned
+# phrases are the always-on backup (supabase_client.library_active); history,
+# recordings and preferences are what the switch controls.
+OFF_STATUS = ("Off. History and recordings stay on this PC. Your words, "
+              "snippets and phrases are always backed up to your account.")
+
 PERIODIC_SECONDS = 15 * 60
 # After a failed run, one early try instead of waiting the full interval.
 RETRY_SECONDS = 60
@@ -254,19 +260,20 @@ class CloudSync:
     def refresh_status(self) -> None:
         """Say where things stand without doing any work."""
         if not self.enabled:
-            self._status("Off. Nothing you dictate leaves this PC.", "off")
+            self._status(OFF_STATUS, "off")
         elif not self._db.sync_active:
             self._status("Sign in to sync with your other PCs.", "signed_out")
 
     # -- lifecycle ----------------------------------------------------------
 
     def start(self) -> None:
-        """App startup / sign-in: sync now and keep syncing while on."""
+        """App startup / sign-in: sync now and keep syncing. The library
+        backup (words, snippets, phrases) runs whether or not the switch is
+        on; the rest of the sync only while it is."""
         self._db.set_sync_enabled(self.enabled)
         self.refresh_status()
-        if self.enabled:
-            self.sync_now()
-            self._arm_timer()
+        self.sync_now()
+        self._arm_timer()
 
     def set_enabled(self, on: bool) -> None:
         """The switch in Settings changed (config already holds the value)."""
@@ -275,7 +282,13 @@ class CloudSync:
             self.sync_now()
             self._arm_timer()
         else:
-            self._cancel_timers()
+            # Only the extras stop: the periodic timer keeps the library
+            # backup going.
+            self._cancel_timer(self._push_timer)
+            self._push_timer = None
+            with self._lock:
+                retry, self._retry_timer = self._retry_timer, None
+            self._cancel_timer(retry)
             self.refresh_status()
 
     def stop(self) -> None:
@@ -289,9 +302,8 @@ class CloudSync:
         t.start()
 
     def _periodic(self) -> None:
-        if self.enabled:
-            self.sync_now()
-            self._arm_timer()
+        self.sync_now()
+        self._arm_timer()
 
     @staticmethod
     def _cancel_timer(t) -> None:
@@ -364,24 +376,26 @@ class CloudSync:
     def _full_sync(self) -> None:
         with self._lock:
             self._run_is_retry, self._retry_next = self._retry_next, False
-        if not self.enabled:
+        if not self._db.library_active:
             self.refresh_status()
             return
-        if not self._db.sync_active:
-            self.refresh_status()
-            return
-        self._status("Syncing…", "busy")
+        full = self.enabled
+        if full:
+            self._status("Syncing…", "busy")
         # Before any request: a token that expired while the PC slept is
         # refreshed here, not discovered as a 401 on every step.
         self._db.ensure_session()
-        steps =(("libraries", self._step_libraries),
-                 ("settings", self._step_settings),
-                 ("phrases", self._step_phrases),
-                 ("history", self._step_history),
-                 ("recordings", self._step_audio))
+        steps = [("libraries", self._step_libraries),
+                 ("phrases", self._step_phrases)]
+        if full:
+            steps = [("libraries", self._step_libraries),
+                     ("settings", self._step_settings),
+                     ("phrases", self._step_phrases),
+                     ("history", self._step_history),
+                     ("recordings", self._step_audio)]
         failed = []
         for name, step in steps:
-            if not self.enabled:
+            if full and not self.enabled:
                 self.refresh_status()
                 return
             try:
@@ -392,6 +406,11 @@ class CloudSync:
                 failed.append(name)
         ok = not failed
         stamp = time.strftime("%H:%M")
+        if not full:
+            if failed:
+                print(f"[Sync] library backup incomplete: {', '.join(failed)}")
+            self.refresh_status()
+            return
         if ok:
             self._status(f"On. Synced at {stamp}.", "ok")
         else:
@@ -465,9 +484,22 @@ class CloudSync:
         remote, ok = self._db.fetch_state("phrases")
         if not ok:
             return False
-        merged = merge_phrases(store.snapshot(), remote)
-        store.replace_with(merged)
-        return self._db.push_state("phrases", merged)
+        local = store.snapshot()
+        merged = merge_phrases(local, remote)
+        if self.enabled:
+            store.replace_with(merged)
+            return self._db.push_state("phrases", merged)
+        # Cloud Sync is off: the learned phrases back up, but "candidates"
+        # are fragments of what was dictated (history by another name), so
+        # they neither leave this PC nor come back from the cloud. A copy
+        # already up there is carried through untouched.
+        down = dict(merged)
+        down["candidates"] = (local or {}).get("candidates") or {}
+        store.replace_with(down)
+        up = dict(merged)
+        up["candidates"] = ((remote or {}).get("candidates")
+                            if isinstance(remote, dict) else None) or {}
+        return self._db.push_state("phrases", up)
 
     def _step_history(self):
         # Deletes first, both ways: this PC's go up, the other PCs' come down
