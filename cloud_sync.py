@@ -60,15 +60,22 @@ from typing import Callable, Optional
 # Preferences that follow the user between PCs. Deliberately NOT here:
 # input_device / sample_rate / warm_mic (this PC's hardware), hotkeys (one
 # keyboard's layout), popup_height/offset/align (one monitor's geometry),
-# start_with_windows / auto_update (this install), engine and model choices
-# (each triggers a download), API keys and anything secret.
+# start_with_windows / auto_update (this install), API keys and anything secret,
+# whisper_model / parakeet_version (each triggers a multi-hundred-MB download).
 SYNCED_SETTINGS = (
+    # Behaviour toggles
+    "mode", "inject_method", "noise_gate",
+    # Punctuation & formatting
     "auto_punctuate", "end_punctuation", "spoken_punctuation",
-    "live_captions", "live_inject", "homophone_fix", "auto_lists",
-    "email_format", "auto_paragraphs", "show_popup", "show_pill_arrows",
-    "badge_dismiss_on_key", "hide_popup_in_screenshots", "impact_range",
-    "trailing_space", "auto_enter", "copy_to_clipboard", "sound_feedback",
-    "vocab_fuzzy", "learned_phrases", "managed_vocab",
+    "homophone_fix", "auto_lists", "email_format", "auto_paragraphs",
+    # Display & feedback
+    "live_captions", "live_inject", "show_popup", "show_pill_arrows",
+    "badge_dismiss_on_key", "hide_popup_in_screenshots", "sound_feedback",
+    # Injection & recording
+    "trailing_space", "auto_enter", "copy_to_clipboard",
+    "trim_silence", "toggle_timeout", "max_recording_duration",
+    # Stats & intelligence
+    "impact_range", "vocab_fuzzy", "learned_phrases", "managed_vocab",
 )
 
 # What the card says while the switch is off. Words, snippets and learned
