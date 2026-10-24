@@ -819,6 +819,11 @@ class FloatingPopup:
     def set_ai_refiner(self, refiner) -> None:
         self._ai_refiner = refiner
 
+    def set_user_context(self, context_getter=None) -> None:
+        """Accepts a callable (e.g. app._user_ctx) returning UserContext or None.
+        Called at refine time to inject domain terms into the AI prompt."""
+        self._user_context_getter = context_getter
+
     def set_sender_name(self, name: str) -> None:
         """The signed-in user's real name (from their FTC account profile), used
         to sign off Email refinements instead of a '[Sender's Name]' placeholder."""
@@ -2880,7 +2885,17 @@ class FloatingPopup:
         token = self._session_token
 
         def _worker():
-            result = self._ai_refiner.refine(text, mode, sender_name=self._sender_name)
+            ctx_str = None
+            getter = getattr(self, "_user_context_getter", None)
+            if callable(getter):
+                try:
+                    ctx = getter()
+                    if ctx:
+                        ctx_str = ctx.context_for_refiner()
+                except Exception:
+                    pass
+            result = self._ai_refiner.refine(text, mode, sender_name=self._sender_name,
+                                              user_context=ctx_str)
             failed = self._ai_refiner.relay_failure_message()
             if failed:
                 self.root.after(0, self._show_ai_failure, failed, token)
@@ -2927,7 +2942,17 @@ class FloatingPopup:
         token = self._session_token
 
         def _worker():
-            result = self._ai_refiner.refine(text, custom_prompt=custom_prompt)
+            ctx_str = None
+            getter = getattr(self, "_user_context_getter", None)
+            if callable(getter):
+                try:
+                    ctx = getter()
+                    if ctx:
+                        ctx_str = ctx.context_for_refiner()
+                except Exception:
+                    pass
+            result = self._ai_refiner.refine(text, custom_prompt=custom_prompt,
+                                              user_context=ctx_str)
             failed = self._ai_refiner.relay_failure_message()
             if failed:
                 self.root.after(0, self._show_ai_failure, failed, token)

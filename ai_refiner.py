@@ -507,7 +507,8 @@ class AIRefiner:
         return self._client
 
     def refine(self, text: str, mode: str = "punctuation", custom_prompt: Optional[str] = None,
-               sender_name: Optional[str] = None) -> str:
+               sender_name: Optional[str] = None,
+               user_context: Optional[str] = None) -> str:
         """
         Refine text using Claude or OpenRouter.
 
@@ -517,6 +518,10 @@ class AIRefiner:
             custom_prompt: Override the system prompt entirely
             sender_name: The sender's real name (email mode) — signs the email off
                 with it instead of a "[Sender's Name]" placeholder.
+            user_context: Optional domain context paragraph. When provided, appended
+                to the system prompt so the model preserves capitalisation and
+                spelling of proper nouns (company names, product names, technical
+                terms) specific to this user.
 
         Returns:
             Refined text, or original text if API call fails
@@ -532,6 +537,9 @@ class AIRefiner:
 
         prompt = custom_prompt or REFINE_PROMPTS.get(mode, REFINE_PROMPTS["punctuation"])
         system = self._system_prompt_for(mode, custom=bool(custom_prompt))
+        # Append per-user domain context so the refiner never 'corrects' a known term.
+        if user_context and user_context.strip():
+            system = system.rstrip() + "\n\n" + user_context.strip()
         # An Ask does what it says and nothing more: "make this clearer" is not
         # licence to change what the speaker meant.
         if custom_prompt:

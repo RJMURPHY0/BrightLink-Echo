@@ -22,6 +22,8 @@ Windows desktop push-to-talk dictation app: hold a hotkey, speak, and the transc
 - **Backend** — Supabase (`auth.py`, `supabase_client.py`), project `ijeeghdxokfvlfarojlm`, shared with FTC Contacts. Session tokens encrypted on disk with Windows DPAPI. All DB writes fire-and-forget. Entirely optional.
 - **CI/release** — GitHub Actions `.github/workflows/build-release.yml`; `uv` for dependency install; Azure Artifact Signing (formerly Trusted Signing) over GitHub OIDC; optional VirusTotal scan.
 
+**Data Locations** — All runtime data lives under `%LOCALAPPDATA%\BrightLink Echo\` (models, config, history, logs, session) and `%APPDATA%\BrightLink Echo\` (legacy compat). **Every path goes through `data_paths.py`** — never hardcode folder names. Pre-1.8 installs use legacy `FTC Whisper` paths until `installer/activate.ps1` migrates them.
+
 **Run locally**
 ```
 venv\Scripts\python.exe app.py     # or double-click run.bat
@@ -33,6 +35,8 @@ venv\Scripts\python.exe -m PyInstaller echo.spec --noconfirm    # dev/test build
 **Release** — bump `APP_VERSION` in `app.py`, update all four version fields in `version_info.txt`, commit, push to `main`. CI auto-releases on a version bump: a cheap `check` job reads `APP_VERSION` and builds only if no release for that version exists. An unchanged version is a no-op. A tag push (`git tag vX.Y.Z`) always forces a build and release: use it to re-cut a failed version. `workflow_dispatch` (Run workflow) is a **dry run** unless its `publish` box is ticked: it builds, signs and verifies, then keeps the exe as a 3-day artifact.
 
 **Key files** — `brand.py` (every product name, display, on-disk, legacy and frozen) · `data_paths.py` (which data folders this machine uses) · `app.py` (orchestrator, `WhisperFlowApp`, `APP_VERSION`) · `app_window.py` (dashboard/settings) · `popup.py` (`FloatingPopup`) · `recorder.py` (warm mic, watchdog) · `stream_session.py` (incremental Parakeet) · `injector.py` · `hotkey_manager.py` · `updater.py` · `config.py` · `echo.spec` · `version_info.txt` · `docs/CODE_SIGNING.md`.
+
+**Knowledge Graph** — This repo has a queryable AST-based knowledge graph: **6,889 nodes, 14,374 edges, 358 communities**. See `docs/ARCHITECTURE.md` for God Nodes, community breakdown, and exploration commands. Interactive viz: `graphify-out/graph.html`.
 
 ## D · Decisions
 

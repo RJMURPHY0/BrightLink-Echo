@@ -243,7 +243,7 @@ flowchart TD
     class ACT,SWAP warn
 ```
 
-Layout on disk: `FTC Whisper.exe` (onedir bootloader) + `app-<version>\` beside it,
+Layout on disk: `BrightLink Echo.exe` (onedir bootloader) + `app-<version>\` beside it,
 with `models\`, `config.json` and the marker files where they always were. A version
 never writes into another version's folder, which is what makes the switch
 all-or-nothing. Full design: `docs/decisions/release-updater.md`, 2026-09-29.
@@ -256,31 +256,71 @@ all-or-nothing. Full design: `docs/decisions/release-updater.md`, 2026-09-29.
 
 ## Key files
 
-| File | Role |
-|---|---|
-| `app.py` | Orchestrator — `WhisperFlowApp`, `APP_VERSION` |
-| `app_window.py` | Dashboard and settings UI |
-| `popup.py` | `FloatingPopup` — borderless, topmost, never takes focus |
-| `recorder.py` | Warm mic, pre-roll ring, watchdog |
-| `stream_session.py` | Incremental Parakeet, commit-as-you-go |
-| `asr_engine.py` | Parakeet TDT int8 ONNX (primary) |
-| `transcriber.py` | faster-whisper (fallback) |
-| `injector.py` | Three-strategy text injection |
-| `hotkey_manager.py` | Win32 `RegisterHotKey` + `keyboard` fallback |
-| `ai_refiner.py` | OpenRouter → Anthropic refine |
-| `updater.py` | Download, verify, stage, idle-wait, hand over (installer or onefile swap) |
-| `install_layout.py` | The installed layout: manifest, health, rollout, clean-up |
-| `installer/activate.ps1` | Switches versions all or nothing, with rollback |
-| `installer/echo.iss` | The Inno Setup installer (built by `tools/build_installer.py`) |
-| `config.py` | `Config` dataclass → `config.json` |
-| `echo.spec` | PyInstaller build: onefile bridge + onedir installed layout (keys sanitised at build time) |
+| File | Role | Graph Degree |
+|---|---|---|
+| `app.py` | Orchestrator — `WhisperFlowApp`, `APP_VERSION` | 122 (God #3) |
+| `app_window.py` | Dashboard and settings UI | **388 (God #1)** |
+| `popup.py` | `FloatingPopup` — borderless, topmost, never takes focus | **145 (God #2)** |
+| `recorder.py` | Warm mic, pre-roll ring, watchdog | **71 (God #5)** |
+| `stream_session.py` | Incremental Parakeet, commit-as-you-go | — |
+| `asr_engine.py` | Parakeet TDT int8 ONNX (primary) | — |
+| `transcriber.py` | faster-whisper (fallback) | — |
+| `injector.py` | Three-strategy text injection | — |
+| `hotkey_manager.py` | Win32 `RegisterHotKey` + `keyboard` fallback | **45 (God #7)** |
+| `ai_refiner.py` | OpenRouter → Anthropic refine | — |
+| `updater.py` | Download, verify, stage, idle-wait, hand over (installer or onefile swap) | — |
+| `install_layout.py` | The installed layout: manifest, health, rollout, clean-up | — |
+| `installer/activate.ps1` | Switches versions all or nothing, with rollback | — |
+| `installer/echo.iss` | The Inno Setup installer (built by `tools/build_installer.py`) | — |
+| `config.py` | `Config` dataclass → `config.json` | — |
+| `echo.spec` | PyInstaller build: onefile bridge + onedir installed layout (keys sanitised at build time) | — |
+| `brand.py` | Single source of truth for all product/folder names | — |
+| `data_paths.py` | Resolves `%LOCALAPPDATA%`/`%APPDATA%` paths | — |
+| `disfluency.py` | Speech cleaning (`destutter()`) | **40 (God #10)** |
+| `auth.py` | Supabase auth, session encryption | **40 (God #9)** |
+
+---
+
+## Data Locations
+
+| Path | Contents |
+|------|----------|
+| `%LOCALAPPDATA%\BrightLink Echo\` | Models (~660 MB), config.json, history, logs, encrypted session |
+| `%APPDATA%\BrightLink Echo\` | Legacy compat, migrated from `FTC Whisper` folders |
+| `%LOCALAPPDATA%\BrightLink Echo\models\` | Parakeet ONNX model, faster-whisper models |
+| `%LOCALAPPDATA%\BrightLink Echo\app-<version>\` | Installed layout (PyInstaller onedir) |
+
+**Critical**: Every path goes through `data_paths.py` — never join a folder name yourself.
 
 ---
 
 ## Explore it yourself
 
-This repo has a queryable knowledge graph built from the AST — 793 nodes, 1469 edges,
-no LLM involved.
+This repo has a queryable knowledge graph built from the AST — **6,889 nodes,
+14,374 edges, 358 communities**, no LLM involved (100% structural extraction).
+
+### Generated Outputs
+
+| File | Description |
+|------|-------------|
+| `graphify-out/graph.html` | Interactive HTML visualization (open in browser) |
+| `graphify-out/graph.json` | Raw GraphRAG-ready JSON |
+| `graphify-out/GRAPH_REPORT.md` | Full audit report with communities |
+
+### God Nodes (Top 10 Most Connected)
+
+| Rank | Node | Degree | Role |
+|------|------|--------|------|
+| 1 | `AppWindow` | 388 | Main settings/dashboard UI hub |
+| 2 | `FloatingPopup` | 145 | Dictation popup overlay |
+| 3 | `WhisperFlowApp` | 122 | Main application orchestrator |
+| 4 | `SupabaseLogger` | 117 | Cloud sync & telemetry backend |
+| 5 | `Recorder` | 71 | Audio capture engine (warm mic) |
+| 6 | `apply_vocabulary_fuzzy()` | 56 | Text/vocabulary processing |
+| 7 | `HotkeyManager` | 45 | Global hotkey registration |
+| 8 | `RangePicker` | 40 | Time range UI component |
+| 9 | `AuthManager` | 40 | User authentication |
+| 10 | `destutter()` | 40 | Speech disfluency removal |
 
 ```bash
 graphify explain "StreamingSession"       # what it connects to
