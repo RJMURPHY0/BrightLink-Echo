@@ -303,6 +303,7 @@ class WhisperFlowApp:
 
         self.popup = FloatingPopup()
         self.popup.set_ai_refiner(self.ai_refiner)
+        self.popup.set_user_context(self._user_ctx)
         self.popup.set_popup_height(getattr(self.config, "popup_height", "low"))
         self.popup.set_popup_offset(getattr(self.config, "popup_offset", 8))
         self.popup.set_popup_align(getattr(self.config, "popup_align", "centre"))
@@ -363,12 +364,21 @@ class WhisperFlowApp:
         # speech habits and must never leak to whoever signs in next.
         self._phrase_store = None
         self._phrase_store_key = None
+        # Per-user contextual booster: pre-seeds known terms (company names,
+        # tech stack, product names) into the phrase store so accuracy is good
+        # from dictation zero, not after weeks of learning.
+        self._user_context = None
         # Model change requested while recording — applied when idle again
         self._pending_model_change: str | None = None
         # Auto-update: restart only after a stretch of inactivity. Seeded with
         # "now" so a just-launched app never restarts under the user's feet.
         self._last_dictation_ts = time.time()
         self._auto_update_versions: set = set()
+        # Throttle user-facing update notifications to max once per calendar day
+        # during working hours (08–21), so repeated 6-hour checks don't spam the
+        # tray/banner.  The download + install still runs silently; only the
+        # banner / notification is gated.
+        self._last_update_notify_ts: float = 0.0
 
         self.hotkey_manager = HotkeyManager(
             hotkey=config.hotkey,
@@ -921,9 +931,24 @@ class WhisperFlowApp:
         def _on_update_found(version: str, url: str) -> None:
             print(f"[App] Update available: {version}")
             auto = getattr(self.config, "auto_update", True)
-            self.app_window._ui_after(
-                0, lambda: self.app_window.show_update_banner(version, url, auto=auto)
-            )
+            # Throttle user-facing notifications: max once per calendar day,
+            # and only during working hours (08–21 local time).  The download
+            # + install always proceeds silently regardless.
+            now = time.time()
+            hour = time.localtime(now).tm_hour
+            last = self._last_update_notify_ts
+            day_changed = (last == 0.0
+                           or (now - last) > 24 * 3600
+                           or (time.localtime(last).tm_yday
+                               != time.localtime(now).tm_yday))
+            if day_changed and 8 <= hour <= 21:
+                self._last_update_notify_ts = now
+                self.app_window._ui_after(
+                    0, lambda: self.app_window.show_update_banner(version, url, auto=auto)
+                )
+            else:
+                print(f"[App] Update notification throttled "
+                      f"(hour={hour}, last_notify={last:.0f})")
             if auto:
                 self._start_auto_update(version, url)
 
@@ -1036,7 +1061,7 @@ class WhisperFlowApp:
         return (time.time() - self._last_dictation_ts) > 120
 
     def _announce_update_if_any(self) -> None:
-        """First run after an update: a transient 'Updated to vX' notice, or
+        """First run after an update: a confetti celebration popup, or
         'Old name is now New name' when the product was renamed in between."""
         from updater import (read_last_run_name, read_last_run_version,
                              update_announcement, write_last_run_name,
@@ -1054,14 +1079,14 @@ class WhisperFlowApp:
                 print(f"[App] Updated {prev} → {APP_VERSION}: {notice['title']}")
 
                 def _announce():
-                    # Prefer a native tray notification: the app runs hidden in
-                    # the tray, so the bottom-right corner toast would float
-                    # over whatever app is in front (e.g. FTC Contacts) and look
-                    # like it belongs to that app. A tray notification is owned
-                    # by our own icon and never overlays another window. Fall
-                    # back to the toast only if the tray can't notify (icon not
-                    # ready / no support).
-                    if not self.tray.notify(notice["message"], notice["title"]):
+                    # Primary: the polished confetti + version popup.
+                    # Fallback: a tray notification if the window isn't up yet.
+                    self.app_window.show_update_celebration(
+                        prev or "", APP_VERSION, brand.PRODUCT_NAME
+                    )
+                    # Also send a tray notification as a backup — users who
+                    # miss the popup (looking away) still see it in the corner.
+                    if not self.tray.notify(notice["toast"], notice["title"]):
                         self.app_window.show_toast(
                             notice["toast"], notice["toast_ms"]
                         )
@@ -2911,7 +2936,51 @@ class WhisperFlowApp:
             print(f"[App] Phrase store unavailable (non-fatal): {exc}")
             self._phrase_store = None
             self._phrase_store_key = None
+
+        # Seed per-user contextual boost into the fresh store.
+        self._init_user_context(key)
         return self._phrase_store
+
+    def _user_ctx(self):
+        """The UserContext booster for this account, or None."""
+        if self._user_context is not None:
+            return self._user_context
+        # Lazy-create (runs after _phrases has built the store).
+        ctx = getattr(self, "_user_context", None)
+        if ctx is not None:
+            return ctx
+        return None
+
+    def _init_user_context(self, key: str) -> None:
+        """Build and seed the user context booster."""
+        try:
+            from user_context import build_for
+            email = self._account_email() or ""
+            # Role: super_admin for known addresses / BrightLink team.
+            role = ""
+            if email.endswith("@ftc.co.uk") or "ryan" in email.lower():
+                role = "super_admin"
+            # Check Supabase role if available.
+            try:
+                supa_role = getattr(self, "db", None)
+                if hasattr(supa_role, "get_role"):
+                    r = supa_role.get_role()
+                    if r:
+                        role = r
+            except Exception:
+                pass
+            self._user_context = build_for(
+                email=email,
+                role=role,
+                phrase_store=self._phrase_store,
+            )
+            seeded = self._user_context.stats.get("term_count", 0) + \
+                     self._user_context.stats.get("phrase_count", 0)
+            if seeded > 0:
+                print(f"[UserContext] seeded {seeded} terms for {email or 'local'}"
+                      f" ({'super_admin' if self._user_context._is_bl else 'user'})")
+        except Exception as exc:
+            print(f"[UserContext] seed failed (non-fatal): {exc}")
 
     def _apply_user_libraries(self, text: str, conf=None) -> str:
         """Vocabulary corrections then snippet expansion. Never raises: a bad
@@ -3033,7 +3102,9 @@ class WhisperFlowApp:
         halves divide the work: this fixes a name the engine spelt correctly but
         lower-cased, the corrector fixes one it misheard."""
         managed = ", ".join(e["term"] for e in self._managed_entries())
-        return ", ".join(p for p in (self._own_hotwords(), managed) if p)
+        ctx = self._user_ctx()
+        ctx_hw = ctx.hotwords() if ctx else ""
+        return ", ".join(p for p in (self._own_hotwords(), ctx_hw, managed) if p)
 
     def _get_prompt_hotwords(self) -> str:
         """Terms for WHISPER's `hotwords=` parameter. EXCLUDES the managed/CRM
@@ -3068,7 +3139,9 @@ class WhisperFlowApp:
             learned = phrase_learning.hotwords(store.phrases())
         except Exception:
             return own
-        return ", ".join(p for p in (own, learned) if p)
+        ctx = self._user_ctx()
+        ctx_hw = ctx.hotwords() if ctx else ""
+        return ", ".join(p for p in (own, learned, ctx_hw) if p)
 
     def _load_estate_vocab(self) -> None:
         """Names the user actually dictates — their CRM contacts and companies

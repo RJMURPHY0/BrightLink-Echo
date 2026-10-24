@@ -99,12 +99,32 @@ def _rewrite_address(m: "re.Match") -> str:
 
     # Walk left from the end. The chain must terminate in "<label>.<tld|ext>".
     n = len(words)
-    if seps[-1] != "." or words[-1].lower() not in (_TLDS | _EXTS):
+    
+    # Handle domains that already carry real dots (e.g. "brightlink.io" from
+    # ASR or earlier processing). Extract the actual TLD from dotted words.
+    last_word_lower = words[-1].lower()
+    last_is_dotted_domain = "." in words[-1] and not words[-1].startswith(".")
+    
+    if last_is_dotted_domain:
+        # Split on dots to find the TLD
+        dotted_parts = words[-1].split(".")
+        # Check if the last part is a known TLD/ext
+        if dotted_parts[-1] not in (_TLDS | _EXTS):
+            return raw
+        # The separator before this word might be "." (spoken) "@" or another
+        # label-sep. For email-like patterns with "at" followed by a dotted
+        # domain, we still want to convert "at" -> "@".
+    elif seps[-1] != "." or last_word_lower not in (_TLDS | _EXTS):
         return raw
 
     i = n - 1                       # index of the leftmost word in the chain
-    while i > 0 and seps[i - 1] in _LABEL_SEPS:
-        i -= 1
+    
+    # For dotted domains, we don't walk left through seps looking for "."
+    # because the dots are inside the word itself.
+    if not last_is_dotted_domain:
+        while i > 0 and seps[i - 1] in _LABEL_SEPS:
+            i -= 1
+    
     # Optionally one "@", and the local part left of it (labels only).
     if i > 0 and seps[i - 1] == "@":
         at_i = i - 1
@@ -113,7 +133,10 @@ def _rewrite_address(m: "re.Match") -> str:
             j -= 1
         # A single-word local part that is an everyday English word means the
         # "at" was prose ("looked at report dot pdf"), not an address.
-        if not (j == at_i and words[j].lower() in _PROSE_BEFORE_AT):
+        # EXCEPTION: when the domain already carries real dots with a known TLD
+        # (e.g. "brightlink.io", "example.co.uk") we can be confident this is
+        # an email even if the local part looks like prose.
+        if last_is_dotted_domain or not (j == at_i and words[j].lower() in _PROSE_BEFORE_AT):
             i = j
 
     if i == n - 1:

@@ -39,6 +39,9 @@ _FEEDBACK_AUDIO_MAX = 25 * 1024 * 1024
 # recordings in a private bucket under the user's own folder. Created by
 # supabase/cloud_sync.sql (applied through the BrightLink repo's migrations).
 _STATE_TABLE = "echo_user_state"
+# echo_user_state keys that back up like vocabulary and snippets (always on
+# when signed in). Every other key waits for the Cloud Sync switch.
+LIBRARY_STATE_KEYS = ("phrases",)
 _SYNC_BUCKET = "echo-sync-audio"
 _SYNC_AUDIO_MAX = 25 * 1024 * 1024
 
@@ -259,6 +262,15 @@ class SupabaseLogger:
         """Cloud Sync is on AND there is an account to sync with."""
         return bool(self._enabled and self._sync_enabled
                     and self._history_owner())
+
+    @property
+    def library_active(self) -> bool:
+        """Vocabulary, snippets and learned phrases are backed up to the
+        account whenever someone is signed in. This is NOT part of the opt-in
+        Cloud Sync switch: it is the always-on backup, so a new or reinstalled
+        PC gets the user's words back. History text and recordings stay behind
+        `sync_active`."""
+        return bool(self._enabled and self._history_owner())
 
     def set_user(self, user_id: Optional[str]) -> None:
         """Set the authenticated user ID to include in all log entries."""
@@ -572,8 +584,7 @@ class SupabaseLogger:
         migrations that were never applied to the live project.
         """
         table = self._LIBRARY_TABLES.get(kind)
-        if (not table or not self._enabled or not self._sync_enabled
-                or not entries):
+        if not table or not self.library_active or not entries:
             return
         if not self._user_id or self._user_id == "local":
             return
@@ -609,7 +620,7 @@ class SupabaseLogger:
         which is indistinguishable from "nothing synced yet" and is exactly
         how it should behave."""
         table = self._LIBRARY_TABLES.get(kind)
-        if not table or not self._enabled or not self._sync_enabled:
+        if not table or not self.library_active:
             return []
         if not self._user_id or self._user_id == "local":
             return []
@@ -1134,12 +1145,19 @@ class SupabaseLogger:
     # is missing on the live project must cost the user a partial sync, never
     # a dictation.
 
+    def _state_allowed(self, key: str) -> bool:
+        """Learned phrases back up like vocabulary and snippets. Settings (and
+        anything else in echo_user_state) wait for the Cloud Sync switch."""
+        if key in LIBRARY_STATE_KEYS:
+            return self.library_active
+        return self.sync_active
+
     def fetch_state(self, key: str):
         """(data, ok). data is None when this account has no row yet; ok is
         False when the fetch itself failed (so the caller must not overwrite
         what it cannot see)."""
         owner = self._history_owner()
-        if not self.sync_active:
+        if not self._state_allowed(key):
             return None, False
         try:
             rows = (self._get_client().table(_STATE_TABLE)
@@ -1152,7 +1170,7 @@ class SupabaseLogger:
 
     def push_state(self, key: str, data: dict) -> bool:
         owner = self._history_owner()
-        if not self.sync_active:
+        if not self._state_allowed(key):
             return False
         try:
             self._get_client().table(_STATE_TABLE).upsert(
@@ -1373,13 +1391,18 @@ class SupabaseLogger:
             return {"signed_in": False}
         client = self._get_client()
         for part, table in (("history", _TABLE),
-                            ("vocabulary", "user_vocabulary"),
-                            ("snippets", "user_snippets"),
                             ("settings", _STATE_TABLE)):
             try:
-                client.table(table).delete().eq("user_id", owner).execute()
-                left = (client.table(table).select("user_id")
-                        .eq("user_id", owner).limit(1).execute().data or [])
+                q = client.table(table).delete().eq("user_id", owner)
+                if table == _STATE_TABLE:
+                    # Learned phrases are the always-on library backup.
+                    q = q.neq("key", "phrases")
+                q.execute()
+                lq = (client.table(table).select("user_id")
+                      .eq("user_id", owner))
+                if table == _STATE_TABLE:
+                    lq = lq.neq("key", "phrases")
+                left = lq.limit(1).execute().data or []
                 result[part] = not left
             except Exception as e:
                 # A table that was never created holds nothing to delete.

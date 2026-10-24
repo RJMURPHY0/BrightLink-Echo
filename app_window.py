@@ -9580,7 +9580,7 @@ class AppWindow:
     # ── Cloud Sync ───────────────────────────────────────────────────────────
 
     _CLOUD_SYNC_TITLE = "Cloud Sync"
-    _CLOUD_SYNC_DESC = ("Keeps your history, recordings, words and settings on "
+    _CLOUD_SYNC_DESC = ("Keeps your history, recordings and settings on "
                         "every PC you sign in to.")
 
     def set_cloud_sync(self, cloud_sync) -> None:
@@ -9634,9 +9634,10 @@ class AppWindow:
         self._cloud_confirm = tk.Frame(card, bg=C["surface"])
         msg = tk.Label(
             self._cloud_confirm,
-            text=("Delete everything Echo keeps in your BrightLink account: "
-                  "history, recordings, words, phrases and settings. This PC "
-                  "keeps its own copy. This can't be undone."),
+            text=("Delete the history, recordings and settings Echo keeps in "
+                  "your BrightLink account. Your words, snippets and phrases "
+                  "stay backed up. This PC keeps its own copy. This can't be "
+                  "undone."),
             fg=C["text"], bg=C["surface"], font=("Segoe UI", 8),
             anchor="w", justify="left")
         msg.pack(fill="x")
@@ -9687,8 +9688,8 @@ class AppWindow:
                 else "Sign in to sync with your other PCs.",
                 "busy" if self._signed_in() else "signed_out")
         else:
-            self._apply_cloud_status(
-                "Off. Nothing you dictate leaves this PC.", "off")
+            from cloud_sync import OFF_STATUS
+            self._apply_cloud_status(OFF_STATUS, "off")
             # Turning it off is exactly when someone wants to be asked about
             # what is already up there.
             if self._signed_in():
@@ -10796,6 +10797,211 @@ class AppWindow:
         if cv is not None:
             self._queue_scrollregion_sync(cv)
             self._repaint(cv)
+
+    # ── Post-update celebration popup ───────────────────────────────────────
+
+    def show_update_celebration(self, prev_version: str, new_version: str,
+                                product_name: str) -> None:
+        """Centre-screen confetti + 'Updated to vX' popup. Auto-dismisses.
+
+        Called from _announce_update_if_any on first run after an update.
+        Professional, fast, dismissible — never blocks the user.
+        """
+        if not self._root:
+            return
+        import random
+
+        root = self._root
+        pop = tk.Toplevel(root)
+        pop.overrideredirect(True)
+        pop.attributes("-topmost", True)
+        pop.configure(bg="")
+        pop.attributes("-alpha", 0.0)
+
+        # ── Confetti canvas (full overlay) ──────────────────────────────
+        canvas = tk.Canvas(pop, highlightthickness=0, bg="",
+                           cursor="hand2")
+        canvas.pack(fill="both", expand=True)
+
+        # Particles: {id: {x, y, vx, vy, colour, size, rotation, spin}}
+        particles: dict[int, dict] = {}
+        _COLOURS = ("#f39200", "#4ade80", "#38bdf8", "#f472b6",
+                    "#a78bfa", "#fbbf24", "#fb7185", "#34d399")
+        _GRAVITY = 120.0          # px/s² downward
+        _DRAG = 0.985             # velocity retention per frame
+        _CONFETTI_W, _CONFETTI_H = 360, 220
+        _N_PARTICLES = 60
+        _DISMISS_MS = 4500        # auto-dismiss after this many ms
+        _FADE_MS = 600            # fade-out duration
+
+        def _spawn():
+            """Create the initial particle burst."""
+            cx = _CONFETTI_W / 2
+            cy = _CONFETTI_H * 0.38
+            for i in range(_N_PARTICLES):
+                angle = random.uniform(-3.1, 3.1)  # upward-biased burst
+                speed = random.uniform(80, 320)
+                sz = random.choice((6, 8, 10, 12))
+                rnd = random.choice(_COLOURS)
+                pid = canvas.create_rectangle(
+                    0, 0, sz, sz, fill=rnd, outline="")
+                # Slight x-offset so not all explode from exact centre
+                sx = cx + random.uniform(-30, 30)
+                sy = cy + random.uniform(-10, 10)
+                particles[pid] = {
+                    "x": sx, "y": sy,
+                    "vx": speed * math.cos(angle) * 0.6,
+                    "vy": speed * math.sin(angle) - random.uniform(100, 240),
+                    "colour": rnd,
+                    "size": sz,
+                    "rotation": random.uniform(0, 360),
+                    "spin": random.uniform(-360, 360),
+                }
+
+        import math  # noqa: E402 — lazy so we only import when called
+
+        def _step():
+            """Advance one physics tick."""
+            dt = 1.0 / 30.0  # ~30 fps
+            alive = False
+            for pid, p in list(particles.items()):
+                p["vy"] += _GRAVITY * dt
+                p["vx"] *= _DRAG
+                p["vy"] *= _DRAG
+                p["x"] += p["vx"] * dt
+                p["y"] += p["vy"] * dt
+                p["rotation"] += p["spin"] * dt
+                sz = p["size"]
+                # Keep on-screen with bounce off edges
+                if p["x"] < -sz or p["x"] > _CONFETTI_W + sz:
+                    p["vx"] *= -0.5
+                if p["y"] < -sz * 3:
+                    p["vy"] *= -0.3
+                if p["y"] > _CONFETTI_H + sz:
+                    # Fell off bottom — hide but keep in dict (simple cull)
+                    try:
+                        canvas.coords(pid, -999, -999, -998, -998 + sz)
+                    except tk.TclError:
+                        pass
+                    continue
+                alive = True
+                # Draw as rotated rectangle (simple AABB approximation —
+                # the confetti is small enough that true rotation looks
+                # fine without affine transforms)
+                canvas.coords(pid, p["x"], p["y"],
+                              p["x"] + sz, p["y"] + sz)
+            if alive:
+                pop.after(33, _step)
+
+        # ── Content card (centre of the canvas) ─────────────────────────
+        card_frame = tk.Frame(canvas, bg=C["surface"],
+                               highlightbackground=C["border"],
+                               highlightthickness=1)
+        # Will be placed by <Configure> once geometry is known
+
+        inner_pad = 28
+        content = tk.Frame(card_frame, bg=C["surface"])
+
+        # ✓ icon circle
+        check_size = 44
+        check_canvas = tk.Canvas(content, width=check_size, height=check_size,
+                                 bg=C["surface"], highlightthickness=0)
+        check_canvas.pack(pady=(inner_pad - 4, 10))
+        _cr = check_size // 2 - 1
+        _cx = _cy = check_size // 2
+        check_canvas.create_oval(
+            4, 4, check_size - 4, check_size - 4,
+            fill="#1a3d1e", outline=C["success"], width=2)
+        # Tick mark
+        check_canvas.create_line(
+            _cx - 10, _cy, _cx - 3, _cy + 8,
+            fill=C["success"], width=3, capstyle="round", joinstyle="round")
+        check_canvas.create_line(
+            _cx - 3, _cy + 8, _cx + 12, _cy - 9,
+            fill=C["success"], width=3, capstyle="round", joinstyle="round")
+
+        tk.Label(
+            content, text=f"Updated to v{new_version}",
+            fg=C["text"], bg=C["surface"],
+            font=("Segoe UI Semibold", 15),
+        ).pack()
+        tk.Label(
+            content,
+            text=(f"{product_name} is up to date."
+                  if not prev_version else
+                  f"Previously v{prev_version}. All set."),
+            fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 10),
+        ).pack(pady=(4, 0))
+
+        btn_bar = tk.Frame(content, bg=C["surface"])
+        btn_bar.pack(pady=(18, inner_pad - 6))
+
+        got_it = tk.Label(
+            btn_bar, text="Got it ✨", fg=C["accent"], bg=C["surface"],
+            font=("Segoe UI", 10, "bold"), cursor="hand2",
+        )
+        got_it.pack()
+        content.pack()
+
+        # ── Placement & lifecycle ───────────────────────────────────────
+        screen_w = root.winfo_screenwidth()
+        screen_h = root.winfo_screenheight()
+        x = (screen_w - _CONFETTI_W) // 2
+        y = (screen_h - _CONFETTI_H) // 2
+        pop.geometry(f"{_CONFETTI_W}x{_CONFETTI_H}+{x}+{y}")
+
+        def _place_card(_ev=None):
+            canvas.create_window(
+                _CONFETTI_W // 2, _CONFETTI_H // 2,
+                window=card_frame, anchor="center")
+
+        def _dismiss():
+            """Fade out and destroy."""
+            def _fade(a):
+                try:
+                    a -= 0.08
+                    if a <= 0:
+                        pop.destroy()
+                        return
+                    pop.attributes("-alpha", max(0.0, a))
+                    pop.after(20, _fade, a)
+                except tk.TclError:
+                    pass
+            _fade(1.0)
+
+        def _on_click(_ev):
+            _dismiss()
+
+        # Wire dismiss
+        got_it.bind("<Button-1>", _on_click)
+        pop.bind("<Button-1>", _on_click)
+        canvas.bind("<Button-1>", _on_click)
+
+        # Show (fade in)
+        pop.update_idletasks()
+        _place_card()
+        try:
+            from popup import _apply_popup_corners
+            _apply_popup_corners(pop.winfo_id())
+        except Exception:
+            pass
+
+        def _fadeIn(a):
+            try:
+                a = min(1.0, a + 0.12)
+                pop.attributes("-alpha", a)
+                if a < 1.0:
+                    pop.after(18, _fadeIn, a)
+                else:
+                    # Start confetti once visible
+                    _spawn()
+                    pop.after(200, _step)
+                    pop.after(_DISMISS_MS, _dismiss)
+            except tk.TclError:
+                pass
+
+        _fadeIn(0.0)
 
     # ── Auth callbacks ────────────────────────────────────────────────────────
 
