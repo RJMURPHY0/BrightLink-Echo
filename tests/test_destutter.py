@@ -131,8 +131,7 @@ class PhraseRestartTests(unittest.TestCase):
                   "you know you know", "It's fine, it's fine.", "do it, do it",
                   "one two one two testing", "much much better",
                   "hold on hold on", "For example. For example, if",
-                  "Is it? Is it?", "blah blah blah", "the dot dot dot menu",
-                  "yeah yeah and then"]:
+                  "Is it? Is it?"]:
             self.assertEqual(disfluency.destutter(s), s, s)
 
 
@@ -151,10 +150,53 @@ class NeverTouchTests(unittest.TestCase):
             self.assertEqual(disfluency.destutter(s), s, s)
 
     def test_emphatic_and_grammatical_doubles_survive(self):
+        # Only truly emphatic/grammatical doubles survive. Light fillers
+        # ("so so", "yeah yeah", "like like", "really really") are now
+        # collapsed because in dictation they are almost always stutters.
         for s in ["it was very very important", "no no that is fine",
                   "he had had enough", "I know that that report is late",
-                  "really really good", "so so tired"]:
+                  "much much better"]:
             self.assertEqual(disfluency.destutter(s), s, s)
+
+    def test_light_filler_doubles_are_collapsed(self):
+        """Words people repeat as stutters when dictating, not emphasis."""
+        for src, want in [
+            ("like like this", "like this"),
+            ("yeah yeah I know", "yeah I know"),
+            ("so so good", "so good"),
+            ("really really quick", "really quick"),
+            ("right right let's go", "right let's go"),
+            ("well well basically", "well basically"),
+            ("okay okay done", "okay done"),
+            ("I was like like waiting", "I was like waiting"),
+            ("so yeah, yeah maybe leave it", "so yeah maybe leave it"),
+            ("and and and then", "and then"),
+            ("so so so tired", "so tired"),
+        ]:
+            self.assertEqual(disfluency.destutter(src), want, src)
+
+    def test_triple_repeat_catchall_collapses_any_word(self):
+        """Tier 2: any word repeated 3+ times is collapsed (Apple n-gram approx).
+        Even words NOT in _DUP_COLLAPSE (emphatic doubles) get caught at 3."""
+        for src, want in [
+            # Words that survive as doubles (emphasis) but collapse at triple+
+            ("very very very important", "very important"),
+            ("no no no that is fine", "no that is fine"),
+            ("had had had enough", "had enough"),
+            ("that that that report", "that report"),
+            # Triple+ of already-collapsed words
+            ("the the the file", "the file"),
+            ("I I I think", "I think"),
+            ("and and and and then", "and then"),  # 4x → 1
+            # Real-world dictation stutters from Ryan's speech pattern
+            ("stop stop stop doing that", "stop doing that"),
+            ("look look look at this", "look at this"),
+            ("go go go to the", "go to the"),
+            # Mixed: double (survives) vs triple (collapses)
+            ("very very good", "very very good"),  # double survives
+            ("very very very good", "very good"),   # triple collapses
+        ]:
+            self.assertEqual(disfluency.destutter(src), want, src)
 
     def test_sentence_boundary_is_never_crossed(self):
         self.assertEqual(disfluency.destutter("the cat. Cat food is here."),
