@@ -15,6 +15,14 @@ engine is busy) and reports committed + hypothesis text via on_caption.
 
 One engine lock serialises everything, so the finalize() pass can never race
 a caption tick.
+
+Each chunk is decoded as if it were the whole utterance, so Parakeet ends it
+with a full stop and capitalises the next chunk even when the commit fell on a
+breath mid-sentence ("the point where this is. The most accurate"). The worker
+therefore decodes every join once more WITH audio on both sides of it, in the
+background while the user is still talking, and finalize() takes the
+punctuation at each join from that decode (repair_seam). Stop latency never
+pays for it: a join with no seam decode yet falls back to a word rule.
 """
 
 import threading
@@ -22,6 +30,90 @@ import time
 from typing import Callable, Optional
 
 import numpy as np
+
+import sentence_end
+
+_QUOTES = "\"'“‘”’()[]{}«»"
+_CLOSERS = "\"'”’)]}»"
+_JOIN_MARKS = ".,;:"
+
+
+def _bare(word: str) -> str:
+    return word.strip(".,!?;:…" + _QUOTES).lower()
+
+
+def _seam_pair(prev: str, nxt: str, seam: str) -> Optional[tuple[str, str]]:
+    """The seam decode's own spelling of the last word of `prev` and the first
+    word of `nxt`, found side by side in `seam`. None when the decode does not
+    contain that pair (the two passes heard the join differently)."""
+    pw, nw, sw = prev.split(), nxt.split(), seam.split()
+    if not pw or not nw or len(sw) < 2:
+        return None
+    a, b = _bare(pw[-1]), _bare(nw[0])
+    if not a or not b:
+        return None
+    hits = [i for i in range(len(sw) - 1)
+            if _bare(sw[i]) == a and _bare(sw[i + 1]) == b]
+    if not hits:
+        return None
+    if len(hits) > 1:
+        # Repeated pair: the one whose neighbours also agree, then the one
+        # nearest the middle (the join sits mid-window by construction).
+        def score(i: int) -> tuple:
+            left = len(pw) > 1 and i > 0 and _bare(sw[i - 1]) == _bare(pw[-2])
+            right = (len(nw) > 1 and i + 2 < len(sw)
+                     and _bare(sw[i + 2]) == _bare(nw[1]))
+            return (-(int(left) + int(right)), abs(i - len(sw) / 2))
+        hits.sort(key=score)
+    i = hits[0]
+    return sw[i], sw[i + 1]
+
+
+def repair_seam(prev: str, nxt: str,
+                seam: Optional[str] = None) -> tuple[str, str]:
+    """Settle the punctuation at a chunk join: ("...where this is.", "The
+    most") -> ("...where this is", "the most").
+
+    With a seam decode that holds the join's two words side by side, the join
+    takes that decode's mark after the last word (none, comma, semicolon,
+    colon or full stop) and its casing of the next word: what one decode of
+    the whole clip writes there. A name after the join keeps its capital, an
+    acronym is never lowercased, and "?", "!", an ellipsis, an abbreviation
+    dot or a stop inside a quote or bracket is never touched or added.
+
+    Without a seam decode, only a full stop before a capital is judged: it
+    goes when the last word can't end a sentence ("is", "the") AND the next
+    word is a function word that is safe to lowercase. No word ever changes."""
+    p, n = prev.rstrip(), nxt.lstrip()
+    if not p or not n or p[-1] in _CLOSERS or p[-1] in "!?…":
+        return prev, nxt
+    if p.endswith(".") and not sentence_end.ends_with_full_stop(p):
+        return prev, nxt                         # ellipsis or abbreviation dot
+    first_word = n.split()[0]
+    pair = _seam_pair(p, n, seam) if seam else None
+    if pair is not None:
+        last, first = pair
+        core = last.rstrip(_CLOSERS)
+        if core[-1:] in "!?…":
+            return prev, nxt                     # never add a question here
+        mark = core[-1] if core[-1:] in _JOIN_MARKS else ""
+        if p.endswith(".") and mark not in ("", "."):
+            # A short window hears a real sentence end as a comma ("like a
+            # hairdryer, I moved"): a stop is only ever dropped outright, on
+            # the seam decode hearing no mark at all, never turned into one.
+            return prev, nxt
+        body = p[:-1].rstrip() if p[-1] in _JOIN_MARKS else p
+        if first[:1].islower() and not (first_word.isupper() and len(first_word) > 1):
+            n = n[0].lower() + n[1:]
+        elif first[:1].isupper():
+            n = n[0].upper() + n[1:]
+        return body + mark, n
+    if (n[:1].isupper() and p.endswith(".")
+            and sentence_end.ends_on_hanging_word(p[:-1])
+            and sentence_end.is_hanging_word(first_word)
+            and not first_word.isupper()):
+        return p[:-1].rstrip(), n[0].lower() + n[1:]
+    return prev, nxt
 
 
 class StreamingSession:
@@ -41,6 +133,13 @@ class StreamingSession:
                                # pauses; the text must also agree, see
                                # _assemble_paragraphs)
     PARAGRAPH_RMS = 0.006      # absolute quiet floor for paragraph detection
+    SEAM_LEFT = 5.0            # audio (s) before a commit boundary in its seam
+                               # decode: the model judges "is this sentence
+                               # finished" from what came before the join
+    SEAM_SIDE = 3.0            # audio (s) after the boundary in a full seam
+                               # decode (~0.5s of CPU in all, in the background)
+    SEAM_MIN_RIGHT = 1.5       # first seam decode once this much follows the
+                               # boundary; redone at SEAM_SIDE for more context
 
     def __init__(
         self,
@@ -98,6 +197,12 @@ class StreamingSession:
         self._carry_quiet = 0.0
 
         self._committed_texts: list[str] = []
+        # Seam repair (see module docs): the last SEAM_LEFT seconds of the
+        # newest committed chunk, and per join the seam decode as
+        # (seconds of audio after the boundary, text), keyed by the index of
+        # the entry AFTER the join. Worker-only, except finalize's copy.
+        self._seam_left: Optional[np.ndarray] = None
+        self._seam_texts: dict[int, tuple[float, str]] = {}
         # (word, confidence) for every KEPT pass, in spoken order — committed
         # chunks then the tail, which is exactly the order the final text is
         # assembled in. Caption hypotheses are excluded on purpose: they are
@@ -147,6 +252,13 @@ class StreamingSession:
             return
         uncommitted_secs = len(audio) / rate
 
+        if self._seam_wanted(uncommitted_secs):
+            # Before any commit moves the frontier: the join's decode needs
+            # the audio straight after it.
+            self._decode_seam(audio, rate)
+            if uncommitted_secs < self.COMMIT_AFTER:
+                return
+
         if uncommitted_secs >= self.COMMIT_AFTER:
             boundary = self._find_commit_point(audio, rate, uncommitted_secs)
             if boundary is not None:
@@ -165,6 +277,11 @@ class StreamingSession:
                             self._para_flags.append(brk)
                     if preview:
                         print(f"[Stream] Committed {boundary / rate:.1f}s: {len(preview)} chars")
+                    # A chunk with no words (noise) breaks the chain: the next
+                    # join's left side would be noise, not the words before it.
+                    self._seam_left = (
+                        chunk[-int(self.SEAM_LEFT * rate):].copy()
+                        if preview else None)
                     # Advance even when the chunk transcribed empty (pure noise) so
                     # a noisy environment can't make the window grow unbounded.
                     # Sink write sits inside the same locked commit: a tick that
@@ -491,6 +608,37 @@ class StreamingSession:
             return lo + int(np.argmin(rms)) * win + win // 2
         return None
 
+    def _seam_wanted(self, uncommitted_secs: float) -> bool:
+        """True when the join after the newest committed chunk needs a (better)
+        seam decode. A chunk ending in "?", "!" or an ellipsis needs none:
+        repair_seam never touches those."""
+        if self._seam_left is None or not self._committed_texts:
+            return False
+        if self._committed_texts[-1].rstrip()[-1:] in "!?…":
+            return False
+        have = self._seam_texts.get(len(self._committed_texts))
+        if have is not None and have[0] >= self.SEAM_SIDE - 1e-6:
+            return False
+        if uncommitted_secs >= self.SEAM_SIDE:
+            return True
+        return have is None and uncommitted_secs >= self.SEAM_MIN_RIGHT
+
+    def _decode_seam(self, right: np.ndarray, rate: int) -> None:
+        """Decode the newest committed chunk's end together with the start of
+        `right` (audio from the commit frontier on) and keep the text for
+        finalize. Runs on the worker only, never on the stop path."""
+        key = len(self._committed_texts)
+        right = right[: int(self.SEAM_SIDE * rate)]
+        text = self._engine.transcribe(
+            np.concatenate([self._seam_left, right]), rate,
+            hotwords_str=self._hotwords,
+            finalize_text=False,
+        ).strip()
+        with self._state_lock:
+            if self._finalized or key != len(self._committed_texts):
+                return
+            self._seam_texts[key] = (len(right) / rate, text)
+
     def _context_with_committed(self) -> str:
         tail = " ".join(" ".join(self._committed_texts).split()[-30:])
         return f"{self._context} {tail}".strip()
@@ -520,6 +668,7 @@ class StreamingSession:
             committed_sample = self._committed_sample
             committed_texts = list(self._committed_texts)
             para_flags = list(self._para_flags)
+            seams = {k: t for k, (_r, t) in self._seam_texts.items()}
 
         tail: Optional[np.ndarray] = None
         if audio is not None and len(audio) > 0:
@@ -532,13 +681,14 @@ class StreamingSession:
 
         entries = list(zip(committed_texts, para_flags))
         entries += [(t, b) for t, b in tail_entries if t]
-        full = self._assemble_paragraphs(entries)
+        full = self._assemble_paragraphs(entries, seams)
         if full and hasattr(self._engine, "polish"):
             full = self._engine.polish(full)
         return full, tail, rate
 
     @staticmethod
-    def _assemble_paragraphs(entries: list[tuple[str, bool]]) -> str:
+    def _assemble_paragraphs(entries: list[tuple[str, bool]],
+                             seams: Optional[dict[int, str]] = None) -> str:
         """Join (text, break_before) entries into paragraph text. A paragraph
         break needs BOTH signals to agree: the pause said "break" AND the text
         reads like a boundary (previous part ends a sentence with .!? and the
@@ -549,12 +699,18 @@ class StreamingSession:
         The old behaviour of supplying a period at an unpunctuated break
         produced ",." artefacts and paragraph breaks in the middle of a
         sentence whenever the speaker paused to think. With auto-paragraphs
-        off every flag is False and this reduces to a space-joined string."""
+        off every flag is False and this reduces to a space-joined string.
+
+        `seams` maps an entry's index to the seam decode of the join before it.
+        repair_seam settles the stop at every join first, so a stop it removes
+        can never start a paragraph."""
         paras: list[list[str]] = [[]]
-        for text, brk in entries:
+        for idx, (text, brk) in enumerate(entries):
             if not text:
                 continue
             if paras[-1]:
+                paras[-1][-1], text = repair_seam(
+                    paras[-1][-1], text, (seams or {}).get(idx))
                 prev = paras[-1][-1].rstrip()
                 nxt = text.lstrip()
                 if brk and prev and prev[-1] in ".!?" and nxt[:1].isupper():

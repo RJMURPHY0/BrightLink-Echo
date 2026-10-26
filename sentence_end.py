@@ -120,6 +120,20 @@ def strip_full_stop(text: str) -> str:
     return (bare + closers) if bare else t
 
 
+def is_hanging_word(word: str) -> bool:
+    """True for a function word ("the", "most", "and"): one a sentence almost
+    never ends on, written lowercase unless it opens a sentence."""
+    return (word or "").strip("\"'“‘”’()[]{}«».,!?;:").lower() in _HANGING
+
+
+def ends_on_hanging_word(text: str) -> bool:
+    """True when the last word is a hanging word ("is", "the", "where"):
+    whatever punctuation follows it, the words are still building a
+    sentence."""
+    words = (text or "").split()
+    return bool(words) and is_hanging_word(words[-1])
+
+
 def looks_finished(text: str) -> bool:
     """True when the utterance reads as a complete sentence — see module docs.
 
