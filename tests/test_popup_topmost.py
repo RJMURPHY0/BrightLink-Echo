@@ -448,9 +448,17 @@ class KeyDismissTests(unittest.TestCase):
             "some grace remains: our own injection's synthetic keystrokes are "
             "still landing as the badge is armed")
         p, keys, tick, hidden = self._armed(grace_passed=False)
-        keys[0x0D] = 0x8000
+        keys[0x20] = 0x8000
         tick()
         self.assertEqual([], hidden)
+
+    def test_enter_skips_the_grace_window(self):
+        # The app never sends a bare Enter, so Enter dismisses at once
+        # (Ryan, 2026-10-26).
+        p, keys, tick, hidden = self._armed(grace_passed=False)
+        keys[0x0D] = 0x8000
+        tick()
+        self.assertEqual([True], hidden)
 
     def test_a_held_key_never_dismisses(self):
         # The hotkey's base key is still physically held when the badge

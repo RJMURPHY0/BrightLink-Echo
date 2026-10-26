@@ -260,7 +260,8 @@ class EnterAsTheTextLandsTests(unittest.TestCase):
     already down, or goes down inside the 0.25 s grace window. Both used to be
     ignored and the badge stayed up."""
 
-    def _armed(self, at_stop=(), at_arm=(), snapshot=True, synthetic_enter=False):
+    def _armed(self, at_stop=(), at_arm=(), snapshot=True, synthetic_enter=False,
+               tapped_before_arm=()):
         keys = {}
         clock = [1000.0]
         fake_time = types.SimpleNamespace(time=lambda: clock[0])
@@ -273,7 +274,12 @@ class EnterAsTheTextLandsTests(unittest.TestCase):
 
         p = FloatingPopup.__new__(FloatingPopup)
         p._dismiss_poll = None
-        p._key_state = lambda vk: keys.get(vk, 0)
+        def _state(vk):
+            # Like GetAsyncKeyState: reading clears the "pressed since" bit.
+            v = keys.get(vk, 0)
+            keys[vk] = v & ~0x0001
+            return v
+        p._key_state = _state
         for vk in at_stop:
             keys[vk] = 0x8000
         if snapshot:
@@ -284,6 +290,8 @@ class EnterAsTheTextLandsTests(unittest.TestCase):
             keys[vk] = 0
         for vk in at_arm:
             keys[vk] = 0x8000
+        for vk in tapped_before_arm:
+            keys[vk] = 0x0001
         p._icon_entered = clock[0]
         queued = []
 
@@ -293,6 +301,7 @@ class EnterAsTheTextLandsTests(unittest.TestCase):
         p.root = _Root()
         hidden = []
         p._do_hide = lambda: hidden.append(True)
+        self._popup = p
         FloatingPopup._register_key_dismiss(p)
 
         def tick(dt=0.03):
@@ -301,13 +310,63 @@ class EnterAsTheTextLandsTests(unittest.TestCase):
                 queued.pop(0)()
         return keys, tick, hidden
 
-    def test_enter_already_down_when_the_badge_arms_dismisses_it(self):
+    def test_enter_already_down_when_the_badge_arms_dismisses_at_once(self):
         keys, tick, hidden = self._armed(at_stop=(0x56,), at_arm=(0x0D,))
-        tick()                      # inside the grace window: waits
-        self.assertEqual([], hidden)
-        keys[0x0D] = 0              # released before the grace ended
-        tick(0.3)
+        tick()                      # first poll, still inside the grace window
         self.assertEqual([True], hidden)
+
+    def test_enter_tapped_before_the_badge_appears_dismisses_it(self):
+        # Pressed and released between the stop and the text landing: only the
+        # "pressed since" bit is left.
+        keys, tick, hidden = self._armed(at_stop=(0x56,), tapped_before_arm=(0x0D,))
+        tick()
+        self.assertEqual([True], hidden)
+
+    def test_our_line_break_before_the_badge_appears_never_dismisses(self):
+        keys, tick, hidden = self._armed(at_stop=(0x56,),
+                                         tapped_before_arm=(0x0D, 0x10))
+        tick()
+        tick(0.3)
+        tick()
+        self.assertEqual([], hidden)
+
+    def test_one_poll_enter_tap_inside_the_grace_window_dismisses_at_once(self):
+        keys, tick, hidden = self._armed(at_stop=(0x56,))
+        keys[0x0D] = 0x8000
+        tick(0.03)
+        self.assertEqual([True], hidden)
+
+    def test_enter_tap_between_two_polls_inside_the_grace_dismisses(self):
+        keys, tick, hidden = self._armed(at_stop=(0x56,))
+        keys[0x0D] = 0x0001         # down and up between polls
+        tick(0.03)
+        self.assertEqual([True], hidden)
+
+    def test_ctrl_enter_dismisses_at_once(self):
+        keys, tick, hidden = self._armed(at_stop=(0x56,))
+        keys[0x11] = 0x8000
+        keys[0x0D] = 0x8000
+        tick(0.03)
+        self.assertEqual([True], hidden)
+
+    def test_our_line_break_tapped_before_the_badge_never_dismisses(self):
+        keys, tick, hidden = self._armed(at_stop=(0x56,))
+        keys[0x0D] = 0x0001
+        keys[0x10] = 0x0001         # Shift went down and up with it
+        tick(0.03)
+        tick(0.3)
+        tick()
+        self.assertEqual([], hidden)
+
+    def test_auto_enter_landing_after_the_badge_arms_never_dismisses(self):
+        keys, tick, hidden = self._armed(at_stop=(0x56,))
+        tick(0.03)
+        FloatingPopup.note_synthetic_enter(self._popup)
+        keys[0x0D] = 0x8000
+        tick(0.03)
+        keys[0x0D] = 0
+        tick(0.03)
+        self.assertEqual([], hidden)
 
     def test_the_stop_hotkey_still_held_never_dismisses(self):
         # V of Alt+V still physically down when the badge arms.
@@ -335,33 +394,37 @@ class EnterAsTheTextLandsTests(unittest.TestCase):
         tick()
         self.assertEqual([], hidden)
 
-    def test_enter_pressed_in_the_grace_window_and_held_past_it_dismisses(self):
+    def test_space_pressed_in_the_grace_window_and_held_past_it_dismisses(self):
         keys, tick, hidden = self._armed(at_stop=(0x56,))
         tick(0.1)
-        keys[0x0D] = 0x8000
+        keys[0x20] = 0x8000
         tick(0.05)                  # still in grace
         self.assertEqual([], hidden)
         tick(0.15)                  # grace over, Enter still down
         self.assertEqual([True], hidden)
 
     def test_a_blip_inside_the_grace_window_still_never_dismisses(self):
-        # Our own keystrokes landing as the badge arms are down and up at once.
-        keys, tick, hidden = self._armed(at_stop=(0x56,))
-        keys[0x0D] = 0x8000
-        tick(0.05)
-        keys[0x0D] = 0
-        tick(0.05)
-        tick(0.3)
-        tick()
-        self.assertEqual([], hidden)
+        # Our own keystrokes landing as the badge arms are down and up at once:
+        # the Shift+Enter line break, or a non-Enter key.
+        for blip in ((0x10, 0x0D), (0x56,)):
+            keys, tick, hidden = self._armed(at_stop=(0x56,))
+            for vk in blip:
+                keys[vk] = 0x8000
+            tick(0.05)
+            for vk in blip:
+                keys[vk] = 0
+            tick(0.05)
+            tick(0.3)
+            tick()
+            self.assertEqual([], hidden, blip)
 
-    def test_a_quick_tap_inside_the_grace_window_dismisses(self):
+    def test_a_quick_space_tap_inside_the_grace_window_dismisses(self):
         # A person's tap is seen on two polls; it counts when the grace ends.
         keys, tick, hidden = self._armed(at_stop=(0x56,))
-        keys[0x0D] = 0x8000
+        keys[0x20] = 0x8000
         tick(0.03)
         tick(0.03)
-        keys[0x0D] = 0
+        keys[0x20] = 0
         tick(0.03)
         self.assertEqual([], hidden)
         tick(0.3)

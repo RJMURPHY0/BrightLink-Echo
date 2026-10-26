@@ -2396,24 +2396,47 @@ class FloatingPopup:
         self._dismiss_poll = token
         state = self._key_state
 
+        stop_keys = getattr(self, "_stop_keys", None)
+        self._stop_keys = None          # one dictation, one badge
+        recent_stop = (stop_keys is not None
+                       and time.time() - getattr(self, "_stop_keys_at", 0.0) < 60.0)
+        ours = set(_SYNTHETIC_VKS)
+
+        def _our_enter() -> bool:
+            # Re-read every poll: the auto-Enter can land after the badge arms.
+            return time.time() - getattr(self, "_synthetic_enter_at", 0.0) < 2.0
+
+        if _our_enter():
+            ours.add(0x0D)              # auto-Enter just sent by the app
+
+        # Enter has no grace window: it dismisses the badge the instant it goes
+        # down, however soon after the text lands, and even if it was tapped
+        # before the badge appeared ("press Enter and the popup should go",
+        # Ryan 2026-10-26). Safe because the app never sends a bare Enter:
+        # line breaks are Shift+Enter (Shift down for the whole chord) and the
+        # auto-Enter is flagged by note_synthetic_enter. Ctrl+Enter (send in
+        # Outlook and Teams) counts; Shift+Enter is a new line and waits for
+        # the normal rule.
+        enter_state = state(0x0D)
+        shift_state = state(0x10)
+        enter_now = [bool(
+            recent_stop and 0x0D not in stop_keys and not _our_enter()
+            and not shift_state & 0x8000
+            and (enter_state & 0x8000                       # down right now
+                 or (enter_state & 0x0001                   # tapped since stop
+                     and not shift_state & 0x0001)))]
+
         # Keys already down when the badge appeared. Reading every key here
         # also clears its "pressed since the last call" bit, so a press from
         # before the badge is not mistaken for a tap between two polls.
         held = {vk for vk in _DISMISS_VKS if state(vk) & 0x8000}
         # A held key stays ignored if it was already down when the stop hotkey
         # went (the hotkey itself, still physically held). Any other key down
-        # now went down after the dictation ended: the user pressing Enter the
-        # instant the text landed, which used to leave the badge up (reported
-        # 2026-10-12). Not while Ctrl or Shift is down: our own paste (Ctrl+V)
-        # and typed line break (Shift+Enter) are those chords. Without a recent
-        # stop snapshot every held key stays ignored, as before.
-        stop_keys = getattr(self, "_stop_keys", None)
-        self._stop_keys = None          # one dictation, one badge
-        ours = set(_SYNTHETIC_VKS)
-        if time.time() - getattr(self, "_synthetic_enter_at", 0.0) < 2.0:
-            ours.add(0x0D)              # auto-Enter just sent by the app
-        fresh = [bool(stop_keys is not None
-                      and time.time() - getattr(self, "_stop_keys_at", 0.0) < 60.0
+        # now went down after the dictation ended (reported 2026-10-12). Not
+        # while Ctrl or Shift is down: our own paste (Ctrl+V) and typed line
+        # break (Shift+Enter) are those chords. Without a recent stop snapshot
+        # every held key stays ignored, as before.
+        fresh = [bool(recent_stop
                       and not _chord_modifier_held(state)
                       and held - stop_keys - ours)]
         # A key that goes down inside the grace window is not lost. It counts
@@ -2429,8 +2452,14 @@ class FloatingPopup:
                 return
             in_grace = time.time() - armed_at < KEY_DISMISS_GRACE_SECS
             pressed = False
+            shift = state(0x10)
             for vk in _DISMISS_VKS:
                 s = state(vk)
+                if (vk == 0x0D and not shift & 0x8000 and not _our_enter()
+                        and ((s & 0x8000 and vk not in held)
+                             or (not s & 0x8000 and s & 0x0001
+                                 and not shift & 0x0001))):
+                    enter_now[0] = True     # a new Enter press or tap
                 if not s & 0x8000:
                     held.discard(vk)
                     if grace_down.pop(vk, 0) >= 2 and vk not in ours:
@@ -2450,6 +2479,10 @@ class FloatingPopup:
                     grace_down[vk] = 1
                 else:
                     pressed = True
+            if enter_now[0] and not _windows_key_held():
+                self._unregister_key_dismiss()
+                self._do_hide()
+                return
             if not in_grace:
                 if (grace_tap[0] or fresh[0]
                         or any(vk not in ours for vk in grace_down)):
@@ -2487,6 +2520,9 @@ class FloatingPopup:
         try:
             self._stop_keys = {vk for vk in _DISMISS_VKS
                                if self._key_state(vk) & 0x8000}
+            # Clears Shift's "pressed since" bit, so the badge can tell our
+            # Shift+Enter line break from a bare Enter tapped before it arms.
+            self._key_state(0x10)
             self._stop_keys_at = time.time()
         except Exception as e:
             self._stop_keys = None
