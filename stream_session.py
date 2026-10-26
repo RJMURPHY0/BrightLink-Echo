@@ -140,6 +140,13 @@ class StreamingSession:
                                # decode (~0.5s of CPU in all, in the background)
     SEAM_MIN_RIGHT = 1.5       # first seam decode once this much follows the
                                # boundary; redone at SEAM_SIDE for more context
+    FINAL_PAD = 0.4            # silence (s) after the tail in the final decode.
+                               # The transducer drops a last word whose audio
+                               # ends abruptly; measured on 60 known-truth
+                               # clips cut 60ms early, 0.4s brought the last
+                               # word back in every one (57/60 without) for
+                               # ~10ms of decode. Never reaches the returned
+                               # tail audio (history clip, near-silence gate).
 
     def __init__(
         self,
@@ -677,7 +684,9 @@ class StreamingSession:
 
         tail_entries: list[tuple[str, bool]] = []
         if tail is not None and len(tail) >= rate * 0.25:
-            tail_entries = self._transcribe_paragraph_parts(tail, rate)
+            padded = np.concatenate(
+                [tail, np.zeros(int(self.FINAL_PAD * rate), dtype=tail.dtype)])
+            tail_entries = self._transcribe_paragraph_parts(padded, rate)
 
         entries = list(zip(committed_texts, para_flags))
         entries += [(t, b) for t, b in tail_entries if t]

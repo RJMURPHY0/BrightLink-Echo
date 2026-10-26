@@ -80,6 +80,39 @@ _SEED_RUN_MAX = 0.45          # the run of speech still going when the key was
                               # one turned "Host all recent changes" into
                               # "Post all recent changes".
 
+# Release tail: the mirror image of the seed. People let go of the key on the
+# last syllable, not after it, and the driver still holds the audio from just
+# before the release. Cutting at the release lost the end of the last word:
+# measured on Ryan's stored dictations, clips like "Should be fine now." and
+# "carry on with this." ended with speech still at full level in their final
+# 50ms. stop() now keeps taking audio until the sound around the release has
+# gone quiet for _TAIL_QUIET_SECONDS, capped at _TAIL_MAX_SECONDS after the
+# release. When the user had already stopped talking (the common case) the
+# audio around the release is quiet and nothing is waited for; only a word
+# still being spoken at the release costs a short wait, and only for as long
+# as it is still being spoken.
+#
+# "Speaking" here means above the room floor AND at least _TAIL_REL_LEVEL of
+# this dictation's own speech level: measured on the laptop mic, a TV or voices
+# across the room clear the floor test alone, which held every stop to the cap.
+# Sound after the release only extends the wait when the user was speaking in
+# the _TAIL_LEAD_SECONDS before it, so background noise after a finished
+# sentence never delays the text.
+_TAIL_QUIET_SECONDS = 0.12    # trailing quiet that ends the tail. Above the
+                              # ~50-100ms closures inside connected speech.
+_TAIL_MAX_SECONDS = 0.30      # never wait past this long after the release
+_TAIL_LEAD_SECONDS = 0.15     # speech this close before the release = mid-word
+_TAIL_REL_LEVEL = 0.25        # share of the dictation's speech level (90th
+                              # percentile block level) that still counts as
+                              # the user's voice. Only the body of a word needs
+                              # waiting for: its fading last ~60ms is restored
+                              # by the final decode's silence pad
+                              # (StreamingSession.FINAL_PAD), so background
+                              # talk or music up to a quarter of the voice
+                              # level never holds the stop.
+_TAIL_STALL_SECONDS = 0.25    # no callback for this long: stop waiting (MME
+                              # can deliver blocks in bursts, so not one block)
+
 # A healthy input stream delivers a callback every blocksize/rate seconds
 # (~21-64ms). If none arrived for this long the stream is considered dead —
 # WASAPI/MME streams silently stop calling back after a device removal,
@@ -254,6 +287,12 @@ class Recorder:
         # clearly cleared the adaptive noise floor — i.e. actual speech, not
         # pauses or room noise. Powers the real words-per-minute stat.
         self._voiced_samples: int = 0
+        # Release tail (see _TAIL_*): (capture_end, seconds, rms, voiced) per
+        # block of this recording, newest last, and the key-up time stop()
+        # honours.
+        self._tail_marks: deque = deque(maxlen=128)
+        self._release_ts: float = 0.0
+        self.last_tail_ms: int = 0
         self._noise_floor: float = 0.0015
         self._monitor_rms: float = 0.0
         self._monitor_peak: float = 0.0
@@ -408,7 +447,7 @@ class Recorder:
             return chunks
 
     def _audio_callback(
-        self, indata: np.ndarray, _frames: int, _time_info, status
+        self, indata: np.ndarray, _frames: int, time_info, status
     ) -> None:
         """Called by sounddevice for each audio chunk (recording OR warm-idle)."""
         if status:
@@ -419,6 +458,20 @@ class Recorder:
         data = indata.copy()
         n = data.shape[0]
         now = time.monotonic()
+        # When this block's last sample was captured, on the monotonic clock.
+        # PortAudio's ADC time says how long the block sat in the driver; a
+        # host API that does not report it (zero) leaves the arrival time.
+        block_s = n / max(1, self.active_sample_rate)
+        lag = 0.0
+        try:
+            adc = float(time_info.inputBufferAdcTime)
+            cur = float(time_info.currentTime)
+            if adc > 0.0 and cur > 0.0:
+                lag = cur - (adc + block_s)
+                if not 0.0 <= lag <= 1.0:
+                    lag = 0.0
+        except Exception:
+            lag = 0.0
         with self._lock:
             self._last_callback_ts = now
             self._last_rms = rms
@@ -454,8 +507,10 @@ class Recorder:
             if self._recording:
                 self._chunks.append(data)
                 self._chunks_samples += n
-                if rms > max(0.0025, self._noise_floor * 2.5):
+                voiced = rms > max(0.0025, self._noise_floor * 2.5)
+                if voiced:
                     self._voiced_samples += n
+                self._tail_marks.append((now - lag, block_s, rms, voiced))
             elif self._warm_enabled:
                 self._preroll.append(data)
                 self._preroll_samples += n
@@ -754,6 +809,8 @@ class Recorder:
             # dictation must never switch mics under a new one.
             self._probe_done = False
             self._mic_advice = None
+            self._tail_marks.clear()
+            self._release_ts = 0.0
             self._recording_started_ts = time.monotonic()
             self._last_record_activity_ts = self._recording_started_ts
 
@@ -969,13 +1026,84 @@ class Recorder:
                 self._chunks_samples -= n
                 self._chunks.pop(0)
 
+    def mark_release(self, ts: Optional[float] = None) -> None:
+        """Record when the user let go of the key (time.monotonic()), so the
+        stop() that follows keeps the end of a word still being spoken at the
+        release. Without it stop() cuts at the moment it is called."""
+        with self._lock:
+            if self._recording:
+                self._release_ts = time.monotonic() if ts is None else float(ts)
+
+    @staticmethod
+    def _speech_level(marks) -> float:
+        """This dictation's speech level: 90th percentile block level."""
+        levels = [m[2] for m in marks]
+        return float(np.percentile(levels, 90)) if levels else 0.0
+
+    @staticmethod
+    def _tail_settled(marks, release_ts: float, level: float = 0.0) -> bool:
+        """True when the user was not speaking in the audio delivered just
+        before the release (settled at once: waiting for the next block would
+        cost up to a block, 64ms at 16 kHz, on every stop), or once audio past
+        the release has arrived and the newest of it has been quiet for
+        _TAIL_QUIET_SECONDS. Sound after a finished sentence never waits."""
+        lead = [m for m in marks if m[0] >= release_ts - _TAIL_LEAD_SECONDS]
+        if not lead:
+            return False  # nothing delivered near the release yet
+        floor = _TAIL_REL_LEVEL * level
+
+        def speaking(m):
+            return m[3] and m[2] >= floor
+
+        if not any(speaking(m) for m in lead if m[0] <= release_ts):
+            return True
+        if marks[-1][0] < release_ts:
+            return False  # mid-word: the release itself has not arrived yet
+        quiet = 0.0
+        for m in reversed(marks):
+            if speaking(m):
+                return False
+            quiet += m[1]
+            if quiet >= _TAIL_QUIET_SECONDS - 1e-9:
+                return True
+        return False
+
+    def _await_release_tail(self) -> None:
+        """Keep recording until the release tail has settled (see _TAIL_*).
+        Waits only while a word is still being spoken, never past
+        _TAIL_MAX_SECONDS after the release, and not at all on a stream that
+        has stopped calling back."""
+        self.last_tail_ms = 0
+        with self._lock:
+            release = self._release_ts
+            self._release_ts = 0.0
+            if release <= 0.0 or not self._recording:
+                return
+        started = time.monotonic()
+        deadline = release + _TAIL_MAX_SECONDS
+        with self._lock:
+            level = self._speech_level(
+                [m for m in self._tail_marks if m[0] <= release])
+        while True:
+            with self._lock:
+                settled = self._tail_settled(self._tail_marks, release, level)
+                heartbeat = self._last_callback_ts
+            now = time.monotonic()
+            if (settled or now >= deadline
+                    or now - heartbeat > _TAIL_STALL_SECONDS):
+                break
+            time.sleep(0.005)
+        self.last_tail_ms = int((time.monotonic() - started) * 1000)
+
     def stop(self) -> Optional[np.ndarray]:
         """
         Stop recording and return the captured audio as a 1D float32 numpy array
         (only audio since the last drop_audio_before call). Returns None if no
         audio was captured. In warm mode the stream stays open for the next
-        recording; in cold mode it is closed.
+        recording; in cold mode it is closed. After mark_release() it first
+        takes the end of a word still being spoken at the release.
         """
+        self._await_release_tail()
         with self._lock:
             if not self._recording:
                 print("[Recorder] Not currently recording.")
@@ -1019,7 +1147,8 @@ class Recorder:
             self._chunks_offset = 0
 
         duration = len(audio) / max(self.active_sample_rate, 1)
-        print(f"[Recorder] Captured {duration:.1f}s of audio.")
+        print(f"[Recorder] Captured {duration:.1f}s of audio "
+              f"(release tail {self.last_tail_ms}ms).")
         return audio
 
     # ------------------------------------------------------------------

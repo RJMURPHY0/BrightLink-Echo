@@ -2118,6 +2118,9 @@ class WhisperFlowApp:
             self.hotkey_manager.set_idle()
 
     def _on_stop_recording(self) -> None:
+        # The key-up moment, before any stop-path work: the recorder keeps the
+        # end of a word still being spoken at the release (Recorder.mark_release).
+        release_ts = time.monotonic()
         self._last_dictation_ts = time.time()
         # Which keys the stop press is holding, so the badge that follows can
         # tell them from a key pressed after the text lands (Enter). Here, not
@@ -2166,6 +2169,10 @@ class WhisperFlowApp:
                     if self.recorder.is_recording:
                         break
                     time.sleep(0.02)
+            try:
+                self.recorder.mark_release(release_ts)
+            except Exception as e:
+                print(f"[App] release tail mark failed: {e}")
 
             total_samples = self.recorder.total_recorded_samples
             self.feedback.recording_stopped()
