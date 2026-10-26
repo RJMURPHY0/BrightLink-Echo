@@ -25,6 +25,8 @@ Enabled via Config.spoken_punctuation (default on).
 
 import re
 
+from tech_terms import apply_tech_terms
+
 _S = r"[ \t]*"  # horizontal space only — never swallow newlines
 
 # ── Spoken addresses: emails, domains, filenames ─────────────────────────────
@@ -302,6 +304,7 @@ def apply_spoken_commands(text: str) -> str:
     out = _PERCENT_WORDS.sub(_sub_percent_words, out)
     out = _PERCENT_DIGITS.sub(r"\1%", out)
     out = _CURRENCY_WORDS.sub(_sub_currency_words, out)
+    out = apply_tech_terms(out)
     if out != text:
         out = re.sub(r" {2,}", " ", out)
         out = re.sub(r" +([.,!?;:])", r"\1", out)
