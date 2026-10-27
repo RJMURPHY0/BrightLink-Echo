@@ -396,6 +396,20 @@ class LoginWindow:
         self._status_lbl.pack(fill="x")
         # Don't pack _status_frame yet — only shown when there's a message
 
+        # Sign-in progress — packed above the button only while a request
+        # runs. One request has nothing to measure, so no percentage: the bar
+        # eases toward 90% and fills when the answer arrives.
+        from progress_bar import ProgressBar, StepProgress
+        self._progress_frame = tk.Frame(self._card, bg=C["surface"])
+        self._progress_lbl = tk.Label(
+            self._progress_frame, text="", fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 9), anchor="w")
+        self._progress_lbl.pack(fill="x", pady=(0, 4))
+        self._progress_bar = ProgressBar(self._progress_frame, fill=C["accent"],
+                                         track=C["divider"], bg=C["surface"], height=4)
+        self._progress_bar.pack(fill="x")
+        self._progress = StepProgress(self._progress_bar, 1)
+
         # Submit button (rounded)
         self._submit_btn = _RoundedButton(
             self._card, "Sign In", self._submit,
@@ -729,7 +743,10 @@ class LoginWindow:
                 return
 
         self._submitting = True
-        self._set_status("Please wait…", error=False)
+        self._status_var.set("")
+        self._status_frame.pack_forget()
+        self._show_progress("Checking your details…" if self._mode == "login"
+                            else "Creating your account…")
         self._submit_btn.set(bg=C["divider"], hover=C["divider"], cursor="")
 
         def _run():
@@ -750,6 +767,9 @@ class LoginWindow:
 
         if ok and self._auth.is_authenticated:
             self._pending_confirm_email = None
+            if self._progress_frame.winfo_manager():
+                self._progress.finish()
+                self._progress_lbl.configure(text="Signed in")
             name = self._auth.user_email or "you"
             self._submit_btn.set(
                 text=f"✓  Welcome back, {name}!",
@@ -758,6 +778,7 @@ class LoginWindow:
             self._root.after(1200, self._finish)
             return
 
+        self._hide_progress()
         self._submit_btn.set(bg=C["accent"], hover=C["accent_hover"], cursor="hand2")
 
         if ok and self._mode == "signup":
@@ -916,12 +937,30 @@ class LoginWindow:
         if not self._embedded:
             self._root.destroy()
         self._on_success(self._auth)
+        if self._embedded:
+            # The form is reused after a sign-out, so it must come back clean.
+            # No _sync_height here: the dashboard owns the window now.
+            self._progress.stop()
+            self._progress_frame.pack_forget()
+            self._last_h = None
 
     def _handle_close(self) -> None:
         if not self._embedded:
             self._root.destroy()
         if self._on_cancel:
             self._on_cancel()
+
+    def _show_progress(self, text: str) -> None:
+        self._progress_lbl.configure(text=text)
+        self._progress_frame.pack(fill="x", pady=(0, 12), before=self._submit_btn)
+        self._progress.start()
+        self._sync_height()
+
+    def _hide_progress(self) -> None:
+        self._progress.stop()
+        if self._progress_frame.winfo_manager():
+            self._progress_frame.pack_forget()
+            self._sync_height()
 
     def _set_status(self, msg: str, error: bool = True) -> None:
         self._status_var.set(msg)

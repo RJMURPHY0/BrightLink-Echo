@@ -289,6 +289,118 @@ def check_for_update(current_version: str, callback: Callable[[str, str], None])
     threading.Thread(target=_worker, daemon=True, name="update-check").start()
 
 
+# ── Live progress (the Updates card's bar) ───────────────────────────────────
+# One state for the one run per process: Update Now usually JOINS the run the
+# automatic updater already started, so a per-caller callback would never
+# fire for it. The UI polls update_progress() from the Tk thread.
+# phase: "download" | "verify" | "prepare" | "ready" | "install" | ""
+_PROGRESS_LOCK = threading.Lock()
+_progress = {"phase": "", "version": "", "done": 0, "total": 0, "started": 0.0}
+_rate_samples: list = []           # (monotonic seconds, bytes done)
+_RATE_WINDOW_SECS = 3.0
+_ETA_MIN_SECS = 1.0                # no "seconds left" before this much data...
+_ETA_MIN_FRACTION = 0.02           # ...and this share of the file
+_STAGE_POLL_SECS = 1.0
+
+
+def _set_progress(phase: str, version: str = None, total: int = 0) -> None:
+    with _PROGRESS_LOCK:
+        _progress.update(phase=phase, done=0, total=max(0, int(total or 0)),
+                         started=time.monotonic())
+        if version is not None:
+            _progress["version"] = version.lstrip("vV")
+        _rate_samples.clear()
+
+
+def _progress_bytes(done: int, total: int = 0) -> None:
+    now = time.monotonic()
+    with _PROGRESS_LOCK:
+        _progress["done"] = int(done)
+        if total:
+            _progress["total"] = int(total)
+        _rate_samples.append((now, int(done)))
+        while _rate_samples and now - _rate_samples[0][0] > _RATE_WINDOW_SECS:
+            _rate_samples.pop(0)
+
+
+def update_progress() -> dict:
+    """What the update in flight is doing, for display. "fraction" is None
+    when the size is unknown, "seconds_left" is None until enough of the
+    download has been timed to measure its speed (download phase only)."""
+    with _PROGRESS_LOCK:
+        p = dict(_progress)
+        samples = list(_rate_samples)
+    p["running"] = _run_active
+    total, done = p["total"], p["done"]
+    p["fraction"] = min(1.0, done / total) if total else None
+    # Speed over the last window up to NOW, not up to the last chunk: a
+    # stalled download then slows the estimate, and one with no bytes for a
+    # whole window has no measured speed (and so no "seconds left").
+    now = time.monotonic()
+    samples = [s for s in samples if now - s[0] <= _RATE_WINDOW_SECS]
+    rate = 0.0
+    if len(samples) >= 2 and now > samples[0][0]:
+        rate = (samples[-1][1] - samples[0][1]) / (now - samples[0][0])
+    p["bytes_per_sec"] = rate
+    p["seconds_left"] = None
+    if (p["phase"] == "download" and total and rate > 0
+            and now - p["started"] >= _ETA_MIN_SECS
+            and done / total >= _ETA_MIN_FRACTION):
+        p["seconds_left"] = max(0.0, (total - done) / rate)
+    return p
+
+
+def _layout_bytes(manifest: dict) -> int:
+    """Bytes a whole installed layout holds, from its manifest."""
+    try:
+        return int(manifest["exe"].get("size") or 0) + sum(
+            int(f.get("size") or 0) for f in manifest["files"])
+    except Exception:
+        return 0
+
+
+def _tree_bytes(path: str) -> int:
+    total = 0
+    stack = [path]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as it:
+                for e in it:
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(e.path)
+                        else:
+                            total += e.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total
+
+
+def _running_layout_bytes() -> int:
+    """Size of the running version's installed layout: the closest known
+    measure of what staging the next version writes. 0 when unknown (source
+    run, or the onefile bridge, which has no manifest)."""
+    exe = current_exe_path()
+    if not exe:
+        return 0
+    name = install_layout.exe_contents_dir(exe)
+    if not name:
+        return 0
+    return _layout_bytes(install_layout.load_manifest(os.path.join(
+        os.path.dirname(exe), name, install_layout.MANIFEST_NAME)))
+
+
+def _watch_staging(pending: str, total: int, stop: threading.Event) -> None:
+    """Report how much of pending-<version>\\ the silent installer has written.
+    Capped below 100%: *total* is the running version's size, an estimate of
+    the new one's, so only stage_installer returning means done."""
+    cap = int(total * 0.99)
+    while not stop.wait(_STAGE_POLL_SECS):
+        _progress_bytes(min(cap, _tree_bytes(pending)), total)
+
+
 def download_update(
     url: str,
     dest_path: str,
@@ -835,6 +947,9 @@ def run_auto_update(
                                      on_status, apply_fn, poll_interval,
                                      idle_samples, on_event)
     finally:
+        # A real install exits the process before this; reaching it means the
+        # run is over, so the bar must not stay up.
+        _set_progress("")
         with _RUN_LOCK:
             _run_active = False
             _apply_now.clear()
@@ -918,8 +1033,12 @@ def _run_installer_update(version, is_idle, on_status, poll_interval, idle_sampl
             time.sleep(backoff)
         try:
             on_status(f"Downloading update v{v}…")
-            download_update(setup["url"], dest, lambda *_: None,
-                            expected_bytes=int(setup.get("size") or 0))
+            size = int(setup.get("size") or 0)
+            _set_progress("download", v, size)
+            download_update(setup["url"], dest,
+                            lambda d, t: _progress_bytes(d, t or size),
+                            expected_bytes=size)
+            _set_progress("verify")
             verify_installer(dest, int(setup.get("size") or 0), setup.get("sha256", ""),
                              signer=signer or authenticode_signer)
             last_exc = None
@@ -929,6 +1048,7 @@ def _run_installer_update(version, is_idle, on_status, poll_interval, idle_sampl
             print(f"[Updater] Installer download attempt {attempt} failed: {exc}")
     if last_exc is not None:
         on_status("")
+        _set_progress("")
         _emit(on_event, "download_fail", False, f"installer: {last_exc}"[:300])
         install_layout.log(f"Installer for {v} refused: {last_exc}", root)
         try:
@@ -939,14 +1059,23 @@ def _run_installer_update(version, is_idle, on_status, poll_interval, idle_sampl
     _emit(on_event, "download_ok", True, f"installer {os.path.getsize(dest)} bytes")
 
     on_status(f"Preparing update v{v}…")
+    stage_total = _running_layout_bytes()
+    _set_progress("prepare", total=stage_total)
+    stop_watch = threading.Event()
+    if stage_total:
+        threading.Thread(target=_watch_staging, daemon=True, name="update-stage-progress",
+                         args=(os.path.join(root, install_layout.pending_dir_name(v)),
+                               stage_total, stop_watch)).start()
     try:
         (stage_fn or stage_installer)(dest, v, root=root)
     except Exception as exc:
         on_status("")
+        _set_progress("")
         _emit(on_event, "stage_fail", False, str(exc)[:300])
         install_layout.log(f"Staging {v} failed: {exc}", root)
         return False
     finally:
+        stop_watch.set()
         try:
             os.remove(dest)
         except OSError:
@@ -954,6 +1083,7 @@ def _run_installer_update(version, is_idle, on_status, poll_interval, idle_sampl
     _emit(on_event, "stage_ok", True, f"v{v}")
     install_layout.log(f"Staged {v}; waiting for idle.", root)
 
+    _set_progress("ready")
     on_status("Update ready — installing when idle…")
     consecutive = 0
     while consecutive < idle_samples and not _apply_now.is_set():
@@ -967,10 +1097,12 @@ def _run_installer_update(version, is_idle, on_status, poll_interval, idle_sampl
             raise IOError("the staged exe changed before install")
     except Exception as exc:
         on_status("")
+        _set_progress("")
         _emit(on_event, "stage_fail", False, f"pre-install check: {exc}"[:300])
         install_layout.log(f"Not installing {v}: {exc}", root)
         return False
 
+    _set_progress("install")
     on_status(f"Installing v{v} — restarting…")
     _emit(on_event, "swap_started", True, f"v{v} installer")
     install_layout.log(f"Handing over to activate.ps1 for {v}.", root)
@@ -1007,7 +1139,11 @@ def _run_auto_update_once(version, url, current_exe, is_idle, on_status,
             time.sleep(backoff)
         try:
             on_status(f"Downloading update v{version.lstrip('v')}…")
-            download_update(url, dest, lambda *_: None, expected_bytes=expected)
+            _set_progress("download", version, expected)
+            download_update(url, dest,
+                            lambda d, t: _progress_bytes(d, t or expected),
+                            expected_bytes=expected)
+            _set_progress("verify")
             verify_exe(dest, expected_bytes=expected)
             digest = file_sha256(dest)
             if want_sha and digest != want_sha:
@@ -1020,6 +1156,7 @@ def _run_auto_update_once(version, url, current_exe, is_idle, on_status,
             print(f"[Updater] Download attempt {attempt} failed: {exc}")
     if last_exc is not None:
         on_status("")  # clear status — next 6-hour check retries from scratch
+        _set_progress("")
         _emit(on_event, "download_fail", False, str(last_exc)[:300])
         try:
             os.remove(dest)
@@ -1028,6 +1165,7 @@ def _run_auto_update_once(version, url, current_exe, is_idle, on_status,
         return False
 
     _emit(on_event, "download_ok", True, f"{os.path.getsize(dest)} bytes")
+    _set_progress("ready")
     on_status("Update downloaded — installing when idle…")
     consecutive = 0
     while consecutive < idle_samples and not _apply_now.is_set():
@@ -1043,6 +1181,7 @@ def _run_auto_update_once(version, url, current_exe, is_idle, on_status,
     except Exception as exc:
         print(f"[Updater] Not installing: {exc}")
         on_status("")
+        _set_progress("")
         _emit(on_event, "download_fail", False, f"pre-install check: {exc}"[:300])
         try:
             os.remove(dest)
@@ -1050,6 +1189,7 @@ def _run_auto_update_once(version, url, current_exe, is_idle, on_status,
             pass
         return False
 
+    _set_progress("install")
     on_status(f"Installing v{version.lstrip('v')} — restarting…")
     _emit(on_event, "swap_started", True, f"v{version.lstrip('v')}")
     (apply_fn or apply_update)(dest, current_exe, sha256=digest)

@@ -3771,6 +3771,17 @@ class AppWindow:
             font=("Segoe UI", 12))
         self._signing_in_lbl.pack()
 
+        # One restore request, nothing to measure: the bar eases toward 90%
+        # while it runs and the dashboard replaces it when it lands.
+        from progress_bar import ProgressBar, StepProgress
+        bar_box = tk.Frame(inner, bg=C["bg"], width=200, height=4)
+        bar_box.pack(pady=(14, 0))
+        bar_box.pack_propagate(False)
+        bar = ProgressBar(bar_box, fill=C["accent"], track=C["border"],
+                          bg=C["bg"], height=4)
+        bar.pack(fill="both", expand=True)
+        self._signing_in_progress = StepProgress(bar, 1)
+
         # Escape hatch — packed by _show_signin_escape a few seconds in, so a
         # genuinely stuck restore never traps the user, while a slow-but-fine
         # one is left alone to land.
@@ -3801,6 +3812,9 @@ class AppWindow:
             self._signing_in_frame.pack(fill="both", expand=True)
             self._resize(WINDOW_W, 560)
         self._atomic_ui(_swap)
+        prog = getattr(self, "_signing_in_progress", None)
+        if prog is not None:
+            prog.start()
         self._animate_signing_in()
 
     def _animate_signing_in(self) -> None:
@@ -3828,6 +3842,9 @@ class AppWindow:
                 except Exception:
                     pass
                 setattr(self, attr, None)
+        prog = getattr(self, "_signing_in_progress", None)
+        if prog is not None:
+            prog.stop()
 
     def _reveal_login_if_pending(self) -> None:
         """Grace window elapsed without a restored session yet.
@@ -8813,6 +8830,21 @@ class AppWindow:
         # Packed on demand by show_update_banner; holds the Update Now button.
         self._ver_update_row = tk.Frame(ver_card, bg=C["surface"])
 
+        # Packed by _poll_update_progress while an update runs: the measured
+        # bar and one line under it (updater.update_progress).
+        from progress_bar import ProgressBar
+        self._update_progress_row = tk.Frame(ver_card, bg=C["surface"])
+        self._update_bar = ProgressBar(self._update_progress_row, fill=C["accent"],
+                                       track=C["border"], bg=C["surface"])
+        self._update_bar.pack(fill="x")
+        self._update_progress_lbl = tk.Label(
+            self._update_progress_row, text="", fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 9), anchor="w", justify="left")
+        self._update_progress_lbl.pack(fill="x", pady=(4, 0))
+        # The full download line is wider than the card at 150% scaling.
+        self._autowrap(self._update_progress_lbl)
+        self._update_progress_shown = False
+
         _toggle_card("start_with_windows", "Start with Windows",
                      "Opens the app when you sign in to Windows.",
                      True, icon="zap")
@@ -10645,7 +10677,68 @@ class AppWindow:
                     lbl.configure(text=text, fg=C["accent"])
                 except tk.TclError:
                     pass
+            if text:
+                self._start_update_progress()
         self._ui_after(0, _apply)
+
+    # How long the poller waits for a just-clicked update's thread to start
+    # before an idle updater means "nothing is running".
+    _UPDATE_PROGRESS_GRACE_S = 3.0
+
+    def _start_update_progress(self) -> None:
+        """Show the update in flight in the Updates card (Tk thread only).
+        Reads the one shared state, so a manual Update Now that joined the
+        automatic run shows the same bar."""
+        self._update_progress_since = time.monotonic()
+        job = getattr(self, "_update_progress_job", None)
+        if job is not None:
+            # A slow idle poll may be queued: poll now so the bar shows at once.
+            try:
+                self._root.after_cancel(job)
+            except (tk.TclError, RuntimeError):
+                pass
+        self._poll_update_progress()
+
+    def _poll_update_progress(self) -> None:
+        self._update_progress_job = None
+        row = getattr(self, "_update_progress_row", None)
+        if row is None or not self._root:
+            return
+        from updater import update_progress
+        from progress_bar import describe_update
+        p = update_progress()
+        shown = describe_update(p)
+        try:
+            if shown is None:
+                if self._update_progress_shown:
+                    row.pack_forget()
+                    self._update_progress_shown = False
+                    self._sync_settings_scroll()
+            else:
+                frac, text = shown
+                self._update_bar.set(frac)
+                self._update_progress_lbl.configure(text=text)
+                if not self._update_progress_shown:
+                    row.pack(fill="x", pady=(8, 0))
+                    self._update_progress_shown = True
+                    self._sync_settings_scroll()
+        except tk.TclError:
+            return
+        waiting = (time.monotonic() - getattr(self, "_update_progress_since", 0.0)
+                   < self._UPDATE_PROGRESS_GRACE_S)
+        if not (p.get("running") or p.get("phase") or waiting):
+            return
+        try:
+            self._update_progress_job = self._root.after(
+                250 if shown else 1000, self._poll_update_progress)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def _sync_settings_scroll(self) -> None:
+        cv = getattr(self, "_settings_cv", None)
+        if cv is not None:
+            self._queue_scrollregion_sync(cv)
+            self._repaint(cv)
 
     def show_update_banner(self, version: str, download_url: str,
                            auto: bool = False) -> None:
@@ -10666,9 +10759,10 @@ class AppWindow:
 
         def _set_downloading():
             self._update_in_flight = True
+            self._start_update_progress()
             for btn in _btns:
                 try:
-                    btn.configure(text="Downloading…", bg=C["subtext"], cursor="")
+                    btn.configure(text="Updating…", bg=C["subtext"], cursor="")
                     btn.unbind("<Button-1>")
                     btn.unbind("<Enter>")
                     btn.unbind("<Leave>")
@@ -10707,10 +10801,9 @@ class AppWindow:
             self._root.after(0, _set_downloading)
 
             def _status(msg):
-                self._ui_after(0, lambda m=msg: [
-                    b.configure(text=(m or "Downloading…"))
-                    for b in _btns if b.winfo_exists()
-                ])
+                # The bar under the version line carries the detail; the
+                # button only says an update is under way.
+                self._ui_after(0, self._start_update_progress)
 
             def _log_event(stage, ok, detail):
                 if self._db:
@@ -10793,10 +10886,7 @@ class AppWindow:
         # The button row just grew the settings page. Re-measure the scroll
         # range once layout settles or the page bottom stays cut off by
         # exactly the row's height.
-        cv = getattr(self, "_settings_cv", None)
-        if cv is not None:
-            self._queue_scrollregion_sync(cv)
-            self._repaint(cv)
+        self._sync_settings_scroll()
 
     # ── Post-update celebration popup ───────────────────────────────────────
 

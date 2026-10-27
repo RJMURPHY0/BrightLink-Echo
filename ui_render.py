@@ -111,6 +111,27 @@ def round_rect(master, w: int, h: int, r: int, fill: str,
     return _photo(key, master, _draw, w, h)
 
 
+def progress_bar(master, w: int, h: int, fraction: float, fill: str,
+                 track: str, bg: str = "#0d0d0d"):
+    """Rounded track with a rounded fill of *fraction* (0..1). The fraction is
+    quantised to 0.5% so a running bar caches at most 201 images per size."""
+    if w <= 0 or h <= 0:
+        return None
+    q = round(max(0.0, min(1.0, float(fraction or 0.0))) * 200)
+    key = ("pb", w, h, q, fill, track, bg)
+
+    def _draw(d, s):
+        r = (h * s) // 2
+        d.rounded_rectangle([0, 0, w * s - 1, h * s - 1], radius=r, fill=track)
+        fw = int(w * s * q / 200)
+        if fw > 0:
+            # Never narrower than the bar is tall, so a sliver still reads round.
+            fw = max(fw, h * s)
+            d.rounded_rectangle([0, 0, fw - 1, h * s - 1], radius=r, fill=fill)
+
+    return _photo(key, master, _draw, w, h)
+
+
 def keycap(master, w: int, h: int, r: int = 6, face: str = "#242424",
            border: str = "#2d2d2d", bg: str = "#1a1a1a", pressed: bool = False):
     """A physical-looking keyboard key: gradient face, hairline border, an
