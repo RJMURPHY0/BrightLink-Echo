@@ -1,0 +1,179 @@
+# Security gate: secrets, code and dependency scanning.
+#
+# A pull request fails only on something it INTRODUCES:
+#   - a secret in one of its commits (gitleaks),
+#   - a new ERROR-severity code finding versus the base commit (Semgrep --baseline-commit),
+#   - a newly added dependency vulnerability with CVSS 7.0+ (osv-scanner, head minus base).
+# Findings already on main never block a deploy. Pushes to main and the weekly run only
+# report into the job summary; the security agent (hermes-cloud) triages those.
+#
+# Tools are pinned: gitleaks and osv-scanner by release checksum, Semgrep by version,
+# actions by commit SHA. No secrets are used and the checkout keeps no credentials.
+# The same file lives in Brightlink, BrightLink-Notetaker and BrightLink-Echo; only the
+# env block at the top differs.
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+  OSV_VERSION: 2.7.0
+  OSV_SHA256: 160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
+  SEMGREP_VERSION: 1.180.0
+  # Per repo: the lockfiles osv-scanner reads and the Semgrep rule packs.
+  OSV_ARGS: -L requirements.txt -L requirements.txt:constraints.txt
+  SEMGREP_CONFIGS: --config p/default --config p/owasp-top-ten --config p/secrets --config p/python
+  SEMGREP_EXCLUDES: --exclude=tests
+
+jobs:
+  secrets:
+    name: Secrets (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gl.tgz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gl.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gl.tgz" -C "$RUNNER_TEMP" gitleaks
+
+      - name: Scan new commits
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # PR: its own commits. Push: the pushed commits. Weekly/manual: every branch's
+          # commits from the last 8 days (history before the gate was checked by hand on
+          # 2026-10-27; nothing in it matches a key in use).
+          case "$EVENT" in
+            pull_request) opts="$BASE..HEAD" ;;
+            push)
+              if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then opts="HEAD~1..HEAD"; else opts="$BEFORE..HEAD"; fi ;;
+            *) opts="--all --since=8.days" ;;
+          esac
+          echo "Scanning: $opts"
+          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-opts="$opts" --report-format json --report-path "$RUNNER_TEMP/gitleaks.json" . && code=0 || code=$?
+          n=$(jq 'length' "$RUNNER_TEMP/gitleaks.json" 2>/dev/null || echo "?")
+          {
+            echo "### Secrets: $n finding(s) in $opts"
+            jq -r '.[] | "- \(.RuleID) in `\(.File)` line \(.StartLine), commit \(.Commit[0:8])"' "$RUNNER_TEMP/gitleaks.json" 2>/dev/null
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$code" != 0 ]; then
+            echo "::error::A secret was committed. Rotate it in Key Drop (deleting the line does not un-leak it), then remove it from the branch."
+            exit 1
+          fi
+
+  code:
+    name: Code (Semgrep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Semgrep
+        run: pipx install "semgrep==${SEMGREP_VERSION}"
+
+      - name: Scan
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          SEMGREP_SEND_METRICS: "off"
+          SEMGREP_ENABLE_VERSION_CHECK: "0"
+        run: |
+          set +e -f   # -f: the exclude globs reach Semgrep unexpanded
+          if [ "$EVENT" = pull_request ]; then
+            # Only findings this PR adds, and only ERROR severity, fail the check.
+            semgrep scan $SEMGREP_CONFIGS $SEMGREP_EXCLUDES --metrics off --baseline-commit "$BASE" \
+              --severity ERROR --json --output "$RUNNER_TEMP/semgrep.json" .
+          else
+            semgrep scan $SEMGREP_CONFIGS $SEMGREP_EXCLUDES --metrics off --json --output "$RUNNER_TEMP/semgrep.json" .
+          fi
+          code=$?
+          set -e +f
+          if ! jq -e '.results' "$RUNNER_TEMP/semgrep.json" >/dev/null 2>&1; then
+            echo "::error::Semgrep did not produce results (exit $code)."
+            exit 1
+          fi
+          {
+            echo "### Code findings"
+            jq -r '.results | group_by(.extra.severity) | map("- \(.[0].extra.severity): \(length)") | .[]' "$RUNNER_TEMP/semgrep.json"
+            echo
+            jq -r '.results[] | select(.extra.severity=="ERROR") | "- `\(.path):\(.start.line)` \(.check_id | split(".") | .[-1])"' "$RUNNER_TEMP/semgrep.json" | head -100
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$EVENT" = pull_request ]; then
+            new=$(jq '[.results[] | select(.extra.severity=="ERROR")] | length' "$RUNNER_TEMP/semgrep.json")
+            if [ "$new" != 0 ]; then
+              jq -r '.results[] | select(.extra.severity=="ERROR") | "::error file=\(.path),line=\(.start.line)::\(.check_id | split(".") | .[-1]): \(.extra.message | gsub("\n"; " ") | .[0:300])"' "$RUNNER_TEMP/semgrep.json"
+              exit 1
+            fi
+          fi
+
+  dependencies:
+    name: Dependencies (osv-scanner)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install osv-scanner
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/osv-scanner" "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SHA256}  $RUNNER_TEMP/osv-scanner" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/osv-scanner"
+
+      - name: Scan
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -f   # lockfile arguments are literal
+          scan() { # $1 = directory, $2 = output; exit 1 just means "vulnerabilities found"
+            (cd "$1" && "$RUNNER_TEMP/osv-scanner" scan source $OSV_ARGS --format json --output "$2" >/dev/null) || true
+            jq -e '.results' "$2" >/dev/null || { echo "::error::osv-scanner failed in $1"; exit 1; }
+          }
+          # One row per vulnerable package group: "ecosystem/name id1,id2 severity".
+          rows() { jq -r '[.results[].packages[] | .package as $p | .groups[] | "\($p.ecosystem)/\($p.name) \(.ids | sort | join(",")) \(.max_severity // "")"] | unique | .[]' "$1"; }
+          scan . "$RUNNER_TEMP/head.json"
+          rows "$RUNNER_TEMP/head.json" > "$RUNNER_TEMP/head.txt"
+          {
+            echo "### Dependency vulnerabilities: $(wc -l < "$RUNNER_TEMP/head.txt") package group(s)"
+            awk '$3 >= 7.0' "$RUNNER_TEMP/head.txt" | sed 's/^/- /' | head -100
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$EVENT" = pull_request ]; then
+            git worktree add --detach "$RUNNER_TEMP/base" "$BASE" >/dev/null
+            scan "$RUNNER_TEMP/base" "$RUNNER_TEMP/base.json"
+            rows "$RUNNER_TEMP/base.json" > "$RUNNER_TEMP/base.txt"
+            # New = present now, not on the base commit, CVSS 7.0 or above.
+            comm -13 <(sort "$RUNNER_TEMP/base.txt") <(sort "$RUNNER_TEMP/head.txt") | awk '$3 >= 7.0' > "$RUNNER_TEMP/new.txt"
+            if [ -s "$RUNNER_TEMP/new.txt" ]; then
+              { echo "### Added by this PR (CVSS 7.0+)"; sed 's/^/- /' "$RUNNER_TEMP/new.txt"; } >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::This PR adds dependencies with known high or critical vulnerabilities: $(paste -sd ';' "$RUNNER_TEMP/new.txt")"
+              exit 1
+            fi
+          fi
