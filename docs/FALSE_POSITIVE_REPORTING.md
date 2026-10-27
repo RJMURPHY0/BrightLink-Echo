@@ -1,12 +1,9 @@
 # Handling antivirus false positives
 
-Until releases are code-signed (see `docs/CODE_SIGNING.md`), an unsigned onefile
-PyInstaller exe will occasionally be flagged by Windows Defender/SmartScreen or a
-third-party antivirus. These are **false positives** — the app is not malware —
-but they still block users. This is how to clear them.
-
-> Once code signing is live, flags drop dramatically and this becomes a rare
-> stopgap. Signing is the real fix; the steps below are the free interim measures.
+Releases are signed by BRIGHTLINK (OS) LTD (see `docs/CODE_SIGNING.md`), but a new
+signed exe can still be flagged or held by Windows Defender/SmartScreen or a
+third-party antivirus until it builds reputation. These are **false positives**
+(the app is not malware) but they still block users. This is how to clear them.
 
 ---
 
@@ -38,8 +35,25 @@ that matter most for reach:
   positive). Turnaround is usually a day or two. This also helps SmartScreen
   reputation.
 
-- **Any third-party AV that flagged it** — each has its own false-positive form:
-  - Avast/AVG: <https://www.avast.com/false-positive-file-form.php>
+- **Avast, AVG, Norton, Avira (all Gen Digital): the Whitelisting Program**, not
+  one-off reports. Register at <https://www.avast.com/whitelist-program-registration>
+  with a company-domain email (ryan.murphy@brightlink.io); one approval covers all
+  four brands. Avast then sends FTP credentials for uploading each release, and
+  vendors with a clean record can be whitelisted by **digital signature**, which
+  covers every future release. Our Artifact Signing leaf certificates last about
+  three days, so ask for whitelisting by publisher subject, not thumbprint. The form
+  caps attachments at 60 MB: attach the installed `BrightLink Echo.exe` (about
+  18 MB), not the 80 MB installer. Guidelines Avast checks against:
+  <https://support.avast.com/article/228>. FAQ:
+  <https://support.avast.com/en-ww/article/Threat-Lab-file-whitelist>.
+  Context (2026-10-27): v1.8.19 was clean on Avast and AVG statically on
+  VirusTotal (installer 0/63, bridge 0/66, installed exe 2/69 from Elastic and
+  SecureAge), and fleet telemetry had no block events. So users blocked by Avast are
+  hitting reputation (CyberCapture on a rare new file) or the Behaviour Shield
+  (global hotkey + mic + simulated paste), both before Echo can report anything.
+  Whitelisting fixes both; a static false-positive report does not.
+- **Any other AV that flagged it** — each has its own false-positive form:
+  - Avast/AVG single file (only if not whitelisted yet): <https://www.avast.com/false-positive-file-form.php>
   - Bitdefender: <https://www.bitdefender.com/consumer/support/answer/29358/>
   - Kaspersky: <https://opentip.kaspersky.com/>
   - Malwarebytes: <https://www.malwarebytes.com/false-positive>
