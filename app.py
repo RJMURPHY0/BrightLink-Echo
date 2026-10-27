@@ -591,7 +591,7 @@ class WhisperFlowApp:
             # The `attempt >= 2` fallback bounds the wait: by the second failure
             # (30s+ in) whisper has had ample time even if slow, so a whisper
             # load that hangs can never suppress the alarm forever.
-            if self._whisper_settled or attempt >= 2:
+            if getattr(self, "_whisper_settled", False) or attempt >= 2:
                 err_text = errors[0] if errors else ""
                 import speech_health
                 self._note_speech_blocked(
@@ -2949,14 +2949,9 @@ class WhisperFlowApp:
         return self._phrase_store
 
     def _user_ctx(self):
-        """The UserContext booster for this account, or None."""
-        if self._user_context is not None:
-            return self._user_context
-        # Lazy-create (runs after _phrases has built the store).
-        ctx = getattr(self, "_user_context", None)
-        if ctx is not None:
-            return ctx
-        return None
+        """The UserContext booster for this account, or None (also before
+        __init__ has set it, as in tests that build a bare app)."""
+        return getattr(self, "_user_context", None)
 
     def _init_user_context(self, key: str) -> None:
         """Build and seed the user context booster."""

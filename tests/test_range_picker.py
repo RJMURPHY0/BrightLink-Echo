@@ -16,11 +16,12 @@ import tkinter as tk
 
 import config as config_mod
 import stats as stats_mod
-from app_window import C, Dropdown, RangePicker, _span_label
+from app_window import C, Dropdown, RangePicker, _period_span_label, _span_label
 
 _SHARED_ROOT = None
-_LABELS = ["Today", "Yesterday", "This week", "This month", "Last 6 months",
-           "Last 12 months", "All time"]
+_LABELS = ["Today", "Yesterday", "This week", "Last week", "This month",
+           "Last month", "Last 3 months", "Last 6 months", "Last 12 months",
+           "All time"]
 
 
 def _shared_root():
@@ -203,6 +204,17 @@ class PickerTests(unittest.TestCase):
             self.assertLess(bottom, self.p._menu_h - 8)
             self.p.close()
 
+    def test_every_period_tile_shows_its_dates(self):
+        # At the real panel height the tiles come out under 30px; the date
+        # line must still be drawn on every one of them.
+        root, host, var, p = _picker(self, describe=lambda v: "19 – 25 Oct")
+        p._tab = "periods"
+        p.open()
+        cv = p._menu_cv
+        dates = [i for i in cv.find_all() if cv.type(i) == "text"
+                 and cv.itemcget(i, "text") == "19 – 25 Oct"]
+        self.assertEqual(len(dates), len(_LABELS))
+
     def test_apply_with_one_date_is_a_single_day(self):
         d = datetime.date(2026, 9, 4)
         self.p._pick_day(d)
@@ -380,7 +392,10 @@ class NamedWindowTests(unittest.TestCase):
         self.assertEqual(self.b("today"), (d(2026, 9, 25), d(2026, 9, 25)))
         self.assertEqual(self.b("yesterday"), (d(2026, 9, 24), d(2026, 9, 24)))
         self.assertEqual(self.b("week"), (d(2026, 9, 21), d(2026, 9, 25)))
+        self.assertEqual(self.b("lastweek"), (d(2026, 9, 14), d(2026, 9, 20)))
         self.assertEqual(self.b("month"), (d(2026, 9, 1), d(2026, 9, 25)))
+        self.assertEqual(self.b("lastmonth"), (d(2026, 8, 1), d(2026, 8, 31)))
+        self.assertEqual(self.b("3m"), (d(2026, 6, 26), d(2026, 9, 25)))
         self.assertEqual(self.b("6m"), (d(2026, 3, 26), d(2026, 9, 25)))
         self.assertEqual(self.b("12m"), (d(2025, 9, 26), d(2026, 9, 25)))
         self.assertEqual(self.b("year"), (d(2026, 1, 1), d(2026, 9, 25)))
@@ -389,6 +404,28 @@ class NamedWindowTests(unittest.TestCase):
     def test_month_end_clamps(self):
         got = config_mod.named_range_bounds("6m", datetime.date(2026, 8, 31))
         self.assertEqual(got[0], datetime.date(2026, 3, 1))   # 28 Feb + 1
+
+    def test_last_month_in_january_is_last_december(self):
+        d = datetime.date
+        self.assertEqual(config_mod.named_range_bounds("lastmonth", d(2027, 1, 9)),
+                         (d(2026, 12, 1), d(2026, 12, 31)))
+
+    def test_last_week_on_a_monday_is_the_whole_week_before(self):
+        d = datetime.date
+        self.assertEqual(config_mod.named_range_bounds("lastweek", d(2026, 10, 26)),
+                         (d(2026, 10, 19), d(2026, 10, 25)))
+
+    def test_tile_dates(self):
+        # The line under each period tile says exactly which days it covers.
+        d = datetime.date
+        self.assertEqual(_period_span_label(d(2026, 10, 27), d(2026, 10, 27)),
+                         "Tue 27 Oct")
+        self.assertEqual(_period_span_label(d(2026, 10, 19), d(2026, 10, 25)),
+                         "19 – 25 Oct")
+        self.assertEqual(_period_span_label(d(2026, 7, 28), d(2026, 10, 27)),
+                         "28 Jul – 27 Oct")
+        self.assertEqual(_period_span_label(d(2025, 10, 28), d(2026, 10, 27)),
+                         "28 Oct 25 – 27 Oct 26")
 
     def test_every_key_is_a_valid_saved_value(self):
         for k in config_mod.IMPACT_RANGES:
@@ -401,6 +438,8 @@ class NamedWindowTests(unittest.TestCase):
         t = stats_mod._words_by_range(days, 5, self.TODAY)
         self.assertEqual(t["today"], 1)
         self.assertEqual(t["yesterday"], 10)
+        self.assertEqual(t["3m"], 11)
+        self.assertEqual(t["lastmonth"], 0)
         self.assertEqual(t["6m"], 111)
         self.assertEqual(t["12m"], 1111)
         self.assertEqual(t["all"], 11116)

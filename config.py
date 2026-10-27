@@ -45,7 +45,7 @@ def _bootstrap_config() -> None:
 # login could not sign in. Installs still pointing at a legacy project are migrated to
 # the shared one on next launch (bootstrap only seeds *fresh* installs).
 _SHARED_SUPABASE_URL = "https://ijeeghdxokfvlfarojlm.supabase.co"
-_SHARED_SUPABASE_KEY = "sb_publishable_G96rQQGq8BEtutrsdusjlQ_R0WxNzFw"
+_SHARED_SUPABASE_KEY = "sb_publishable_G96rQQGq8BEtutrsdusjlQ_R0WxNzFw"  # gitleaks:allow (publishable key, public by design)
 _LEGACY_SUPABASE_URLS = ("https://mbxwqtsesxgpcfyicphs.supabase.co",)
 
 # User-driven settings often arrive in a short burst (the Settings save button,
@@ -60,8 +60,8 @@ _ASYNC_SAVE_DEBOUNCE_S = 0.03
 # than in the UI so config.load() and stats.snapshot() agree on what is legal.
 # "year" (this calendar year) is no longer offered in the picker but stays
 # valid, so a saved value and old callers still resolve.
-IMPACT_RANGES = ("today", "yesterday", "week", "month", "6m", "12m", "year",
-                 "all")
+IMPACT_RANGES = ("today", "yesterday", "week", "lastweek", "month",
+                 "lastmonth", "3m", "6m", "12m", "year", "all")
 
 
 def _months_back(d, n: int):
@@ -78,8 +78,9 @@ def named_range_bounds(key, today):
 
     The one definition of every named window: stats.snapshot() scopes the
     cards with it and _words_by_range buckets the words count with it, so
-    the two can never disagree. "6m"/"12m" are rolling: the last 6 or 12
-    months up to and including today."""
+    the two can never disagree. "3m"/"6m"/"12m" are rolling: the last 3, 6
+    or 12 months up to and including today. "lastweek"/"lastmonth" are the
+    whole previous Monday-Sunday week and calendar month."""
     import datetime as _dt
     one = _dt.timedelta(days=1)
     if key == "today":
@@ -88,8 +89,16 @@ def named_range_bounds(key, today):
         return today - one, today - one
     if key == "week":                                   # Monday-start
         return today - _dt.timedelta(days=today.weekday()), today
+    if key == "lastweek":
+        monday = today - _dt.timedelta(days=today.weekday())
+        return monday - _dt.timedelta(days=7), monday - one
     if key == "month":
         return today.replace(day=1), today
+    if key == "lastmonth":
+        end = today.replace(day=1) - one
+        return end.replace(day=1), end
+    if key == "3m":
+        return _months_back(today, 3) + one, today
     if key == "6m":
         return _months_back(today, 6) + one, today
     if key == "12m":

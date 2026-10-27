@@ -926,6 +926,16 @@ def _span_label(a, b) -> str:
     return f"{left} – {right}"
 
 
+def _period_span_label(a, b) -> str:
+    """The days a period tile covers: 'Tue 27 Oct', '19 – 25 Oct',
+    '28 Jul – 27 Oct', or '28 Oct 25 – 27 Oct 26' across a year end."""
+    if a == b:
+        return f"{a.strftime('%a')} {a.day} {a.strftime('%b')}"
+    if (a.year, a.month) == (b.year, b.month):
+        return f"{a.day} – {b.day} {b.strftime('%b')}"
+    return _span_label(a, b)
+
+
 class RangePicker(Dropdown):
     """Dropdown with a second tab for an explicit from/to span.
 
@@ -953,11 +963,13 @@ class RangePicker(Dropdown):
 
     def __init__(self, parent, variable: tk.StringVar, values, *, panel,
                  on_toggle, bg=None, font=("Segoe UI", 10, "bold"),
-                 on_period=None, on_custom=None):
+                 on_period=None, on_custom=None, describe=None):
         self._panel = panel
         self._on_toggle = on_toggle
         self._on_period = on_period
         self._on_custom = on_custom
+        self._describe = describe       # label -> the dates it covers, or ""
+        self._tile_imgs = []
         self._tab = "periods"
         self._hits = []                 # [(x0, y0, x1, y1, fn, hoverable)]
         self._sel_start = None
@@ -1125,29 +1137,67 @@ class RangePicker(Dropdown):
         self._paint_hover()
 
     def _paint_periods(self) -> None:
-        # Two columns, read in pairs (Today / Yesterday, This week / This
-        # month …), so all seven fit the section's height without scrolling.
+        # Two columns of tiles, read in pairs (Today / Yesterday, This week /
+        # Last week …), so all ten fit the section's height without
+        # scrolling. Each tile names the period and, under it, the exact days
+        # it covers, so "Last 3 months" says which three.
         cv, w, h = self._menu_cv, self._menu_w, self._menu_h
         current = self._var.get()
         n = len(self._values)
         rows = (n + 1) // 2
         top = self._TAB_H + 6
-        row_h = max(20, min(38, (h - top - 8) // max(rows, 1)))
-        col_w = (w - 16) / 2
+        gap = 4
+        row_h = max(20, min(46, (h - top - 6 + gap) // max(rows, 1)))
+        tile_h = row_h - gap
+        col_w = (w - 16 - gap) // 2
+        self._tile_imgs = []
         for i, val in enumerate(self._values):
             r, c = divmod(i, 2)
-            x0 = int(8 + c * col_w)
-            x1 = int(8 + (c + 1) * col_w)
-            y = top + r * row_h
+            x0 = 8 + c * (col_w + gap)
+            x1 = x0 + col_w
+            y0 = top + r * row_h
+            y1 = y0 + tile_h
+            cy = (y0 + y1) // 2
             sel = val == current
-            cv.create_text(x0 + 12, y + row_h // 2, text=val, anchor="w",
-                           fill=C["accent"] if sel else C["text"],
-                           font=("Segoe UI", 9, "bold" if sel else "normal"))
+            fill = C["accent_dim"] if sel else C["surface"]
+            img = ui_render.round_rect(cv, col_w, tile_h, 7, fill,
+                                       C["accent"] if sel else C["border"],
+                                       1, C["surface"])
+            if img is not None:
+                self._tile_imgs.append(img)
+                cv.create_image(x0, y0, image=img, anchor="nw")
+            else:
+                _rr(cv, x0, y0, x1, y1, 7, fill=fill,
+                    outline=C["accent"] if sel else C["border"])
+
+            dates = self._describe(val) if self._describe else ""
+            font = ("Segoe UI", 9, "bold" if sel else "normal")
+            # Two lines fit from 26px (the tiles come out 28px at normal text
+            # size), so the dates show on every ordinary window.
+            if dates and tile_h >= 26:
+                cv.create_text(x0 + 10, cy - 6, text=val, anchor="w",
+                               fill=C["text"], font=font)
+                cv.create_text(x0 + 10, cy + 7, text=dates, anchor="w",
+                               fill=C["accent"] if sel else C["subtext"],
+                               font=("Segoe UI", 8))
+            else:
+                cv.create_text(x0 + 10, cy, text=val, anchor="w",
+                               fill=C["text"], font=font)
+
+            # Radio on the right: a hollow ring, or a filled orange tick.
+            d = 14
+            rx, ry = x1 - 10 - d, cy - d // 2
             if sel:
-                cv.create_text(x1 - 12, y + row_h // 2, text="✓", anchor="e",
-                               fill=C["accent"], font=("Segoe UI", 9, "bold"))
-            self._hit(x0 + 2, y + 1, x1 - 2, y + row_h - 1,
-                      lambda v=val: self._choose_period(v))
+                ring = ui_render.icon_badge(cv, "check", glyph=11, box=d,
+                                            color=C["bg"], badge=C["accent"],
+                                            bg=fill, ring=0)
+            else:
+                ring = ui_render.round_rect(cv, d, d, d // 2, fill,
+                                            C["subtext"], 1, fill)
+            if ring is not None:
+                self._tile_imgs.append(ring)
+                cv.create_image(rx, ry, image=ring, anchor="nw")
+            self._hit(x0, y0, x1, y1, lambda v=val: self._choose_period(v))
 
     def _custom_columns(self):
         """(field column x0, x1, calendar x0, x1) for the custom tab. The
@@ -4671,16 +4721,33 @@ class AppWindow:
         # un-widened (no fill="x") so it stays compact and inline where the
         # bold "Today" label was.
         # "Last 12 months", not "Last year": "last year" reads as 2025.
+        # Ordered in pairs, because the panel reads them two to a row:
+        # this / last, then the rolling windows short to long.
         _RANGE_LABELS = {
             "today":     "Today",
             "yesterday": "Yesterday",
             "week":      "This week",
+            "lastweek":  "Last week",
             "month":     "This month",
+            "lastmonth": "Last month",
+            "3m":        "Last 3 months",
             "6m":        "Last 6 months",
             "12m":       "Last 12 months",
             "all":       "All time",
         }
         _RANGE_FROM_LABEL = {v: k for k, v in _RANGE_LABELS.items()}
+
+        def _period_dates(label: str) -> str:
+            # The exact days each tile covers, from the same bounds the cards
+            # are scoped with, so the line can never disagree with the figures.
+            try:
+                from config import named_range_bounds
+                b = named_range_bounds(_RANGE_FROM_LABEL.get(label),
+                                       _date.today())
+            except Exception as e:
+                print(f"[AppWindow] Period dates failed: {e}")
+                return ""
+            return _period_span_label(*b) if b else "Every dictation"
         _cur_range = (getattr(self._config, "impact_range", "all")
                      if self._config else "all")
         # A saved span comes back as "custom:<start>:<end>"; anything else that
@@ -4727,6 +4794,7 @@ class AppWindow:
                                   list(_RANGE_LABELS.values()), bg=C["surface"],
                                   font=("Segoe UI", 10, "bold"),
                                   on_period=_on_period, on_custom=_on_custom,
+                                  describe=_period_dates,
                                   panel=self._impact_range_panel,
                                   on_toggle=self._toggle_range_panel)
         if _span:
@@ -5121,8 +5189,9 @@ class AppWindow:
         Lets the breakdown panels say which period they are showing."""
         rng = snap.get("range", "all")
         named = {"today": "today", "yesterday": "yesterday",
-                 "week": "this week", "month": "this month",
-                 "6m": "in the last 6 months", "12m": "in the last 12 months",
+                 "week": "this week", "lastweek": "last week",
+                 "month": "this month", "lastmonth": "last month",
+                 "3m": "in the last 3 months", "6m": "in the last 6 months", "12m": "in the last 12 months",
                  "year": "this year"}.get(rng)
         if named:
             return named
