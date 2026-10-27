@@ -82,6 +82,20 @@ class RelayPayloadTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"BRIGHTLINK_APP_URL": "http://localhost:3006/"}):
             self.assertEqual(ai_refiner.relay_url(), "http://localhost:3006")
 
+    def test_a_released_build_ignores_the_override(self):
+        # Security review 2026-10-27: the user's Supabase token goes to this
+        # URL, so a frozen build never takes it from the environment.
+        with mock.patch.dict(os.environ, {"BRIGHTLINK_APP_URL": "https://evil.example"}),                 mock.patch.object(ai_refiner.sys, "frozen", True, create=True):
+            self.assertEqual(ai_refiner.relay_url(), ai_refiner.DEFAULT_RELAY_URL)
+
+    def test_the_override_must_be_https_or_this_machine(self):
+        for url in ("http://evil.example", "ftp://localhost", "file:///c:/x", "not a url",
+                    "http://localhost.evil.example"):
+            with mock.patch.dict(os.environ, {"BRIGHTLINK_APP_URL": url}):
+                self.assertEqual(ai_refiner.relay_url(), ai_refiner.DEFAULT_RELAY_URL, msg=url)
+        with mock.patch.dict(os.environ, {"BRIGHTLINK_APP_URL": "https://staging.example/"}):
+            self.assertEqual(ai_refiner.relay_url(), "https://staging.example")
+
     def test_local_key_wins_over_the_relay(self):
         with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "", "ANTHROPIC_API_KEY": ""}):
             r = AIRefiner(openrouter_api_key="sk-or-dev", token_provider=lambda: "tok")

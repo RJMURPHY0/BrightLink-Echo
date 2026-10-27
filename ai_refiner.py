@@ -11,22 +11,42 @@ which keeps the key on the server. A key in config or the environment
 import json
 import os
 import re
+import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Callable, Optional
 
-# The CRM's public origin, which hosts the relay. Overridable so a dev build
-# can point at a local API server.
+# The CRM's public origin, which hosts the relay. A source (dev) run may point
+# it at a local API server with BRIGHTLINK_APP_URL; a released (frozen) build
+# never reads that variable, since the user's Supabase token goes wherever it
+# points.
 DEFAULT_RELAY_URL = "https://app.brightlink.io"
 RELAY_PATH = "/api/whisper/ai"
 # Same budget as the direct calls: a transcript fix is worthless after ~20s,
 # and the relay itself gives OpenRouter 20s.
 _RELAY_TIMEOUT = 25.0
+# Plain http is allowed only for a dev API server on this machine.
+_LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 
 def relay_url() -> str:
-    return (os.environ.get("BRIGHTLINK_APP_URL") or DEFAULT_RELAY_URL).rstrip("/")
+    override = (os.environ.get("BRIGHTLINK_APP_URL") or "").strip()
+    if not override or getattr(sys, "frozen", False):
+        return DEFAULT_RELAY_URL
+    try:
+        parts = urllib.parse.urlsplit(override)
+        ok = bool(parts.hostname) and (
+            parts.scheme == "https"
+            or (parts.scheme == "http" and parts.hostname in _LOOPBACK_HOSTS))
+    except ValueError:
+        ok = False
+    if not ok:
+        print(f"[AI] Ignoring BRIGHTLINK_APP_URL={override!r}: it must be https "
+              f"(or http on this machine). Using {DEFAULT_RELAY_URL}.")
+        return DEFAULT_RELAY_URL
+    return override.rstrip("/")
 
 # A bracketed sign-off placeholder the model sometimes emits despite being told
 # not to (e.g. "[Sender's Name]", "[Your Name]", "[Name]", "[Signature]"). Post-

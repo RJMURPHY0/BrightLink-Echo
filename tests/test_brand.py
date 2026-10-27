@@ -430,13 +430,30 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("!inputs.publish", self.steps["Keep the build for inspection (dry run)"]["if"])
 
     def test_signing_uses_oidc_and_no_stored_secret(self):
-        self.assertEqual("write", self.wf["permissions"]["id-token"])
+        # Least privilege (security review 2026-10-27): nothing workflow-wide,
+        # the release gate reads only, the build job alone publishes and signs.
+        self.assertEqual({}, self.wf["permissions"])
+        self.assertEqual({"contents": "read"}, self.wf["jobs"]["check"]["permissions"])
+        self.assertEqual({"contents": "write", "id-token": "write"},
+                         self.wf["jobs"]["build-windows"]["permissions"])
         self.assertEqual("release", self.wf["jobs"]["build-windows"]["environment"])
         self.assertTrue(self.steps["Sign executable (Azure Artifact Signing)"]["uses"]
                         .startswith("azure/artifact-signing-action@"))
         self.assertTrue(self.steps["Azure login (GitHub OIDC)"]["uses"].startswith("azure/login@"))
         self.assertNotIn("AZURE_CLIENT_SECRET", self.text)
         self.assertNotIn("trusted-signing-action", self.text)
+
+    def test_actions_are_pinned_to_commits_and_the_vt_key_stays_in_its_step(self):
+        import re
+        for wf in ("build-release.yml", "migration-e2e.yml"):
+            with open(os.path.join(ROOT, ".github", "workflows", wf), encoding="utf-8") as f:
+                text = f.read()
+            for uses in re.findall(r"uses:\s*(\S+)", text):
+                self.assertRegex(uses, r"@[0-9a-f]{40}$", msg=f"{wf}: {uses}")
+        self.assertNotIn("VT_API_KEY", str(self.wf["jobs"]["build-windows"].get("env", {})))
+        holders = [s.get("name") for s in self.wf["jobs"]["build-windows"]["steps"]
+                   if "VT_API_KEY" in str(s.get("env", {})) + str(s.get("with", {}))]
+        self.assertEqual(["Check for a VirusTotal key", "Scan with VirusTotal"], holders)
 
     def test_partial_or_required_signing_config_fails(self):
         run = self.steps["Decide whether to sign"]["run"]

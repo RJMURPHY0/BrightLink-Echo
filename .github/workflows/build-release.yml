@@ -36,9 +36,8 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
-  id-token: write   # GitHub OIDC login to Azure for signing; no stored secret
+# Nothing by default: each job asks for exactly what it needs.
+permissions: {}
 
 # Two releases building at once could publish out of order, and the updater
 # compares tags strictly. One at a time, never cancelled half-way.
@@ -51,11 +50,14 @@ jobs:
   # doesn't spin up the heavy Windows build. Outputs the version + a go/no-go.
   check:
     runs-on: ubuntu-latest
+    # Reads app.py and asks whether the release exists: read only.
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.decide.outputs.VERSION }}
       should_release: ${{ steps.decide.outputs.GO }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Decide whether to release
         id: decide
         env:
@@ -89,13 +91,16 @@ jobs:
     # trigger. Its deployment rule must allow main AND v* tags, or a tag
     # re-cut silently loses signing (docs/CODE_SIGNING.md).
     environment: release
+    # The only job that publishes (contents: write) and signs (id-token: write,
+    # GitHub OIDC login to Azure for signing; no stored secret).
+    permissions:
+      contents: write
+      id-token: write
 
-    # JOB level, not step level. A step's `if` is evaluated before that step's
-    # own `env:` block exists, and the `secrets` context is not available in a
-    # step `if` at all — so the VirusTotal gate below only works if the value
-    # is in scope for the whole job. Step-level, it silently skipped forever.
+    # VT_API_KEY is NOT job-wide: every step and action here would see it. A
+    # step `if` cannot read `secrets`, so "Check for a VirusTotal key" exposes
+    # only whether it exists, and the scan step alone receives the key.
     env:
-      VT_API_KEY: ${{ secrets.VT_API_KEY }}
       # Inno Setup, pinned by version AND hash (GitHub's own digest of the
       # jrsoftware/issrc release asset, read 2026-09-29).
       INNO_VERSION: "6.7.3"
@@ -104,10 +109,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
 
@@ -115,7 +120,7 @@ jobs:
       # parallel and keeps them in a cross-run cache — dependency install drops
       # from minutes to seconds on warm builds.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           enable-cache: true
           cache-dependency-glob: |
@@ -198,7 +203,7 @@ jobs:
 
       - name: Azure login (GitHub OIDC)
         if: ${{ steps.signing.outputs.ENABLED == 'true' }}
-        uses: azure/login@v3
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -213,7 +218,7 @@ jobs:
       # exists anywhere.
       - name: Sign executable (Azure Artifact Signing)
         if: ${{ steps.signing.outputs.ENABLED == 'true' }}
-        uses: azure/artifact-signing-action@v2.0.0
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
           endpoint: ${{ vars.SIGNING_ENDPOINT }}
           signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
@@ -231,7 +236,7 @@ jobs:
       # docs/decisions/release-updater.md, 2026-09-29).
       - name: Sign installed-layout executable
         if: ${{ steps.signing.outputs.ENABLED == 'true' }}
-        uses: azure/artifact-signing-action@v2.0.0
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
           endpoint: ${{ vars.SIGNING_ENDPOINT }}
           signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
@@ -252,7 +257,7 @@ jobs:
       - name: Sign activation script
         if: ${{ steps.signing.outputs.ENABLED == 'true' }}
         continue-on-error: true
-        uses: azure/artifact-signing-action@v2.0.0
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
           endpoint: ${{ vars.SIGNING_ENDPOINT }}
           signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
@@ -274,7 +279,7 @@ jobs:
 
       - name: Sign installer
         if: ${{ steps.signing.outputs.ENABLED == 'true' }}
-        uses: azure/artifact-signing-action@v2.0.0
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
           endpoint: ${{ vars.SIGNING_ENDPOINT }}
           signing-account-name: ${{ vars.SIGNING_ACCOUNT }}
@@ -359,7 +364,7 @@ jobs:
       # transcription). The onefile bridge is self-tested too. A failure here
       # blocks the release. This is what would have caught v1.6.79.
       - name: Cache the speech model
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~\AppData\Local\BrightLink Echo\models
           key: parakeet-${{ hashFiles('asr_engine.py') }}
@@ -380,10 +385,19 @@ jobs:
       # analysis URLs, so the AV detection rate is visible on every build
       # BEFORE users see it. Gated on a free VT_API_KEY repo secret; skipped if
       # absent. Purely informational — never fails the build.
+      - name: Check for a VirusTotal key
+        id: vt
+        shell: pwsh
+        env:
+          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+        run: |
+          $present = if ($env:VT_API_KEY) { 'true' } else { 'false' }
+          "PRESENT=$present" >> $env:GITHUB_OUTPUT
+
       - name: Scan with VirusTotal
-        if: ${{ env.VT_API_KEY != '' }}
+        if: ${{ steps.vt.outputs.PRESENT == 'true' }}
         continue-on-error: true
-        uses: crazy-max/ghaction-virustotal@v4
+        uses: crazy-max/ghaction-virustotal@d34968c958ae283fe976efed637081b9f9dcf74f # v4.2.0
         with:
           vt_api_key: ${{ secrets.VT_API_KEY }}
           files: |
@@ -393,7 +407,7 @@ jobs:
 
       - name: Keep the build for inspection (dry run)
         if: ${{ github.event_name == 'workflow_dispatch' && !inputs.publish }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dry-run-v${{ steps.version.outputs.VERSION }}
           path: |
@@ -419,7 +433,7 @@ jobs:
 
       - name: Publish versioned release
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: v${{ steps.version.outputs.VERSION }}
           name: ${{ steps.version.outputs.PRODUCT_NAME }} v${{ steps.version.outputs.VERSION }}

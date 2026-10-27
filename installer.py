@@ -12,10 +12,11 @@ import subprocess
 import sys
 
 import brand
+from app_install import _ps_quote  # escapes a value for PowerShell single quotes
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 NAME = brand.PRODUCT_NAME
-_PS_NAME = NAME.replace("'", "''")  # inside PowerShell single quotes
+_PS_NAME = _ps_quote(NAME)  # inside PowerShell single quotes
 PYTHON  = os.path.join(APP_DIR, "venv", "Scripts", "pythonw.exe")
 APP_PY  = os.path.join(APP_DIR, "app.py")
 LOGO_ICO = os.path.join(APP_DIR, "logo.ico")
@@ -66,10 +67,10 @@ def create_shortcut(icon_path: str) -> None:
         "$sh = New-Object -ComObject WScript.Shell; "
         "$d  = $sh.SpecialFolders('Desktop'); "
         f"$lnk = $sh.CreateShortcut($d + '\\{_PS_NAME}.lnk'); "
-        f"$lnk.TargetPath       = '{PYTHON}'; "
-        f"$lnk.Arguments        = '\"{APP_PY}\"'; "
-        f"$lnk.WorkingDirectory = '{APP_DIR}'; "
-        f"$lnk.IconLocation     = '{icon_loc}'; "
+        f"$lnk.TargetPath       = '{_ps_quote(PYTHON)}'; "
+        f"$lnk.Arguments        = '\"{_ps_quote(APP_PY)}\"'; "
+        f"$lnk.WorkingDirectory = '{_ps_quote(APP_DIR)}'; "
+        f"$lnk.IconLocation     = '{_ps_quote(icon_loc)}'; "
         f"$lnk.Description      = '{_PS_NAME} - Voice-to-Text'; "
         "$lnk.Save()"
     )
@@ -103,11 +104,11 @@ def add_to_startup() -> None:
     icon_loc = f"{LOGO_ICO},0" if os.path.exists(LOGO_ICO) else f"{PYTHON},0"
     ps = (
         "$sh = New-Object -ComObject WScript.Shell; "
-        f"$lnk = $sh.CreateShortcut('{startup_dir}\\{_PS_NAME}.lnk'); "
-        f"$lnk.TargetPath       = '{PYTHON}'; "
-        f"$lnk.Arguments        = '\"{APP_PY}\"'; "
-        f"$lnk.WorkingDirectory = '{APP_DIR}'; "
-        f"$lnk.IconLocation     = '{icon_loc}'; "
+        f"$lnk = $sh.CreateShortcut('{_ps_quote(startup_dir)}\\{_PS_NAME}.lnk'); "
+        f"$lnk.TargetPath       = '{_ps_quote(PYTHON)}'; "
+        f"$lnk.Arguments        = '\"{_ps_quote(APP_PY)}\"'; "
+        f"$lnk.WorkingDirectory = '{_ps_quote(APP_DIR)}'; "
+        f"$lnk.IconLocation     = '{_ps_quote(icon_loc)}'; "
         f"$lnk.Description      = '{_PS_NAME} - Voice-to-Text'; "
         "$lnk.Save()"
     )

@@ -55,6 +55,11 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+# The onefile path checks our Authenticode signature (status, subject, issuer).
+_VALID_SIG = lambda _p: ("Valid", updater.brand.SIGNER_SUBJECT,  # noqa: E731
+                         "CN=Microsoft ID Verified CS AOC CA 03, O=Microsoft Corporation, C=US")
+
+
 class ArchiveMarkerTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -134,7 +139,7 @@ class RunTests(unittest.TestCase):
         args = dict(version="v9.9.9", url="https://x/FTC-Whisper.exe",
                     current_exe=os.path.join(self.dir, "cur.exe"),
                     is_idle=lambda: True, apply_fn=self._apply,
-                    poll_interval=0.0, idle_samples=1)
+                    poll_interval=0.0, idle_samples=1, signer=_VALID_SIG)
         args.update(kw)
         return updater.run_auto_update(**args)
 
@@ -194,6 +199,31 @@ class RunTests(unittest.TestCase):
         with mock.patch.object(updater, "download_update", self._download(data=other)), \
              mock.patch.object(updater.time, "sleep", lambda *_: None):
             self.assertFalse(self._run())
+        self.assertEqual(self.applied, [])
+        self.assertEqual([n for n in os.listdir(self.dir) if n.endswith(".exe")], [])
+
+    def test_a_release_without_a_sha256_is_never_downloaded(self):
+        # Security review 2026-10-27: the onefile path used to skip the hash
+        # check when GitHub gave none. It now refuses, like the installer path.
+        calls = []
+        for rel in ({"version": "v9.9.9", "download_url": "https://x/FTC-Whisper.exe",
+                     "size": len(self.data), "sha256": ""},
+                    {"version": "v9.9.8", "download_url": "https://x/FTC-Whisper.exe",
+                     "size": len(self.data), "sha256": _sha(self.data)}):
+            with mock.patch.object(updater, "_cached_release", rel), \
+                 mock.patch.object(updater, "download_update",
+                                   lambda *a, **k: calls.append(a)):
+                self.assertFalse(self._run(), msg=rel)
+        self.assertEqual((calls, self.applied), ([], []))
+
+    def test_an_unsigned_or_foreign_signed_download_is_refused(self):
+        issuer = "CN=Microsoft ID Verified CS AOC CA 03, O=Microsoft Corporation, C=US"
+        for sig in (("NotSigned", "", ""), ("Valid", "CN=Someone Else", issuer),
+                    ("Valid", updater.brand.SIGNER_SUBJECT, "CN=Other CA, O=Elsewhere, C=US"),
+                    ("", "", "")):
+            with mock.patch.object(updater, "download_update", self._download()), \
+                 mock.patch.object(updater.time, "sleep", lambda *_: None):
+                self.assertFalse(self._run(signer=lambda _p, s=sig: s), msg=sig)
         self.assertEqual(self.applied, [])
         self.assertEqual([n for n in os.listdir(self.dir) if n.endswith(".exe")], [])
 
@@ -316,8 +346,13 @@ class WiringTests(unittest.TestCase):
         block = src[src.index('elif self.path.startswith("/update")'):]
         block = block[:block.index("self.send_response(404)")]
         self.assertIn("run_auto_update(", block)
-        self.assertIn("apply_now=True", block)
         self.assertNotIn("download_update(", block)
+        # Security review 2026-10-27: a web request must never restart the app
+        # mid-dictation, so the CRM's run waits for the app's real idle state.
+        self.assertNotIn("apply_now=True", block)
+        self.assertNotIn("is_idle=lambda: True", block)
+        self.assertIn("is_idle=is_idle", block)
+        self.assertIn("is_idle=self._not_dictating", src)
 
     def test_update_now_joins_rather_than_downloading_again(self):
         src = self._src("app_window.py")

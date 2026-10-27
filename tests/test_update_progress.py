@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import progress_bar  # noqa: E402
 import updater  # noqa: E402
 
-from test_update_integrity import _fake_exe, _sha  # noqa: E402
+from test_update_integrity import _VALID_SIG, _fake_exe, _sha  # noqa: E402
 
 
 class _Clock:
@@ -130,7 +130,7 @@ class RunProgressTests(unittest.TestCase):
         args = dict(version="v9.9.9", url="https://x/FTC-Whisper.exe",
                     current_exe=os.path.join(self.dir, "cur.exe"),
                     is_idle=lambda: True, apply_fn=self._apply,
-                    poll_interval=0.0, idle_samples=1)
+                    poll_interval=0.0, idle_samples=1, signer=_VALID_SIG)
         args.update(kw)
         return updater.run_auto_update(**args)
 

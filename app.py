@@ -20,6 +20,25 @@ from collections import deque
 
 import ctypes
 
+import brand  # constants only, imports nothing: safe ahead of every guard below
+
+
+def _url_launch_argv(argv: list) -> list:
+    """A browser opening one of our URL schemes runs `"<exe>" "%1"`. When a URL
+    is on the command line, that invocation came from a web page, so it gets
+    the URL and nothing else: a crafted link must never smuggle a flag
+    (--uninstall, --install, --restart-audio-engine) in beside it."""
+    schemes = tuple(s.lower() + ":" for s in (brand.URL_SCHEME, brand.LEGACY_URL_SCHEME))
+    for a in argv[1:]:
+        if a.strip().lower().startswith(schemes):
+            return list(argv[:1]) + [a]
+    return list(argv)
+
+
+# Before anything reads a flag (including the elevated audio restart below and
+# the relaunch guard, which both pass sys.argv on).
+sys.argv = _url_launch_argv(sys.argv)
+
 # The elevated copy audio_engine.restart() starts through the UAC prompt: it
 # restarts Windows Audio and exits. Before every other import, the mutex and
 # the version handoff, so it never touches the running copy.
@@ -401,7 +420,15 @@ class WhisperFlowApp:
                          name="core-init").start()
 
         # ── Local HTTP server so the web app can detect + surface this window ──
-        _start_local_server(self.app_window, APP_VERSION)
+        _start_local_server(self.app_window, APP_VERSION, is_idle=self._not_dictating)
+
+    def _not_dictating(self) -> bool:
+        """True when nothing is being recorded or transcribed, so a restart
+        loses no words. Thread-safe; False when the state cannot be read."""
+        try:
+            return self.hotkey_manager.state == AppState.IDLE
+        except Exception:
+            return False
 
     def _init_core(self) -> None:
         """Construct the audio/ASR pipeline and tray on a background thread.
@@ -4095,17 +4122,47 @@ _LOCAL_PORT = 47832
 _INSTALL_COPY_LOCK = threading.Lock()  # serialises _ensure_installed_copy across startup threads
 
 
-def _start_local_server(app_window, version: str) -> None:
+# The local server answers only requests addressed to it by these names (a
+# DNS-rebinding page arrives with its own host name) and only web pages from
+# these origins (the CRM). A request with no Origin is a local tool (the
+# second-instance launcher, the CI self-test) unless the browser says it came
+# from a web page: an <img> or link on any site sends no Origin on a GET but
+# does send Sec-Fetch-Site.
+_LOCAL_HOSTS = (f"127.0.0.1:{_LOCAL_PORT}", f"localhost:{_LOCAL_PORT}")
+_LOCAL_ALLOWED_ORIGINS = ("https://app.brightlink.io",)
+
+
+def _local_request_origin(headers) -> "str | None":
+    """Who may make this request to the local server: None = refuse it,
+    "" = allowed with no CORS header (a local tool), else the allowed origin
+    to reflect in Access-Control-Allow-Origin."""
+    host = (headers.get("Host") or "").strip().lower()
+    if host not in _LOCAL_HOSTS:
+        return None
+    origin = (headers.get("Origin") or "").strip()
+    if origin:
+        return origin if origin in _LOCAL_ALLOWED_ORIGINS else None
+    site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if site and site != "none":
+        return None
+    return ""
+
+
+def _start_local_server(app_window, version: str, is_idle=None) -> None:
     """
-    Tiny localhost-only HTTP server so the FTC web app can detect whether
+    Tiny localhost-only HTTP server so the BrightLink CRM can detect whether
     the app is running and surface its window without needing a custom
-    URL protocol registration.  Binds to 127.0.0.1 only — not reachable
-    from the network.
+    URL protocol registration.  Binds to 127.0.0.1 only, not reachable
+    from the network, and answers only the CRM's origin or local tools
+    (_local_request_origin).
 
     Endpoints:
       GET /ping    → {"ok": true, "version": "x.y.z"}
       GET /show    → brings the window to the front, returns {"ok": true}
-      GET /update  → checks GitHub; if newer opens browser download, returns {"action":"updating"} or {"action":"up_to_date"}
+      GET /update  → if GitHub has a newer release, starts (or joins) the one
+                     update run, which installs once nothing is being
+                     recorded or transcribed (*is_idle*); returns
+                     {"action":"updating"} or {"action":"up_to_date"}
     """
     import http.server
     import json
@@ -4115,27 +4172,48 @@ def _start_local_server(app_window, version: str) -> None:
         def log_message(self, *args):
             pass  # silence access log spam
 
-        def _cors(self):
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        def _allowed(self):
+            """The origin to reflect ("" for none), or None after sending 403."""
+            origin = _local_request_origin(self.headers)
+            if origin is None:
+                print(f"[App] Local server refused {self.command} {self.path.split('?')[0]} "
+                      f"(Host {self.headers.get('Host')!r}, Origin {self.headers.get('Origin')!r}, "
+                      f"Sec-Fetch-Site {self.headers.get('Sec-Fetch-Site')!r})")
+                self.send_response(403)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            return origin
+
+        def _cors(self, origin):
+            if origin:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                self.send_header("Access-Control-Allow-Private-Network", "true")
+            self.send_header("Vary", "Origin")
 
         def do_OPTIONS(self):
+            origin = self._allowed()
+            if origin is None:
+                return
             self.send_response(204)
-            self._cors()
+            self._cors(origin)
             self.end_headers()
 
         def do_GET(self):
+            origin = self._allowed()
+            if origin is None:
+                return
             if self.path.startswith("/show"):
                 app_window.show()
                 self.send_response(200)
-                self._cors()
+                self._cors(origin)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(b'{"ok":true}')
             elif self.path.startswith("/ping"):
                 self.send_response(200)
-                self._cors()
+                self._cors(origin)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(
@@ -4145,25 +4223,26 @@ def _start_local_server(app_window, version: str) -> None:
                 from updater import cached_release, is_newer, current_exe_path, run_auto_update
                 info = cached_release()
                 if info and is_newer(info["version"], version):
-                    # Respond immediately so FTC Contacts never times out
+                    # Respond immediately so the CRM never times out
                     self.send_response(200)
-                    self._cors()
+                    self._cors(origin)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
                     self.wfile.write(b'{"ok":true,"action":"updating"}')
                     exe_path = current_exe_path()
                     if exe_path:
-                        # The one update run (joined if one is already going),
-                        # asked to install as soon as its download verifies.
-                        # A private download to %TEMP% here was a second writer
-                        # racing the automatic updater.
+                        # The one update run (joined if one is already going).
+                        # It installs only once nothing is being recorded or
+                        # transcribed: a web request must never cut a
+                        # dictation off. A private download to %TEMP% here was
+                        # a second writer racing the automatic updater.
                         def _update_now(v=info["version"], url=info["download_url"], dst=exe_path):
                             try:
-                                run_auto_update(v, url, dst, is_idle=lambda: True,
-                                                poll_interval=0.0, idle_samples=1,
-                                                apply_now=True)
-                            except Exception:
-                                pass
+                                run_auto_update(v, url, dst,
+                                                is_idle=is_idle or (lambda: False),
+                                                poll_interval=1.0, idle_samples=1)
+                            except Exception as exc:
+                                print(f"[App] Update requested by the CRM failed: {exc}")
                         threading.Thread(target=_update_now, daemon=True, name="in-app-update").start()
                     else:
                         import webbrowser
@@ -4171,7 +4250,7 @@ def _start_local_server(app_window, version: str) -> None:
                         webbrowser.open(manual_download_url())
                 else:
                     self.send_response(200)
-                    self._cors()
+                    self._cors(origin)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
                     self.wfile.write(b'{"ok":true,"action":"up_to_date"}')

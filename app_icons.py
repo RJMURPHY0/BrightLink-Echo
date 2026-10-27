@@ -654,6 +654,8 @@ def _brand_tile_photo(src, bg: str):
 _SITE_REFRESH_S = 6 * 3600     # re-read the live favicon this often
 _SITE_RETRY_S = 15 * 60        # after a failed download
 _SITE_MAX_BYTES = 2 * 1024 * 1024
+# The only image formats a downloaded favicon is decoded as.
+_FAVICON_FORMATS = ("PNG", "ICO", "JPEG", "GIF", "WEBP")
 _SITE_BUNDLED = os.path.join(_BASE_DIR, "assets", "brand", "brightlink-mark.png")
 _site_icon_cache: dict = {}    # (path, mtime_ns, bg) -> PhotoImage
 _SITE_STAT_TTL_S = 5.0         # a render redraws every row; stat at most this often
@@ -715,7 +717,9 @@ def _download_site_favicon() -> None:
             data = resp.read(_SITE_MAX_BYTES + 1)
         if len(data) > _SITE_MAX_BYTES:
             raise ValueError(f"favicon over {_SITE_MAX_BYTES} bytes: {url}")
-        img = Image.open(io.BytesIO(data))
+        # Downloaded bytes: decode only the formats a favicon really comes in,
+        # never every plugin Pillow ships (smaller attack surface).
+        img = Image.open(io.BytesIO(data), formats=_FAVICON_FORMATS)
         img.load()
         img = img.convert("RGBA")
         path = _site_icon_path()

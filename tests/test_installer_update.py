@@ -33,7 +33,8 @@ import brand  # noqa: E402
 import install_layout as il  # noqa: E402
 import updater  # noqa: E402
 
-_VALID = lambda _p: ("Valid", brand.SIGNER_SUBJECT)  # noqa: E731
+_ISSUER = "CN=Microsoft ID Verified CS AOC CA 03, O=Microsoft Corporation, C=US"
+_VALID = lambda _p: ("Valid", brand.SIGNER_SUBJECT, _ISSUER)  # noqa: E731
 
 
 def _release_json(setup=True, rollout=True, digest=True):
@@ -112,7 +113,14 @@ class VerifyInstallerTests(unittest.TestCase):
 
     def test_unsigned_or_someone_elses_signature_is_refused(self):
         for sig in (("NotSigned", ""), ("HashMismatch", brand.SIGNER_SUBJECT),
-                    ("Valid", "CN=Someone Else"), ("", "")):
+                    ("Valid", "CN=Someone Else"), ("", ""),
+                    ("Valid", "CN=Someone Else", _ISSUER),
+                    # our name, but no issuer or a certificate from another CA
+                    ("Valid", brand.SIGNER_SUBJECT),
+                    ("Valid", brand.SIGNER_SUBJECT, ""),
+                    ("Valid", brand.SIGNER_SUBJECT, "CN=Some Other CA, O=Elsewhere, C=US"),
+                    ("Valid", brand.SIGNER_SUBJECT,
+                     "CN=Microsoft ID Verified CS AOC CA 03, O=Not Microsoft, C=US")):
             with self.assertRaises(IOError, msg=sig):
                 updater.verify_installer(self.path, len(self.data), self.sha,
                                          signer=lambda _p, s=sig: s)

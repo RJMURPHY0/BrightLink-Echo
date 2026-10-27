@@ -10,6 +10,7 @@ import brand
 import data_paths
 import install_layout
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -497,21 +498,46 @@ def file_sha256(path: str) -> str:
 
 
 def authenticode_signer(path: str) -> tuple:
-    """(status, subject) of *path*'s Authenticode signature, as Windows sees
-    it. ("", "") when it cannot be read."""
+    """(status, subject, issuer) of *path*'s Authenticode signature, as
+    Windows sees it. ("", "", "") when it cannot be read."""
     p = path.replace("'", "''")
     ps = (f"$s = Get-AuthenticodeSignature -LiteralPath '{p}'; "
           "Write-Output ([string]$s.Status); "
-          "Write-Output ([string]$s.SignerCertificate.Subject)")
+          "Write-Output ([string]$s.SignerCertificate.Subject); "
+          "Write-Output ([string]$s.SignerCertificate.Issuer)")
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
                            capture_output=True, text=True, timeout=60,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        lines = (r.stdout or "").strip().splitlines()
-        return (lines[0].strip() if lines else "",
-                lines[1].strip() if len(lines) > 1 else "")
-    except Exception:
-        return ("", "")
+        lines = [ln.strip() for ln in (r.stdout or "").strip().splitlines()]
+        lines += [""] * (3 - len(lines))
+        return (lines[0], lines[1], lines[2])
+    except Exception as exc:
+        print(f"[Updater] Could not read the signature of {path}: {exc}")
+        return ("", "", "")
+
+
+# Azure Artifact Signing issues our short-lived certificates from one of
+# Microsoft's "ID Verified" code-signing CAs (seen: "AOC CA 03"; the CA number
+# and the EOC/AOC kind rotate). Pinning the issuer as well as the subject means
+# a certificate someone else obtained with our company name, from any other CA,
+# is still refused.
+_SIGNER_ISSUER_RE = re.compile(
+    r"^CN=Microsoft ID Verified CS [A-Z]{3} CA \d{2}, O=Microsoft Corporation, C=US$")
+
+
+def check_signature(path: str, signer=authenticode_signer, what: str = "File") -> None:
+    """Raises IOError unless *path* carries a Valid Authenticode signature by
+    exactly brand.SIGNER_SUBJECT, issued by Microsoft's ID Verified CA."""
+    sig = tuple(signer(path) or ())
+    status = sig[0] if len(sig) > 0 else ""
+    subject = sig[1] if len(sig) > 1 else ""
+    issuer = sig[2] if len(sig) > 2 else ""
+    if status != "Valid" or subject != brand.SIGNER_SUBJECT:
+        raise IOError(f"{what} signature is {status or 'unreadable'} ({subject or 'no signer'})")
+    if not _SIGNER_ISSUER_RE.match(issuer or ""):
+        raise IOError(f"{what} is signed by our name but issued by "
+                      f"'{issuer or 'an unreadable issuer'}', not Microsoft ID Verified")
 
 
 def verify_installer(path: str, expected_bytes: int, sha256: str,
@@ -531,9 +557,7 @@ def verify_installer(path: str, expected_bytes: int, sha256: str,
         raise IOError("The release gives no SHA-256 for the installer: not running it")
     if file_sha256(path) != sha256.lower():
         raise IOError("Installer does not match the release checksum")
-    status, subject = signer(path)
-    if status != "Valid" or subject != brand.SIGNER_SUBJECT:
-        raise IOError(f"Installer signature is {status or 'unreadable'} ({subject or 'no signer'})")
+    check_signature(path, signer, "Installer")
 
 
 def _launch_flags() -> int:
@@ -945,7 +969,7 @@ def run_auto_update(
             return ok
         return _run_auto_update_once(version, url, current_exe, is_idle,
                                      on_status, apply_fn, poll_interval,
-                                     idle_samples, on_event)
+                                     idle_samples, on_event, signer)
     finally:
         # A real install exits the process before this; reaching it means the
         # run is over, so the bar must not stay up.
@@ -1111,7 +1135,8 @@ def _run_installer_update(version, is_idle, on_status, poll_interval, idle_sampl
 
 
 def _run_auto_update_once(version, url, current_exe, is_idle, on_status,
-                          apply_fn, poll_interval, idle_samples, on_event) -> bool:
+                          apply_fn, poll_interval, idle_samples, on_event,
+                          signer=None) -> bool:
     # A download file of this run's own: nothing else may write it between
     # verification and install. The shared fixed name is what let a second run
     # truncate a verified download.
@@ -1120,15 +1145,25 @@ def _run_auto_update_once(version, url, current_exe, is_idle, on_status,
     _sweep_stale_downloads(keep=dest)
     _emit(on_event, "download_start", None, f"v{version.lstrip('v')}")
 
-    # Exact asset size and GitHub's SHA-256 from the release check (when it's
-    # the same release): detect truncation even without a Content-Length
-    # header, and prove the bytes are the ones CI published.
+    # Exact asset size and GitHub's SHA-256 from the release check (the same
+    # release): detect truncation even without a Content-Length header, and
+    # prove the bytes are the ones CI published. Both the SHA-256 and our
+    # Authenticode signature are REQUIRED, as on the installer path: without
+    # them a swapped download would be installed and run.
     rel = cached_release() or {}
     expected = 0
     want_sha = ""
     if str(rel.get("version", "")).lstrip("vV") == version.lstrip("vV"):
         expected = int(rel.get("size") or 0)
         want_sha = str(rel.get("sha256") or "").lower()
+    if not want_sha:
+        msg = (f"release v{version.lstrip('vV')} gives no SHA-256 for "
+               f"{_DOWNLOAD_FILENAME}: not downloading it")
+        print(f"[Updater] Not updating: {msg}")
+        install_layout.log(f"Onefile update refused: {msg}", _app_data_dir())
+        on_status("")
+        _emit(on_event, "download_fail", False, msg[:300])
+        return False
 
     # Download with retries — transient network errors must not strand the
     # user on an old build until the next 6-hour check.
@@ -1146,9 +1181,10 @@ def _run_auto_update_once(version, url, current_exe, is_idle, on_status,
             _set_progress("verify")
             verify_exe(dest, expected_bytes=expected)
             digest = file_sha256(dest)
-            if want_sha and digest != want_sha:
+            if digest != want_sha:
                 raise IOError(f"Download does not match the release checksum "
                               f"({digest[:12]}… vs {want_sha[:12]}…)")
+            check_signature(dest, signer or authenticode_signer, "Update")
             last_exc = None
             break
         except Exception as exc:
@@ -1158,6 +1194,8 @@ def _run_auto_update_once(version, url, current_exe, is_idle, on_status,
         on_status("")  # clear status — next 6-hour check retries from scratch
         _set_progress("")
         _emit(on_event, "download_fail", False, str(last_exc)[:300])
+        install_layout.log(f"Onefile update to {version.lstrip('vV')} refused: {last_exc}",
+                           _app_data_dir())
         try:
             os.remove(dest)
         except OSError:
