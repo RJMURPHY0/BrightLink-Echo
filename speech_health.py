@@ -70,6 +70,19 @@ _RUNTIME_SIGNS = (
     "cannot import name",
 )
 
+# Windows' own words for "antivirus stopped this": ERROR_VIRUS_INFECTED (225)
+# when a scanner blocks opening a file, ERROR_VIRUS_DELETED (226) when it has
+# removed it. These are the ONLY codes read as antivirus for certain. 2 (file
+# not found), 5 (access denied) and 193 (bad image) have everyday causes too
+# (a half-finished update, a locked file, a 32-bit DLL) and are never listed
+# here (audit 2026-10-28).
+_ANTIVIRUS_SIGNS = (
+    "winerror 225",
+    "winerror 226",
+    "contains a virus",
+    "potentially unwanted software",
+)
+
 # A download failure that smells like the network/firewall rather than the file
 # being altered. Used only to word the hint; the cause stays DOWNLOAD_BLOCKED.
 _NETWORK_SIGNS = (
@@ -119,6 +132,11 @@ def classify_load_error(exc_text, files_present: bool) -> str:
     """
     if _matches(exc_text, _RUNTIME_SIGNS):
         return RUNTIME_BLOCKED
+    if _matches(exc_text, _ANTIVIRUS_SIGNS):
+        # A file antivirus refused to open (225) or deleted (226). Not a
+        # runtime DLL, so a model file; deleted means "not on disk" is no
+        # first-run download, and must not read as benign MODEL_MISSING.
+        return MODEL_BLOCKED
     if not files_present:
         return MODEL_MISSING
     if _norm(exc_text):
@@ -138,6 +156,12 @@ def download_error_is_tamper(err_text) -> bool:
     size mismatch) rather than a plain network failure — worth saying, because
     the fix is an antivirus exclusion, not 'check your wifi'."""
     return _matches(err_text, _TAMPER_SIGNS) and not _matches(err_text, _NETWORK_SIGNS)
+
+
+def is_antivirus_error(exc_text) -> bool:
+    """True only when Windows itself said antivirus blocked or removed the
+    file (WinError 225/226). Everything else is at most "likely"."""
+    return _matches(exc_text, _ANTIVIRUS_SIGNS)
 
 
 def is_blocked(cause: str) -> bool:
@@ -201,6 +225,7 @@ def log_detail(cause: str, *, engine: str = "", exc_text: str = "",
     sig = _norm(exc_text)
     if sig:
         detail["signature"] = sig[:300]
+        detail["antivirus"] = is_antivirus_error(sig)
     if files_present is not None:
         detail["files_present"] = bool(files_present)
     if cause == DOWNLOAD_BLOCKED:

@@ -10738,12 +10738,21 @@ class AppWindow:
             self._root, message, button_text, on_click, duration_ms))
 
     def set_update_status(self, text: str) -> None:
-        """Thread-safe update of the status label in the Settings version card."""
+        """Thread-safe update of the status label in the Settings version card.
+        A cleared status after a failed run shows why it failed (until the
+        next run starts) instead of going blank."""
         def _apply():
             lbl = getattr(self, "_update_status_lbl", None)
             if lbl is not None:
+                shown, colour = text, C["accent"]
+                if not text:
+                    from updater import update_failure
+                    from progress_bar import describe_update_failure
+                    failed = describe_update_failure(update_failure())
+                    if failed:
+                        shown, colour = failed, C["error"]
                 try:
-                    lbl.configure(text=text, fg=C["accent"])
+                    lbl.configure(text=shown, fg=colour)
                 except tk.TclError:
                     pass
             if text:
@@ -10906,13 +10915,21 @@ class AppWindow:
                 # retries (on success apply_update replaces the exe and exits the
                 # process). Fall back to opening the release page in the browser —
                 # a genuine last resort so the user is never fully stuck.
-                _log_event("manual_fallback_browser", False, "in-place download failed")
+                from updater import update_failure
+                failed = update_failure()
+                stage = failed.get("stage") or "unknown"
+                _log_event("manual_fallback_browser", False,
+                           f"in-place update failed at {stage}")
                 from error_reporter import report_error
                 report_error(
-                    f"Manual 'Update Now' failed to download v{version}",
-                    context={"version": version, "url": download_url},
+                    f"Manual 'Update Now' failed at {stage} for v{version}",
+                    context={"version": version, "url": download_url,
+                             "stage": stage,
+                             "detail": failed.get("detail", "")},
                     user_email=getattr(self._auth, "user_email", None),
                 )
+                # Say why on the version line; the button comes back to retry.
+                self.set_update_status("")
                 import webbrowser
                 from updater import manual_download_url
                 webbrowser.open(manual_download_url())

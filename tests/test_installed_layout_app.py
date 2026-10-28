@@ -251,7 +251,41 @@ class HealthTests(unittest.TestCase):
     def test_health_is_reported_when_the_core_has_loaded(self):
         src = inspect.getsource(app_mod.WhisperFlowApp._init_core)
         body = src.split("finally:")[0]
-        self.assertIn("_report_healthy()", body)       # inside try: only on success
+        # inside try: only on success, and only through the runtime check
+        self.assertIn("self._report_activation_ready", body)
+        self.assertNotIn("_report_healthy()", body)
+
+    def _activation_ready(self, runtime_error):
+        a = app_mod.WhisperFlowApp.__new__(app_mod.WhisperFlowApp)
+        events = []
+        a._log_error_event = lambda ev, detail, **kw: events.append((ev, detail))
+        with mock.patch.object(sys, "frozen", True, create=True), \
+                mock.patch.object(app_mod, "_native_runtime_error",
+                                  return_value=runtime_error), \
+                mock.patch.object(app_mod, "_report_healthy") as healthy:
+            a._report_activation_ready()
+        return healthy, events
+
+    def test_a_quarantined_speech_dll_keeps_the_rollback(self):
+        # Health made activate.ps1 delete the .previous exe even when
+        # onnxruntime's DLL had been quarantined (audit 2026-10-28).
+        healthy, events = self._activation_ready(
+            "onnxruntime: ImportError: DLL load failed: [WinError 225]")
+        healthy.assert_not_called()
+        self.assertEqual("activation_runtime_blocked", events[0][0])
+
+    def test_health_follows_a_clean_runtime_import(self):
+        healthy, events = self._activation_ready("")
+        healthy.assert_called_once_with()
+        self.assertEqual([], events)
+
+    def test_runtime_check_names_the_module_that_failed(self):
+        def importer(name):
+            if name == "ctranslate2":
+                raise OSError("[WinError 226] virus deleted")
+        err = app_mod._native_runtime_error(importer)
+        self.assertTrue(err.startswith("ctranslate2: OSError"), err)
+        self.assertEqual("", app_mod._native_runtime_error(lambda n: None))
 
     def test_a_duplicate_launch_reports_health_before_exiting(self):
         src = inspect.getsource(app_mod._ensure_single_instance)

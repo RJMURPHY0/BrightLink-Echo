@@ -549,13 +549,20 @@ def retarget_script(dirs: list, old_exes: list, exe: str) -> str:
         "if ($old -contains $l.TargetPath) { "
         f"$l.TargetPath = '{_ps_quote(exe)}'; "
         f"$l.WorkingDirectory = '{_ps_quote(os.path.dirname(exe))}'; "
-        "$l.Save(); Write-Output ('retargeted ' + $f.FullName) } } catch {} } }"
+        "$l.Save(); Write-Output ('retargeted ' + $f.FullName) } } catch {} } }; "
+        f"Write-Output '{_RETARGET_DONE}'"
     )
+
+
+_RETARGET_DONE = "retarget finished"
 
 
 def retarget_legacy_links(exe: str) -> list:
     """Point shortcuts and taskbar/Start pins that still open the legacy exe
-    (moved away by the v1.8.5 migration) at *exe*. Returns what it changed."""
+    (moved away by the v1.8.5 migration) at *exe*. Returns what it changed,
+    or a "could not ..." step when PowerShell did not run to the end (killed
+    by antivirus, say): an empty list from a dead script latched the job as
+    done for good (audit 2026-10-28)."""
     old = data_paths.canonical_exe(data_paths.legacy_local_dir())
     if os.path.normcase(os.path.abspath(old)) == os.path.normcase(os.path.abspath(exe)):
         return []
@@ -567,8 +574,12 @@ def retarget_legacy_links(exe: str) -> list:
         )
     except Exception as e:
         return [f"could not check shortcuts: {e}"]
-    return [line.strip() for line in (r.stdout or "").splitlines()
-            if line.startswith("retargeted ")]
+    lines = (r.stdout or "").splitlines()
+    if r.returncode != 0 or _RETARGET_DONE not in (l.strip() for l in lines):
+        err = (r.stderr or "").strip().splitlines()
+        return [f"could not check shortcuts: PowerShell exit {r.returncode}"
+                + (f" ({err[-1][:200]})" if err else "")]
+    return [line.strip() for line in lines if line.startswith("retargeted ")]
 
 
 # ── Notification name ────────────────────────────────────────────────────────

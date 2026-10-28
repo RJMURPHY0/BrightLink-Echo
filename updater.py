@@ -324,6 +324,40 @@ def _progress_bytes(done: int, total: int = 0) -> None:
             _rate_samples.pop(0)
 
 
+# The last run's failure, kept until the next run starts so the Updates card
+# can say what went wrong instead of going blank (audit 2026-10-28: a blocked
+# download or a killed helper left no trace on screen).
+# stage: "release" | "download" | "verify" | "stage" | "check" | "handover"
+_failure = {"stage": "", "version": "", "detail": "", "time": 0.0}
+
+
+def _set_failure(stage: str, version: str = "", detail: str = "") -> None:
+    with _PROGRESS_LOCK:
+        _failure.update(stage=stage, version=(version or "").lstrip("vV"),
+                        detail=str(detail)[:300], time=time.time())
+
+
+def _clear_failure() -> None:
+    with _PROGRESS_LOCK:
+        _failure.update(stage="", version="", detail="", time=0.0)
+
+
+def update_failure() -> dict:
+    """Why the last update run stopped ({"stage": ""} when it did not)."""
+    with _PROGRESS_LOCK:
+        return dict(_failure)
+
+
+def _fail(on_status, on_event, stage: str, version: str, event: str,
+          detail: str) -> None:
+    """Record a failed run: the failure first, so a UI that redraws on the
+    cleared status already sees it."""
+    _set_failure(stage, version, detail)
+    on_status("")
+    _set_progress("")
+    _emit(on_event, event, False, str(detail)[:300])
+
+
 def update_progress() -> dict:
     """What the update in flight is doing, for display. "fraction" is None
     when the size is unknown, "seconds_left" is None until enough of the
@@ -625,28 +659,137 @@ def spawn_activation(version: str, pid: int, root: str = "",
         cmd.append("-Relaunch")
     std = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                stderr=subprocess.DEVNULL, env=pyi_runtime.clean_launch_env())
+    global _helper_proc
     try:
-        subprocess.Popen(cmd, creationflags=_launch_flags()
-                         | subprocess.CREATE_BREAKAWAY_FROM_JOB, **std)
+        _helper_proc = subprocess.Popen(cmd, creationflags=_launch_flags()
+                                        | subprocess.CREATE_BREAKAWAY_FROM_JOB, **std)
     except OSError:
-        subprocess.Popen(cmd, creationflags=_launch_flags(), **std)
+        _helper_proc = subprocess.Popen(cmd, creationflags=_launch_flags(), **std)
     return script
 
 
-def apply_installed_update(version: str, root: str = "") -> None:
-    """Hand over to activate.ps1 and exit, so nothing of ours holds the files
-    it swaps. Guarded like apply_update: only the first caller acts."""
+# How long the app waits for the helper it started (activate.ps1 or the swap
+# script) to log its first line before exiting. A started powershell.exe
+# proves nothing: antivirus can kill it the moment it starts (Avast did to the
+# uninstaller's, 2026-10-12), and an app that exited anyway just vanished.
+_HELPER_CONFIRM_SECONDS = 30.0
+# After the helper confirms, how long the app waits for idle before exiting
+# anyway: the wait for confirmation can outlast the idle check that preceded
+# it, and activate.ps1 stops waiting for this process after 10 minutes.
+_EXIT_IDLE_WAIT_SECONDS = 480.0
+# The helper last started (the Popen), so one that never confirmed can be
+# stopped: left alone it could start late and close the app mid-dictation.
+_helper_proc = None
+
+
+def _abandon_helper() -> bool:
+    """Stop the helper that never confirmed. True when it is gone, so another
+    attempt cannot race it."""
+    proc = _helper_proc
+    if proc is None:
+        return True
+    try:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(5)
+        return proc.poll() is not None
+    except Exception as e:
+        print(f"[Updater] Could not stop the update helper: {e}")
+        return False
+
+
+def _unconfirmed(what: str, root: str = "") -> bool:
+    """The helper did not start: stop it and allow another attempt (Update
+    Now) when it is certainly gone. Always returns False for the caller."""
     global _apply_started
-    with _APPLY_LOCK:
-        if _apply_started:
-            return
-        _apply_started = True
-    spawn_activation(version, os.getpid(), root)
+    gone = _abandon_helper()
+    if gone:
+        with _APPLY_LOCK:
+            _apply_started = False
+    msg = (f"{what} did not start within {_HELPER_CONFIRM_SECONDS:.0f}s; not exiting"
+           + ("." if gone else " (it could not be stopped, so no retry until restart)."))
+    print(f"[Updater] {msg}")
+    if root:
+        install_layout.log(msg, root)
+    return False
+
+
+def _exit_when_idle(is_idle: Optional[Callable[[], bool]]) -> None:
+    deadline = time.monotonic() + _EXIT_IDLE_WAIT_SECONDS
+    while is_idle is not None and time.monotonic() < deadline:
+        try:
+            if is_idle():
+                break
+        except Exception:
+            break
+        time.sleep(0.5)
     os._exit(0)
 
 
+def _log_size(path: str) -> int:
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def helper_confirmed(log_path: str, offset: int, marker: str,
+                     wait: Optional[float] = None) -> bool:
+    """True once *marker* appears in *log_path* after *offset* bytes (the
+    log's size before the helper started, so an older attempt's line never
+    counts)."""
+    wanted = (marker.encode("ascii"), marker.encode("utf-16-le"))
+    if wait is None:
+        wait = _HELPER_CONFIRM_SECONDS
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            with open(log_path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(offset if f.tell() >= offset else 0)
+                data = f.read()
+            if any(w in data for w in wanted):
+                return True
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.2)
+
+
+def apply_installed_update(version: str, root: str = "",
+                           is_idle: Optional[Callable[[], bool]] = None) -> bool:
+    """Hand over to activate.ps1 and exit, so nothing of ours holds the files
+    it swaps. Guarded like apply_update: only the first caller acts.
+
+    Exits only once activate.ps1 has logged that it is running, and then
+    only when *is_idle* says so (a dictation may have started meanwhile).
+    Returns False when it did not start (antivirus killed it, most likely):
+    the helper is stopped so it cannot start late and close the app, and the
+    app keeps running and may try again."""
+    global _apply_started
+    with _APPLY_LOCK:
+        if _apply_started:
+            return False
+        _apply_started = True
+    root = root or install_layout.install_dir()
+    pid = os.getpid()
+    log_path = os.path.join(root, install_layout.UPDATE_LOG)
+    offset = _log_size(log_path)
+    spawn_activation(version, pid, root)
+    if not helper_confirmed(log_path, offset, f"Started. Mode=Update WaitPid={pid}"):
+        return _unconfirmed(f"activate.ps1 for {version.lstrip('vV')}", root)
+    _exit_when_idle(is_idle)
+    return True
+
+
+def _swap_log_path() -> str:
+    return os.path.join(tempfile.gettempdir(), f"{brand.FILE_SLUG}_update.log")
+
+
 def apply_update(new_exe: str, current_exe: str,
-                 sha256: Optional[str] = None) -> None:
+                 sha256: Optional[str] = None,
+                 is_idle: Optional[Callable[[], bool]] = None) -> bool:
     """
     Launch a detached PowerShell script that waits for this process to exit,
     installs the new exe over the current one (with retries for AV file locks),
@@ -661,17 +804,26 @@ def apply_update(new_exe: str, current_exe: str,
     Idempotent per process: the manual "Update Now" button and the automatic
     updater can both reach this — only the first caller wins, the rest no-op
     (two swap scripts racing over the same exe corrupts the install).
+
+    Exits only once the script has logged that it is running; returns False
+    (and keeps running) when it did not, as apply_installed_update does.
     """
     global _apply_started
     with _APPLY_LOCK:
         if _apply_started:
-            return
+            return False
         _apply_started = True
     if not sha256:
         sha256 = file_sha256(new_exe)
-    spawn_swap_script(new_exe, current_exe, os.getpid(), sha256=sha256)
-    # os._exit guarantees the process dies immediately so the PS script unblocks
-    os._exit(0)
+    pid = os.getpid()
+    log_path = _swap_log_path()
+    offset = _log_size(log_path)
+    spawn_swap_script(new_exe, current_exe, pid, sha256=sha256, log_file=log_path)
+    if not helper_confirmed(log_path, offset, f"Update started. PID={pid}"):
+        return _unconfirmed("The swap script")
+    # os._exit guarantees the process dies at once so the PS script unblocks
+    _exit_when_idle(is_idle)
+    return True
 
 
 def spawn_swap_script(new_exe: str, current_exe: str, pid: int,
@@ -698,8 +850,7 @@ def spawn_swap_script(new_exe: str, current_exe: str, pid: int,
     # folder is writable, since the script replaces the exe in it.
     ps_file = ps_file or os.path.join(os.path.dirname(os.path.abspath(current_exe)),
                                       f"{brand.FILE_SLUG}_update.ps1")
-    log_file = (log_file or os.path.join(tempfile.gettempdir(),
-                                         f"{brand.FILE_SLUG}_update.log")).replace("'", "''")
+    log_file = (log_file or _swap_log_path()).replace("'", "''")
     script = f"""
 $NewExe = '{new_ps}'
 $CurExe = '{cur_ps}'
@@ -825,15 +976,16 @@ Log "Done."
     import pyi_runtime
     std = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                stderr=subprocess.DEVNULL, env=pyi_runtime.clean_launch_env())
+    global _helper_proc
     try:
         # Break out of any job object (Task Scheduler wraps the logon-task app
         # in one) so the swap script can't be reaped when the task's process
         # tree is torn down at os._exit.
-        subprocess.Popen(
+        _helper_proc = subprocess.Popen(
             cmd, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **std
         )
     except OSError:
-        subprocess.Popen(cmd, creationflags=flags, **std)
+        _helper_proc = subprocess.Popen(cmd, creationflags=flags, **std)
     return log_file
 
 
@@ -953,11 +1105,12 @@ def run_auto_update(
         if _run_active:
             return True
         _run_active = True
+    _clear_failure()
     try:
         route = update_route(version, layout, root=_app_data_dir())
         if route == "none":
-            on_status("")
-            _emit(on_event, "download_fail", False, "release has no installer")
+            _fail(on_status, on_event, "release", version, "download_fail",
+                  "release has no installer")
             return False
         if route == "installer":
             ok = _run_installer_update(version, is_idle, on_status, poll_interval,
@@ -1071,9 +1224,9 @@ def _run_installer_update(version, is_idle, on_status, poll_interval, idle_sampl
             last_exc = exc
             print(f"[Updater] Installer download attempt {attempt} failed: {exc}")
     if last_exc is not None:
-        on_status("")
-        _set_progress("")
-        _emit(on_event, "download_fail", False, f"installer: {last_exc}"[:300])
+        _fail(on_status, on_event,
+              "verify" if update_progress()["phase"] == "verify" else "download",
+              v, "download_fail", f"installer: {last_exc}")
         install_layout.log(f"Installer for {v} refused: {last_exc}", root)
         try:
             os.remove(dest)
@@ -1093,9 +1246,7 @@ def _run_installer_update(version, is_idle, on_status, poll_interval, idle_sampl
     try:
         (stage_fn or stage_installer)(dest, v, root=root)
     except Exception as exc:
-        on_status("")
-        _set_progress("")
-        _emit(on_event, "stage_fail", False, str(exc)[:300])
+        _fail(on_status, on_event, "stage", v, "stage_fail", str(exc))
         install_layout.log(f"Staging {v} failed: {exc}", root)
         return False
     finally:
@@ -1120,9 +1271,7 @@ def _run_installer_update(version, is_idle, on_status, poll_interval, idle_sampl
         if not _pending_exe_ok(v, root):
             raise IOError("the staged exe changed before install")
     except Exception as exc:
-        on_status("")
-        _set_progress("")
-        _emit(on_event, "stage_fail", False, f"pre-install check: {exc}"[:300])
+        _fail(on_status, on_event, "check", v, "stage_fail", f"pre-install check: {exc}")
         install_layout.log(f"Not installing {v}: {exc}", root)
         return False
 
@@ -1130,7 +1279,10 @@ def _run_installer_update(version, is_idle, on_status, poll_interval, idle_sampl
     on_status(f"Installing v{v} — restarting…")
     _emit(on_event, "swap_started", True, f"v{v} installer")
     install_layout.log(f"Handing over to activate.ps1 for {v}.", root)
-    (activate_fn or apply_installed_update)(v, root)
+    activate = activate_fn or (lambda ver, r: apply_installed_update(ver, r, is_idle=is_idle))
+    if activate(v, root) is False:
+        _fail(on_status, on_event, "handover", v, "swap_fail",
+              "activate.ps1 did not start (antivirus?)")
     return False
 
 
@@ -1161,8 +1313,7 @@ def _run_auto_update_once(version, url, current_exe, is_idle, on_status,
                f"{_DOWNLOAD_FILENAME}: not downloading it")
         print(f"[Updater] Not updating: {msg}")
         install_layout.log(f"Onefile update refused: {msg}", _app_data_dir())
-        on_status("")
-        _emit(on_event, "download_fail", False, msg[:300])
+        _fail(on_status, on_event, "release", version, "download_fail", msg)
         return False
 
     # Download with retries — transient network errors must not strand the
@@ -1191,9 +1342,10 @@ def _run_auto_update_once(version, url, current_exe, is_idle, on_status,
             last_exc = exc
             print(f"[Updater] Download attempt {attempt} failed: {exc}")
     if last_exc is not None:
-        on_status("")  # clear status — next 6-hour check retries from scratch
-        _set_progress("")
-        _emit(on_event, "download_fail", False, str(last_exc)[:300])
+        # The next 6-hour check (or Update Now) retries from scratch.
+        _fail(on_status, on_event,
+              "verify" if update_progress()["phase"] == "verify" else "download",
+              version, "download_fail", str(last_exc))
         install_layout.log(f"Onefile update to {version.lstrip('vV')} refused: {last_exc}",
                            _app_data_dir())
         try:
@@ -1218,9 +1370,8 @@ def _run_auto_update_once(version, url, current_exe, is_idle, on_status,
             raise IOError("the verified download changed before install")
     except Exception as exc:
         print(f"[Updater] Not installing: {exc}")
-        on_status("")
-        _set_progress("")
-        _emit(on_event, "download_fail", False, f"pre-install check: {exc}"[:300])
+        _fail(on_status, on_event, "check", version, "download_fail",
+              f"pre-install check: {exc}")
         try:
             os.remove(dest)
         except OSError:
@@ -1230,5 +1381,8 @@ def _run_auto_update_once(version, url, current_exe, is_idle, on_status,
     _set_progress("install")
     on_status(f"Installing v{version.lstrip('v')} — restarting…")
     _emit(on_event, "swap_started", True, f"v{version.lstrip('v')}")
-    (apply_fn or apply_update)(dest, current_exe, sha256=digest)
+    apply = apply_fn or (lambda n, c, sha256: apply_update(n, c, sha256=sha256, is_idle=is_idle))
+    if apply(dest, current_exe, sha256=digest) is False:
+        _fail(on_status, on_event, "handover", version, "swap_fail",
+              "swap script did not start (antivirus?)")
     return False

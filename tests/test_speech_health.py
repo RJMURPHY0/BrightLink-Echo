@@ -70,6 +70,53 @@ class LoadErrorClassificationTests(unittest.TestCase):
         self.assertFalse(sh.is_blocked(c))
 
 
+class AntivirusSignatureTests(unittest.TestCase):
+    """WinError 225 (ERROR_VIRUS_INFECTED) and 226 (ERROR_VIRUS_DELETED) are
+    Windows saying antivirus stopped the file. 2, 5 and 193 are not (audit
+    2026-10-28)."""
+
+    VIRUS_INFECTED = ("OSError: [WinError 225] Operation did not complete "
+                      "successfully because the file contains a virus or "
+                      "potentially unwanted software")
+    VIRUS_DELETED = ("OSError: [WinError 226] This file contains a virus or "
+                     "potentially unwanted software and cannot be opened.")
+
+    def test_225_and_226_are_antivirus(self):
+        for exc in (self.VIRUS_INFECTED, self.VIRUS_DELETED):
+            self.assertTrue(sh.is_antivirus_error(exc), exc)
+
+    def test_a_dll_antivirus_blocked_is_runtime_blocked(self):
+        exc = ("ImportError: DLL load failed while importing "
+               "onnxruntime_pybind11_state: " + self.VIRUS_INFECTED)
+        self.assertEqual(sh.RUNTIME_BLOCKED,
+                         sh.classify_load_error(exc, files_present=True))
+
+    def test_a_model_antivirus_deleted_is_never_benign_missing(self):
+        # 226 removes the file, so it is "not on disk", but no first-run
+        # download is on its way: the user must be told.
+        c = sh.classify_load_error(self.VIRUS_DELETED, files_present=False)
+        self.assertEqual(sh.MODEL_BLOCKED, c)
+        self.assertTrue(sh.is_blocked(c))
+
+    def test_generic_codes_are_not_antivirus(self):
+        for exc in ("FileNotFoundError: [WinError 2] The system cannot find "
+                    "the file specified",
+                    "PermissionError: [WinError 5] Access is denied",
+                    "OSError: [WinError 193] %1 is not a valid Win32 application"):
+            self.assertFalse(sh.is_antivirus_error(exc), exc)
+            self.assertNotEqual(sh.RUNTIME_BLOCKED,
+                                sh.classify_load_error(exc, files_present=True), exc)
+        self.assertEqual(sh.MODEL_MISSING, sh.classify_load_error(
+            "FileNotFoundError: [WinError 2] The system cannot find the file",
+            files_present=False))
+
+    def test_log_detail_says_when_windows_confirmed_antivirus(self):
+        self.assertTrue(sh.log_detail(sh.MODEL_BLOCKED,
+                                      exc_text=self.VIRUS_DELETED)["antivirus"])
+        self.assertFalse(sh.log_detail(sh.MODEL_BLOCKED,
+                                       exc_text="[WinError 5] Access is denied")["antivirus"])
+
+
 class DownloadErrorClassificationTests(unittest.TestCase):
 
     def test_download_failure_is_always_blocking(self):

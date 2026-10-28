@@ -168,6 +168,33 @@ class RunProgressTests(unittest.TestCase):
         p = updater.update_progress()
         self.assertEqual(p["phase"], "")
         self.assertFalse(p["running"])
+        # ...but the Updates card still says why (audit 2026-10-28).
+        f = updater.update_failure()
+        self.assertEqual("download", f["stage"])
+        self.assertIn("network went away", f["detail"])
+
+    def test_a_swap_script_that_never_starts_is_a_failure(self):
+        with mock.patch.object(updater, "download_update", self._download()):
+            self.assertFalse(self._run(apply_fn=lambda *a, **k: False))
+        self.assertEqual("handover", updater.update_failure()["stage"])
+
+
+class FailureTextTests(unittest.TestCase):
+    def test_each_failure_names_antivirus_and_the_retry(self):
+        from progress_bar import describe_update_failure
+        for stage in ("download", "verify", "stage", "check", "handover"):
+            text = describe_update_failure({"stage": stage})
+            self.assertIn("Antivirus", text.replace("antivirus", "Antivirus"))
+            self.assertTrue(text.endswith("Update Now retries."), text)
+
+    def test_no_failure_no_text(self):
+        from progress_bar import describe_update_failure
+        self.assertEqual("", describe_update_failure({"stage": ""}))
+        self.assertEqual("", describe_update_failure({}))
+
+    def test_a_release_problem_does_not_blame_antivirus(self):
+        from progress_bar import describe_update_failure
+        self.assertNotIn("ntivirus", describe_update_failure({"stage": "release"}))
 
 
 class StagingProgressTests(unittest.TestCase):

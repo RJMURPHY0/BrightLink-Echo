@@ -553,13 +553,33 @@ class WhisperFlowApp:
             threading.Thread(
                 target=self._preload_parakeet, daemon=True, name="parakeet-preload"
             ).start()
-            # The native-heavy imports above are what a broken build fails
-            # on. activate.ps1 rolls a new version back only if it exits
-            # before this, whether or not anyone is signed in.
-            _report_healthy()
+            # activate.ps1 drops the rollback exe once health.json appears, so
+            # it is written only after the speech runtimes' native DLLs load
+            # (the files antivirus quarantines). Never waits on a model
+            # download. Signed in or not.
+            threading.Thread(target=self._report_activation_ready,
+                             daemon=True, name="activation-ready").start()
             self._start_update_check()
         finally:
             self._core_ready.set()
+
+    def _report_activation_ready(self) -> None:
+        """Write health.json once onnxruntime and ctranslate2 import. Their
+        imports are lazy, so the core loading proved nothing about them: a
+        version whose speech DLL was quarantined reported healthy and the
+        rollback exe was deleted. Without the report activate.ps1 keeps the
+        .previous exe and its folder (the app is still running), and the
+        next launch that imports cleanly reports health."""
+        if not getattr(sys, "frozen", False):
+            return
+        err = _native_runtime_error()
+        if err:
+            print(f"[App] Speech runtime failed to load ({err}); "
+                  f"not reporting health, the previous version is kept")
+            self._log_error_event("activation_runtime_blocked",
+                                  {"version": APP_VERSION, "error": err[:300]})
+            return
+        _report_healthy()
 
     def _get_input_devices_blocking(self):
         """Device enumeration for the settings tab (always called on a worker
@@ -661,10 +681,38 @@ class WhisperFlowApp:
                     return
                 verify_model_files(version=_ver)
             self.parakeet.load_model()
+            if not self.parakeet.is_loaded and self._repair_parakeet_model(_ver):
+                self.parakeet.load_model()
             if self.parakeet.is_loaded:
                 print("[App] Parakeet engine active — near-instant transcription enabled.")
         except Exception as e:
             print(f"[App] Parakeet init failed ({e}) — using Whisper pipeline.")
+
+    def _repair_parakeet_model(self, version: str) -> bool:
+        """After a failed load: download the model again when its files were
+        removed or changed after the startup check (antivirus, usually), as
+        the model_blocked message promises. Returns True when fresh files are
+        in place and the load may be retried. A runtime DLL failure never
+        re-downloads (the model is not what is broken), and nor do intact
+        files that still fail to load."""
+        import speech_health
+        from asr_engine import model_files_present, verify_model_files
+        err = getattr(self.parakeet, "last_load_error", "") or ""
+        if (speech_health.classify_load_error(err, files_present=True)
+                == speech_health.RUNTIME_BLOCKED):
+            return False
+        if model_files_present(version=version) and verify_model_files(version=version):
+            return False
+        print(f"[App] Parakeet model ({version}) went missing or changed after "
+              f"the startup check — downloading it again.")
+        self._log_error_event("parakeet_model_repair", {"error": err[:300]})
+        threading.Thread(target=self._load_whisper_fallback,
+                         daemon=True, name="whisper-fallback").start()
+        if not self._download_parakeet_with_retry(version):
+            return False
+        verify_model_files(version=version)
+        self.parakeet.reset_load_failure()
+        return True
 
     def _preload_parakeet(self) -> None:
         """Startup thread: bring Parakeet up, then hold exactly the whisper
@@ -4398,6 +4446,24 @@ def _clean_stale_runtime_dirs() -> None:
                 pass              # locked = in use, leave it
     except Exception as e:
         print(f"[App] Runtime cleanup skipped (non-fatal): {e}")
+
+
+_NATIVE_RUNTIME_MODULES = ("onnxruntime", "ctranslate2")
+
+
+def _native_runtime_error(importer=None) -> str:
+    """'' when every speech runtime imports, else '<module>: <error>' for the
+    first that does not. Never raises."""
+    import importlib
+    importer = importer or importlib.import_module
+    for name in _NATIVE_RUNTIME_MODULES:
+        try:
+            importer(name)
+        except BaseException as e:   # a DLL init failure can be SystemError
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
+            return f"{name}: {type(e).__name__}: {e}"
+    return ""
 
 
 def _report_healthy(cleanup: bool = True) -> None:

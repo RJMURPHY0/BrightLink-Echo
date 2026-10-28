@@ -646,6 +646,34 @@ class LegacyRegistrationTests(unittest.TestCase):
         self.assertIn('state.get("legacy_cleared_for") != exe or legacy_entry_present()', src)
         self.assertIn("legacy_cleared_for=exe", src)
 
+    def _retarget_with(self, returncode, stdout, stderr=""):
+        done = mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
+        with mock.patch.object(app_install.data_paths, "canonical_exe",
+                               return_value=r"C:\L\Old\Old.exe"), \
+                mock.patch.object(app_install.subprocess, "run", return_value=done):
+            return app_install.retarget_legacy_links(r"C:\L\New\New.exe")
+
+    def test_a_killed_retarget_is_not_reported_as_done(self):
+        # Antivirus killed PowerShell: non-zero exit, nothing on stdout. That
+        # returned [] and latched legacy_cleared_for (audit 2026-10-28).
+        steps = self._retarget_with(1, "", "Access is denied")
+        self.assertEqual(1, len(steps))
+        self.assertTrue(steps[0].startswith("could not"), steps)
+
+    def test_a_script_cut_off_before_its_end_is_not_done(self):
+        steps = self._retarget_with(0, "retargeted C:\\a.lnk\n")
+        self.assertTrue(steps[0].startswith("could not"), steps)
+
+    def test_a_finished_retarget_reports_its_changes(self):
+        steps = self._retarget_with(
+            0, f"retargeted C:\\a.lnk\n{app_install._RETARGET_DONE}\n")
+        self.assertEqual(["retargeted C:\\a.lnk"], steps)
+        self.assertEqual([], self._retarget_with(0, app_install._RETARGET_DONE + "\n"))
+
+    def test_the_script_says_when_it_finished(self):
+        ps = app_install.retarget_script([r"C:\d"], [r"C:\o.exe"], r"C:\n.exe")
+        self.assertTrue(ps.endswith(f"Write-Output '{app_install._RETARGET_DONE}'"))
+
     def test_the_uninstaller_can_delete_either_folder(self):
         with mock.patch.dict(os.environ, {"LOCALAPPDATA": r"C:\L", "APPDATA": r"C:\R"}):
             import brand

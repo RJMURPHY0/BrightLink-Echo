@@ -93,6 +93,27 @@ def describe_update(p: dict, now: Optional[float] = None) -> Optional[Tuple[floa
     return None
 
 
+_FAILURE_TEXT = {
+    "download": "Update didn't download. Antivirus or the network may have blocked it.",
+    "verify": "Update failed its safety check. Antivirus may have changed the file.",
+    "stage": "Update couldn't be prepared. Antivirus may have removed its files.",
+    "check": "Update files changed before install. Antivirus may have removed them.",
+    "handover": "Update couldn't start its installer. Antivirus may have blocked it.",
+}
+
+
+def describe_update_failure(f: dict) -> str:
+    """One line for updater.update_failure(), '' when the last run did not
+    fail. A release-side problem retries on its own; the rest can be retried
+    with Update Now."""
+    stage = (f or {}).get("stage") or ""
+    if not stage:
+        return ""
+    if stage == "release":
+        return "Update not available yet. Echo will try again later."
+    return _FAILURE_TEXT.get(stage, "Update didn't finish.") + " Update Now retries."
+
+
 class StepProgress:
     """Drives a ProgressBar through *steps* equal segments. The bar eases
     toward 90% of the current segment while that step runs and only enters

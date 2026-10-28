@@ -287,6 +287,26 @@ class InstallerRunTests(unittest.TestCase):
         self.assertEqual(1, il.migration_failures("1.8.0", self.dir))
         self.assertIn("stage_fail", [e[0] for e in self.events])
 
+    def test_a_helper_that_never_starts_leaves_a_visible_failure(self):
+        # activate.ps1 killed by antivirus: apply_installed_update returns
+        # False instead of exiting, and the run says why (audit 2026-10-28).
+        self.assertFalse(updater.run_auto_update(
+            "v1.8.0", "u", "c", is_idle=self._idle, poll_interval=0.0,
+            idle_samples=1, layout="onedir", stage_fn=self._stage, signer=_VALID,
+            on_event=lambda *e: self.events.append(e),
+            activate_fn=lambda v, root: False))
+        self.assertEqual("handover", updater.update_failure()["stage"])
+        self.assertIn("swap_fail", [e[0] for e in self.events])
+        self.assertEqual("", updater.update_progress()["phase"])
+
+    def test_a_failed_stage_is_kept_until_the_next_run(self):
+        def boom(setup, version, root=""):
+            raise IOError("Installer exited with code 5")
+        self.assertFalse(self._run(stage=boom))
+        self.assertEqual("stage", updater.update_failure()["stage"])
+        self.assertFalse(self._run())          # the retry starts clean
+        self.assertEqual("", updater.update_failure()["stage"])
+
     def test_a_staged_file_lost_while_waiting_stops_the_install(self):
         def idle():
             # Antivirus quarantines a DLL while the app waits for idle.

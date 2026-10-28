@@ -415,6 +415,14 @@ class ParakeetTranscriber:
             not self._load_failed and model_files_present(version=self._model_version)
         )
 
+    def reset_load_failure(self) -> None:
+        """Let load_model try again once the model files have been downloaded
+        afresh. A failed load latches so a broken install does not retry on
+        every press; the app clears it only after repairing the files."""
+        with self._load_lock:
+            self._load_failed = False
+            self.last_load_error = ""
+
     def load_model(self) -> bool:
         """Load the model if the files are present. Never downloads (call
         download_model() from a UI-aware thread for that). Returns success."""
