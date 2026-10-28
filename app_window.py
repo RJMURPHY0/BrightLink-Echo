@@ -18,6 +18,7 @@ import bookmark_tabs
 import word_fixes
 from latest_worker import LatestWorker
 import ui_render
+import snapshot_cover
 from datetime import date as _date, datetime, timedelta
 from typing import Callable, Optional
 import ctypes
@@ -121,6 +122,12 @@ _PANEL_VALUE_Y = 50
 # nobody is ever trapped watching dots.
 _SIGNIN_GRACE_MS = 20000
 _SIGNIN_ESCAPE_MS = 7000
+# Sign-in hand-over: the picture of the sign-in page stays up until the
+# dashboard behind it reads the same _COVER_STABLE_READS times in a row,
+# _COVER_POLL_MS apart, and never longer than _COVER_MAX_MS in all.
+_COVER_POLL_MS = 35
+_COVER_STABLE_READS = 3
+_COVER_MAX_MS = 1500
 
 
 # ── Multi-monitor geometry ────────────────────────────────────────────────────
@@ -3653,14 +3660,14 @@ class AppWindow:
         # resize the dashboard.
         self._login_ui.embed(self._login_frame,
                              on_height_change=self._resize_login_page,
-                             base_height=self._natural_dash_h)
+                             base_height=lambda: self._handover_size()[1])
 
     def _resize_login_page(self, height: int) -> None:
         """Apply the height the login page asked for, if it is showing."""
         if not getattr(self, "_login_visible", False):
             return
         try:
-            self._resize(WINDOW_W, int(height))
+            self._resize(self._handover_size()[0], int(height))
         except Exception as exc:
             print(f"[AppWindow] Login resize failed (non-fatal): {exc}")
 
@@ -3775,29 +3782,96 @@ class AppWindow:
             self._dash_frame.pack_forget()
             self._signing_in_frame.pack_forget()
             self._login_frame.pack(fill="both", expand=True)
-            # The login page knows what it needs; 560 was a fixed number from
-            # when both modes were the same shape.
-            h = 560
+            # The page holds the shape of the dashboard the sign-in will land
+            # on, taller only when a mode needs it (_login_ui knows).
+            w, h = self._handover_size()
             ui = getattr(self, "_login_ui", None)
             if ui is not None:
                 try:
                     h = ui.required_height()
                 except Exception:
-                    h = 560
-            self._resize(WINDOW_W, h)
+                    pass
+            self._resize(w, h)
         self._atomic_ui(_swap)
         if hasattr(self, "_login_ui"):
             self._login_ui.reset()
 
     def _switch_to_dashboard(self) -> None:
+        """Hand over from the login page or the splash to the dashboard.
+
+        Captured frame by frame on 2026-10-28, the old swap put a half-drawn
+        dashboard on screen for 200-800ms: Tk child windows keep no pixels, so
+        every widget redrew over several passes of the event loop, and the
+        rounded cards and impact cards only drew on <Configure> after the
+        swap, leaving the old page showing through them. The splash path also
+        resized 560 to 670 and re-centred the window.
+
+        Now the window is covered by a still picture of the page it is
+        showing (SnapshotCover, a separate top-level window, so DWM keeps the
+        window's own pixels hidden until it is ready), the swap runs behind
+        it, and the picture is dropped once Tk has nothing left to draw: one
+        frame from page to finished dashboard. The page already has the
+        dashboard's size (_handover_size), so nothing resizes or moves. With no
+        cover (window hidden, or any Win32 failure) this is the old swap."""
         self._cancel_signing_in()
         self._login_visible = False
+        cover = None
+        try:
+            if (self._root.winfo_ismapped()
+                    and self._root.state() in ("normal", "zoomed")):
+                cover = snapshot_cover.SnapshotCover.over(self._top_hwnd())
+        except Exception as exc:
+            print(f"[AppWindow] Hand-over cover skipped (non-fatal): {exc}")
+            cover = None
         def _swap():
             self._login_frame.pack_forget()
             self._signing_in_frame.pack_forget()
             self._header_outer.pack(fill="x")
             self._show_dashboard()
-        self._atomic_ui(_swap)
+        try:
+            self._atomic_ui(_swap)
+        finally:
+            if cover is not None:
+                self._drop_cover_when_drawn(cover)
+
+    def _drop_cover_when_drawn(self, cover) -> None:
+        """Close `cover` once the window behind it has stopped changing.
+
+        "Tk is idle" is not enough: some of the dashboard draws from timers
+        (measured: closing at the first idle still showed half the cards for
+        160ms). So the window's own pixels are read every _COVER_POLL_MS and
+        the cover goes once _COVER_STABLE_READS readings in a row match. A
+        hard deadline closes it regardless, so it can never be left up."""
+        hwnd = self._top_hwnd()
+        state = {"done": False, "last": None, "same": 0}
+
+        def _close():
+            if not state["done"]:
+                state["done"] = True
+                cover.close()
+
+        def _poll():
+            if state["done"]:
+                return
+            fp = snapshot_cover.window_fingerprint(hwnd)
+            if fp is None:
+                _close()            # cannot tell: never hold the cover blind
+                return
+            state["same"] = state["same"] + 1 if fp == state["last"] else 0
+            state["last"] = fp
+            if state["same"] >= _COVER_STABLE_READS:
+                _close()
+                return
+            try:
+                self._root.after(_COVER_POLL_MS, _poll)
+            except tk.TclError:
+                _close()
+
+        try:
+            self._root.after(_COVER_POLL_MS, _poll)
+            self._root.after(_COVER_MAX_MS, _close)
+        except tk.TclError:
+            _close()
 
     # ── "Signing you in" splash (auto-login for returning users) ──────────────
 
@@ -3860,7 +3934,9 @@ class AppWindow:
             self._dash_frame.pack_forget()
             self._login_frame.pack_forget()
             self._signing_in_frame.pack(fill="both", expand=True)
-            self._resize(WINDOW_W, 560)
+            # The dashboard's size, not a splash size of its own: the
+            # hand-over must not resize or re-centre the window.
+            self._resize(*self._handover_size())
         self._atomic_ui(_swap)
         prog = getattr(self, "_signing_in_progress", None)
         if prog is not None:
@@ -3952,7 +4028,13 @@ class AppWindow:
     def _show_dashboard(self) -> None:
         self._dash_frame.pack(fill="both", expand=True)
         self._migrate_window_sizes()
-        self._resize(*self._saved_dash_size())
+        size = self._saved_dash_size()
+        if self._showing_at(size):
+            # Already this size on screen (the sign-in page opened at it):
+            # re-centring would only move the window under the person.
+            self._applied_size = size
+        else:
+            self._resize(*size)
         self._dash_visible = True
         # The super admin's spacing, re-read every launch so a change reaches
         # everyone without a release.
@@ -4342,13 +4424,28 @@ class AppWindow:
         self._push_dashboard_gaps()
         self._root.after_idle(self._place_gap_handles)
 
-    def _saved_dash_size(self) -> tuple:
-        """Resolve the dashboard size: this account's saved size, else the
-        install default, else the built-in default. Clamped to the screen."""
+    def _handover_size(self) -> tuple:
+        """The dashboard size the next sign-in lands on: this account's, or,
+        while signed out, the last account that signed in here. The splash and
+        the login page open at it, so signing in never resizes or moves the
+        window."""
+        email = getattr(self._auth, "user_email", "") or ""
+        if not email:
+            try:
+                email = self._auth.last_email or ""
+            except Exception:
+                email = ""
+        return self._saved_dash_size(email)
+
+    def _saved_dash_size(self, email: Optional[str] = None) -> tuple:
+        """Resolve the dashboard size: this account's saved size (or `email`'s),
+        else the install default, else the built-in default. Clamped to the
+        screen."""
         sizes = getattr(self._config, "window_sizes", None) if self._config else None
+        key = (email or "").strip().lower() or self._account_size_key()
         size = None
         if isinstance(sizes, dict):
-            size = (self._parse_size(sizes.get(self._account_size_key()))
+            size = (self._parse_size(sizes.get(key))
                     or self._parse_size(sizes.get("_default")))
         w, h = size or (WINDOW_W, self._natural_dash_h())
         try:
@@ -11364,6 +11461,20 @@ class AppWindow:
         # no visible recorder to cancel — the app would look completely dead.
         self._cancel_hotkey_capture()
         self._root.withdraw()
+
+    def _showing_at(self, size: tuple) -> bool:
+        """True when the window is on screen, not maximised, at exactly `size`
+        and no other size is still waiting to be applied."""
+        if getattr(self, "_pending_geometry", None):
+            return False
+        try:
+            return (bool(self._root.winfo_ismapped())
+                    and self._root.state() == "normal"
+                    and (self._root.winfo_width(),
+                         self._root.winfo_height()) == tuple(size)
+                    and getattr(self, "_grow_pending", None) is None)
+        except (tk.TclError, AttributeError):
+            return False
 
     def _resize(self, w: int, h: int) -> None:
         # Record the programmatic size FIRST: the geometry call fires
