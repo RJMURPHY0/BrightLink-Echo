@@ -608,7 +608,9 @@ if ($Relaunch) {
     try { $proc = Start-Echo @() } catch { Log "Launch failed: $_" }
     $healthy = $false
     $deadline = (Get-Date).AddSeconds($HealthTimeout)
-    while ((Get-Date) -lt $deadline) {
+    # No process means Windows or an antivirus refused to start the new exe:
+    # nothing will ever report health, so roll back at once, never keep it.
+    while ($proc -and (Get-Date) -lt $deadline) {
         try {
             $h = Get-Content -LiteralPath $script:Health -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
             if ($h.version -eq $Version) { $healthy = $true; break }
@@ -623,8 +625,9 @@ if ($Relaunch) {
         }
         Start-Sleep -Milliseconds 500
     }
-    if (-not $healthy -and $proc -and $proc.HasExited) {
-        Log "The new version exited at start (code $($proc.ExitCode)) without reporting health: rolling back."
+    if (-not $healthy -and (-not $proc -or $proc.HasExited)) {
+        if ($proc) { Log "The new version exited at start (code $($proc.ExitCode)) without reporting health: rolling back." }
+        else { Log "The new version could not be started: rolling back." }
         Stop-Ours
         if (Restore-Previous 'new version died at start') {
             $wasLegacy = $script:PrevHomeLegacy

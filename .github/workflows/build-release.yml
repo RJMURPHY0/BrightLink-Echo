@@ -425,6 +425,7 @@ jobs:
           "PRESENT=$present" >> $env:GITHUB_OUTPUT
 
       - name: Scan with VirusTotal
+        id: vt_upload
         if: ${{ steps.vt.outputs.PRESENT == 'true' }}
         continue-on-error: true
         uses: crazy-max/ghaction-virustotal@d34968c958ae283fe976efed637081b9f9dcf74f # v4.2.0
@@ -434,6 +435,26 @@ jobs:
             dist/${{ steps.version.outputs.SETUP_ASSET }}
             dist/${{ steps.version.outputs.UPDATE_ASSET }}
             dist/${{ steps.version.outputs.DIST_DIR }}/${{ steps.version.outputs.DIST_EXE }}
+
+      # Reads the verdict the upload only linked to: every flagging engine goes
+      # to the job summary and dist/selftest/virustotal.json. Warns on any
+      # detection; fails (so nothing publishes) only when Microsoft calls a file
+      # malicious, since Defender would then quarantine it on nearly every PC.
+      # VirusTotal down, slow or over quota never fails the build.
+      - name: Read the VirusTotal verdict
+        if: ${{ steps.vt_upload.outcome == 'success' }}
+        shell: pwsh
+        env:
+          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+          VT_BLOCK_ENGINES: Microsoft
+          SETUP_ASSET: ${{ steps.version.outputs.SETUP_ASSET }}
+          UPDATE_ASSET: ${{ steps.version.outputs.UPDATE_ASSET }}
+          DIST_DIR: ${{ steps.version.outputs.DIST_DIR }}
+          DIST_EXE: ${{ steps.version.outputs.DIST_EXE }}
+        run: |
+          python tools/vt_report.py --out dist/selftest/virustotal.json `
+            "dist/$env:SETUP_ASSET" "dist/$env:UPDATE_ASSET" "dist/$env:DIST_DIR/$env:DIST_EXE"
+          if ($LASTEXITCODE -ne 0) { throw "VirusTotal: Microsoft flags this build" }
 
       - name: Keep the build for inspection (dry run)
         if: ${{ github.event_name == 'workflow_dispatch' && !inputs.publish }}

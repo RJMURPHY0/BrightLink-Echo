@@ -453,7 +453,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("VT_API_KEY", str(self.wf["jobs"]["build-windows"].get("env", {})))
         holders = [s.get("name") for s in self.wf["jobs"]["build-windows"]["steps"]
                    if "VT_API_KEY" in str(s.get("env", {})) + str(s.get("with", {}))]
-        self.assertEqual(["Check for a VirusTotal key", "Scan with VirusTotal"], holders)
+        self.assertEqual(["Check for a VirusTotal key", "Scan with VirusTotal",
+                          "Read the VirusTotal verdict"], holders)
 
     def test_partial_or_required_signing_config_fails(self):
         run = self.steps["Decide whether to sign"]["run"]

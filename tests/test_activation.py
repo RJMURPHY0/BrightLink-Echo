@@ -111,12 +111,13 @@ class ActivationTests(unittest.TestCase):
 
     def _run(self, *extra, version: str = NEW, mode: str = "Update",
              relaunch: bool = True, health_timeout: int = 20,
-             attempts: int = 30, timeout: int = 120) -> int:
+             attempts: int = 30, timeout: int = 120,
+             launcher: str = LAUNCHER) -> int:
         copy = os.path.join(self.dir, f"activate-{version}.ps1")
         shutil.copy(SCRIPT, copy)
         args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", copy,
                 "-InstallDir", self.dir, "-Version", version, "-Mode", mode,
-                "-LaunchWith", LAUNCHER, "-HealthTimeout", str(health_timeout),
+                "-LaunchWith", launcher, "-HealthTimeout", str(health_timeout),
                 "-Attempts", str(attempts)]
         if relaunch:
             args.append("-Relaunch")
@@ -220,6 +221,19 @@ class ActivationTests(unittest.TestCase):
         self.assertTrue(self._wait_for("launched-1.0.0.txt"), self._log())
         self.assertEqual(self.NEW, self._read(
             os.path.join(self.dir, "bad-version.txt")).strip())
+        self.assertEqual(self.NEW, install_layout.read_bad_version(self.dir))
+
+    def test_a_version_that_cannot_start_is_rolled_back(self):
+        # Antivirus refusing to run the new exe: no process at all, so no
+        # health will ever come. It used to wait out the timeout, then keep
+        # the broken version ("still running") with the old one gone.
+        self._installed()
+        self._pending()
+        blocked = os.path.join(self.dir, "blocked-launcher.exe")   # never exists
+        self.assertEqual(5, self._run(health_timeout=60, timeout=60,
+                                      launcher=blocked), self._log())
+        self.assertEqual(self.OLD, self._canonical_version())
+        self.assertIn("could not be started", self._log())
         self.assertEqual(self.NEW, install_layout.read_bad_version(self.dir))
 
     def test_a_locked_install_keeps_the_previous_exe(self):
