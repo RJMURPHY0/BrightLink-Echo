@@ -147,6 +147,12 @@ jobs:
           if (-not $pin) { throw "pyinstaller pin missing from constraints.txt" }
           $stock = python -c "import PyInstaller, os; print(os.path.join(os.path.dirname(PyInstaller.__file__), 'bootloader', 'Windows-64bit-intel', 'runw.exe'))"
           $stockHash = (Get-FileHash $stock -Algorithm SHA256).Hash
+          # The runner's TEMP is the 8.3 path C:\Users\RUNNER~1\..., which waf
+          # mixes with the long form and then cannot find its own sources
+          # (C1083 on zlib\*.c). RUNNER_TEMP (D:\a\_temp) has no short names.
+          $tmp = Join-Path $env:RUNNER_TEMP "bootloader-build"
+          New-Item -ItemType Directory -Force $tmp | Out-Null
+          $env:TEMP = $tmp; $env:TMP = $tmp
           uv pip install --system --reinstall --no-deps --no-binary pyinstaller --no-cache $pin
           if ($LASTEXITCODE -ne 0) { throw "bootloader compile failed" }
           $built = python -c "import PyInstaller, os; print(os.path.join(os.path.dirname(PyInstaller.__file__), 'bootloader', 'Windows-64bit-intel', 'runw.exe'))"
