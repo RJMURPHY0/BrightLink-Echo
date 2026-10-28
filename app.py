@@ -100,7 +100,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.8.22"
+APP_VERSION = "1.8.23"
 
 
 class _RECT(ctypes.Structure):
@@ -1295,6 +1295,13 @@ class WhisperFlowApp:
             self.app_window.show_action_toast(
                 error, "Restart audio", self._restart_audio_engine)
             return
+        fix = getattr(self, "_mic_fix", None)
+        if fix and error == fix[0]:
+            _msg, button, uri, cause, device = fix
+            self.app_window.show_action_toast(
+                error, button,
+                lambda: self._open_mic_fix(uri, cause, device), 60000)
+            return
         short = error if len(error) <= 200 else error[:200] + "…"
         try:
             def _notify():
@@ -1631,11 +1638,115 @@ class WhisperFlowApp:
                 f"No audio on '{_from}' — switched to '{_to}'. "
                 "Please dictate again.")
             return True
+        mic_side = peak < 0.004 or _voiced < 0.2
+        # Only a near-silent clip can be Windows' doing: audible audio proves
+        # the switches, mute and volume let sound through.
+        if peak < 0.004 and self._handle_mic_blocked(
+                peak, detail["device"], detail):
+            return True
         self._log_error_event(
-            "mic_silent" if (peak < 0.004 or _voiced < 0.2)
-            else "transcribe_empty",
-            detail)
+            "mic_silent" if mic_side else "transcribe_empty", detail)
         return False
+
+    def _handle_mic_blocked(self, peak: float, device: str, detail: dict,
+                            privacy_only: bool = False) -> bool:
+        """A dictation heard nothing: ask Windows whether it is the reason (a
+        microphone privacy switch off, the mic muted or at 0 volume, or a clip
+        of pure zeros). When it is, log the exact cause, tell the user in one
+        line with a button to the right Settings page, and return True so the
+        caller skips its generic feedback. Only ever runs after a failed
+        dictation, so a working setup never sees it. Never raises.
+
+        detail is the caller's event payload; the Windows state is added to it
+        either way so the fleet log can tell these cases apart."""
+        try:
+            import mic_access
+            cause, diag = mic_access.diagnose(peak, device,
+                                              privacy_only=privacy_only)
+            detail["privacy"] = diag.get("privacy")
+            if "endpoint" in diag:
+                detail["endpoint"] = diag["endpoint"]
+            detail["mic_cause"] = cause
+            if not mic_access.is_blocking(cause):
+                return False
+            if privacy_only and not mic_access.is_privacy(cause):
+                return False
+            message, button, uri = mic_access.message_for(cause, device)
+            event = dict(detail, cause=cause)
+            event.update({k: v for k, v in diag.items()
+                          if k in ("endpoints", "endpoint_error")})
+            self._log_error_event("mic_blocked", event)
+            self._report_mic_blocked(cause, message, event)
+            self._mic_fix = (message, button, uri, cause, device)
+            self.feedback.error_occurred(message)
+            return True
+        except Exception as e:
+            print(f"[App] mic check failed (non-fatal): {e}")
+            return False
+
+    def _report_mic_blocked(self, cause: str, message: str, event: dict) -> None:
+        """Once per cause per session to the BrightLink error log (Admin >
+        Feedback & Reports > Errors), as the signed-in user."""
+        reported = getattr(self, "_mic_blocked_reported", set())
+        if cause in reported:
+            return
+        reported.add(cause)
+        self._mic_blocked_reported = reported
+        try:
+            from error_reporter import report_error
+            _auth = getattr(self, "_auth", None)
+            report_error(
+                f"{brand.PRODUCT_SHORT_NAME}: microphone blocked ({cause})",
+                context=dict(event, shown=message, app_version=APP_VERSION),
+                user_email=getattr(_auth, "user_email", "") or None,
+                token=getattr(_auth, "access_token", "") or None,
+            )
+        except Exception as e:
+            print(f"[App] mic-blocked report failed (non-fatal): {e}")
+
+    def _open_mic_fix(self, uri: str, cause: str, device: str) -> None:
+        """The toast button: open the Settings page, then watch for the fix
+        for a few minutes. When Windows reports it fixed, reopen the mic (a
+        stream opened while blocked can stay silent) and say so."""
+        import mic_access
+        mic_access.open_settings(uri)
+        if cause == mic_access.DIGITAL_SILENCE:
+            return  # nothing Windows reports; the next dictation tells
+
+        def _fixed() -> bool:
+            if mic_access.is_privacy(cause):
+                return mic_access.privacy_cause(mic_access.privacy_state()) == mic_access.OK
+            # Any audible peak: only the switch/volume state decides here.
+            return not mic_access.is_blocking(mic_access.diagnose(1.0, device)[0])
+
+        def _watch():
+            deadline = time.monotonic() + self._MIC_FIX_WATCH_S
+            while time.monotonic() < deadline:
+                time.sleep(2.0)
+                try:
+                    if not _fixed():
+                        continue
+                except Exception as e:
+                    print(f"[App] mic fix watch failed: {e}")
+                    return
+                try:
+                    self.recorder.restart_warm()
+                except Exception as e:
+                    print(f"[App] mic reopen after fix failed: {e}")
+                    self._log_error_event("mic_blocked_fixed", {
+                        "cause": cause, "reopen_error": str(e)[:200]})
+                    self.app_window.show_toast(
+                        "Microphone is allowed now. Restart "
+                        f"{brand.PRODUCT_SHORT_NAME} to use it.", 10000)
+                    return
+                self._log_error_event("mic_blocked_fixed", {"cause": cause})
+                self.app_window.show_toast(
+                    "Microphone is on. Dictate again.", 6000)
+                return
+
+        threading.Thread(target=_watch, daemon=True, name="mic-fix-watch").start()
+
+    _MIC_FIX_WATCH_S = 300.0
 
     # A hotkey held at least this long should have produced far more audio than
     # the 0.3s floor. Below it, a near-empty clip is an accidental tap and there
@@ -1663,11 +1774,17 @@ class WhisperFlowApp:
             return False
         print(f"[App] Held {held:.1f}s but captured {captured_seconds:.2f}s — "
               f"mic stream is dead; reconnecting.")
-        self._log_error_event("capture_dead", {
+        _dead = {
             "held_seconds": round(held, 2),
             "captured_seconds": round(captured_seconds, 2),
             "device": getattr(self.recorder, "_active_device_name", ""),
-        })
+        }
+        # A privacy switch can refuse the stream outright rather than feed it
+        # zeros: that is not a dead stream, and reconnecting will not help.
+        if self._handle_mic_blocked(0.0, _dead["device"], _dead,
+                                    privacy_only=True):
+            return True
+        self._log_error_event("capture_dead", _dead)
         # Background thread like every other restart_warm call site — a
         # PortAudio re-init can take seconds and must not hold the stop path.
         threading.Thread(target=self.recorder.restart_warm, daemon=True,
@@ -2119,7 +2236,19 @@ class WhisperFlowApp:
             _silent = getattr(self.recorder, "last_silence_recovery", None)
             if _silent:
                 self.recorder.last_silence_recovery = None
-                self._log_error_event("mic_stream_silent", dict(_silent))
+
+                def _log_silent(_s=dict(_silent)):
+                    # Registry read off the press path; tells a privacy
+                    # switch apart from a muted or broken mic in the log.
+                    try:
+                        import mic_access
+                        _s["privacy"] = mic_access.privacy_state()
+                    except Exception:
+                        pass
+                    self._log_error_event("mic_stream_silent", _s)
+
+                threading.Thread(target=_log_silent, daemon=True,
+                                 name="log-mic-silent").start()
             # No engine can turn this recording into text. Remind the user why
             # (throttled, no disk I/O) so a press into silence is explained
             # rather than mysterious — the exact symptom users report. Snapshot

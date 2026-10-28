@@ -1,7 +1,7 @@
 """
 Fire-and-forget error reporter: sends errors to FTC Contacts Feedback & Reports page.
 Reads ftc_contacts_api_url and ftc_contacts_secret from config.json.
-Never raises — any failure is silently ignored.
+Never raises; a failed send is printed (to the app log in frozen builds).
 """
 
 import json
@@ -32,15 +32,25 @@ def report_error(
     message: str,
     context: dict | None = None,
     user_email: str | None = None,
+    token: str | None = None,
 ) -> None:
     """
     Report an error to FTC Contacts asynchronously.
     Safe to call from any thread; always returns immediately.
+
+    token: the signed-in user's access token. Shipped builds carry no app
+    secret, so without it nothing is sent; with it the BrightLink intake
+    verifies the user and files the row under them. Pass it only for errors
+    worth a row each (the intake is shared and rate limited), never for the
+    routine "No speech detected" feedback.
     """
     def _send() -> None:
         api_url, secret = _load_contacts_config()
-        if not api_url or not secret:
+        if not (api_url and secret) and not token:
             return
+        if not api_url:
+            import brand
+            api_url = brand.CRM_URL
         payload: dict = {
             "message": message,
             "source": "whisper",
@@ -49,18 +59,20 @@ def report_error(
         if user_email:
             payload["user_email"] = user_email
         data = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if secret:
+            headers["x-app-secret"] = secret
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         req = urllib.request.Request(
-            f"{api_url}/api/log-error",
+            f"{api_url.rstrip('/')}/api/log-error",
             data=data,
-            headers={
-                "Content-Type": "application/json",
-                "x-app-secret": secret,
-            },
+            headers=headers,
             method="POST",
         )
         try:
             urllib.request.urlopen(req, timeout=5)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ErrorReporter] Could not send error report: {e}")
 
     threading.Thread(target=_send, daemon=True).start()
