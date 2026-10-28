@@ -50,7 +50,8 @@ class SourceInvariantTests(unittest.TestCase):
         # list redraw) run inside the swap's freeze. Run after the present,
         # each was a second frame: the split-second glitch on a page change.
         src = inspect.getsource(AppWindow._switch_dash_tab)
-        swap = src[src.index("def _swap():"):src.index("self._atomic_ui(_swap)")]
+        swap = src[src.index("def _swap():"):
+                   src.index("self._covered_change(_swap)")]
         self.assertIn("_refresh_chrome_and_page()", swap)
         refresh = src[src.index("def _refresh_chrome_and_page"):
                       src.index("if name in tab_frames:")]

@@ -128,6 +128,40 @@ _SIGNIN_ESCAPE_MS = 7000
 _COVER_POLL_MS = 35
 _COVER_STABLE_READS = 3
 _COVER_MAX_MS = 1500
+# A page change (tab, gear, library page) is covered the same way, read more
+# often (a read is ~5-10ms since the BitBlt switch). The cap is only a safety
+# net (the reads end it ~50ms after the last paint): at 600ms a slow moment on
+# a busy PC dropped the cover over a half-drawn page, which IS the glitch.
+_PAGE_COVER_POLL_MS = 10
+_PAGE_COVER_MAX_MS = _COVER_MAX_MS
+
+
+class _LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+
+_idle_api = None
+
+
+def _input_idle_ms() -> int:
+    """Milliseconds since the last mouse or keyboard input anywhere, or 0
+    when it cannot be read (so the caller treats the person as busy). A
+    private WinDLL: argtypes on the shared ctypes.windll leak everywhere."""
+    global _idle_api
+    try:
+        if _idle_api is None:
+            u32 = ctypes.WinDLL("user32")
+            k32 = ctypes.WinDLL("kernel32")
+            u32.GetLastInputInfo.argtypes = [ctypes.POINTER(_LASTINPUTINFO)]
+            k32.GetTickCount.restype = ctypes.c_uint
+            _idle_api = (u32, k32)
+        u32, k32 = _idle_api
+        info = _LASTINPUTINFO(ctypes.sizeof(_LASTINPUTINFO), 0)
+        if not u32.GetLastInputInfo(ctypes.byref(info)):
+            return 0
+        return (k32.GetTickCount() - info.dwTime) & 0xFFFFFFFF
+    except Exception:
+        return 0
 
 
 # ── Multi-monitor geometry ────────────────────────────────────────────────────
@@ -1148,41 +1182,48 @@ class RangePicker(Dropdown):
         # Last week …), so all ten fit the section's height without
         # scrolling. Each tile names the period and, under it, the exact days
         # it covers, so "Last 3 months" says which three.
+        #
+        # Only the chosen period is a tile (accent fill, border and tick, the
+        # house Dropdown's "selected row with a Check"); the others are plain
+        # text on the panel, outlined on hover. Ten bordered tiles with ten
+        # radio rings in a 200px section read as busy (Ryan, 2026-10-28), and
+        # the boxes, not the text, were what made it hard to scan.
         cv, w, h = self._menu_cv, self._menu_w, self._menu_h
         current = self._var.get()
         n = len(self._values)
         rows = (n + 1) // 2
-        top = self._TAB_H + 6
-        gap = 4
-        row_h = max(20, min(46, (h - top - 6 + gap) // max(rows, 1)))
+        top = self._TAB_H + 8
+        gap = 4                         # between rows, inside row_h
+        col_gap = 12
+        margin = 10
+        row_h = max(20, min(46, (h - top - 8) // max(rows, 1)))
         tile_h = row_h - gap
-        col_w = (w - 16 - gap) // 2
+        col_w = (w - 2 * margin - col_gap) // 2
         self._tile_imgs = []
         for i, val in enumerate(self._values):
             r, c = divmod(i, 2)
-            x0 = 8 + c * (col_w + gap)
+            x0 = margin + c * (col_w + col_gap)
             x1 = x0 + col_w
             y0 = top + r * row_h
             y1 = y0 + tile_h
             cy = (y0 + y1) // 2
             sel = val == current
             fill = C["accent_dim"] if sel else C["surface"]
-            img = ui_render.round_rect(cv, col_w, tile_h, 7, fill,
-                                       C["accent"] if sel else C["border"],
-                                       1, C["surface"])
-            if img is not None:
-                self._tile_imgs.append(img)
-                cv.create_image(x0, y0, image=img, anchor="nw")
-            else:
-                _rr(cv, x0, y0, x1, y1, 7, fill=fill,
-                    outline=C["accent"] if sel else C["border"])
+            if sel:
+                img = ui_render.round_rect(cv, col_w, tile_h, 7, fill,
+                                           C["accent"], 1, C["surface"])
+                if img is not None:
+                    self._tile_imgs.append(img)
+                    cv.create_image(x0, y0, image=img, anchor="nw")
+                else:
+                    _rr(cv, x0, y0, x1, y1, 7, fill=fill, outline=C["accent"])
 
             dates = self._describe(val) if self._describe else ""
             font = ("Segoe UI", 9, "bold" if sel else "normal")
-            # Two lines fit from 26px (the tiles come out 28px at normal text
-            # size), so the dates show on every ordinary window.
+            # Two lines fit from 26px (the tiles come out 26-28px at normal
+            # text size), so the dates show on every ordinary window.
             if dates and tile_h >= 26:
-                cv.create_text(x0 + 10, cy - 6, text=val, anchor="w",
+                cv.create_text(x0 + 10, cy - 7, text=val, anchor="w",
                                fill=C["text"], font=font)
                 cv.create_text(x0 + 10, cy + 7, text=dates, anchor="w",
                                fill=C["accent"] if sel else C["subtext"],
@@ -1191,19 +1232,15 @@ class RangePicker(Dropdown):
                 cv.create_text(x0 + 10, cy, text=val, anchor="w",
                                fill=C["text"], font=font)
 
-            # Radio on the right: a hollow ring, or a filled orange tick.
-            d = 14
-            rx, ry = x1 - 10 - d, cy - d // 2
             if sel:
-                ring = ui_render.icon_badge(cv, "check", glyph=11, box=d,
+                d = 14
+                tick = ui_render.icon_badge(cv, "check", glyph=11, box=d,
                                             color=C["bg"], badge=C["accent"],
                                             bg=fill, ring=0)
-            else:
-                ring = ui_render.round_rect(cv, d, d, d // 2, fill,
-                                            C["subtext"], 1, fill)
-            if ring is not None:
-                self._tile_imgs.append(ring)
-                cv.create_image(rx, ry, image=ring, anchor="nw")
+                if tick is not None:
+                    self._tile_imgs.append(tick)
+                    cv.create_image(x1 - 10 - d, cy - d // 2, image=tick,
+                                    anchor="nw")
             self._hit(x0, y0, x1, y1, lambda v=val: self._choose_period(v))
 
     def _custom_columns(self):
@@ -3513,8 +3550,27 @@ class AppWindow:
         self._switch_dash_tab("home")
 
     def _switch_dash_tab(self, name: str) -> None:
+        # The WHOLE change runs behind the cover, not only the page swap: the
+        # search bar's placeholder, closing a panel or a list are visible too,
+        # and done before the cover went up they showed as a frame of their
+        # own (caught by tools/page_change_check.py, 2026-10-28). Inside, the
+        # body runs once with _in_atomic set and every nested cover joins.
+        if not getattr(self, "_in_atomic", False):
+            if not self._covered_change(lambda: self._switch_dash_tab(name)):
+                # Uncovered (hidden window, Win32 failure): a late layout job
+                # (scrollregion sync, banner pack) can still draw after the
+                # present, so keep one mop-up pass.
+                try:
+                    self._root.after(50, self._repaint_all)
+                except tk.TclError:
+                    pass
+            return
         previous = getattr(self, "_current_tab", None)
         self._current_tab = name
+        # Shown once is laid out: nothing left for the warm-up to do here.
+        if not hasattr(self, "_warmed_pages"):
+            self._warmed_pages = set()
+        self._warmed_pages.add(name)
         # The History flag's tip and feedback card belong to that page.
         self._hide_flag_tip()
         if name != "history":
@@ -3614,18 +3670,16 @@ class AppWindow:
                 self._root.update_idletasks()
                 _refresh_chrome_and_page()
 
-            # Freeze, swap, present — the same single-frame contract the
-            # login/dashboard swap uses. The old code did the map/unmap live and
-            # then chased it with two repaints (one now, one at 50ms); each of
-            # those is a race against Tk's own async painting, and losing one
-            # is what showed as a flicker on every tab click.
-            self._atomic_ui(_swap)
-            # A late layout job (scrollregion sync, banner pack) can still draw
-            # after the present, so keep one mop-up pass.
-            try:
-                self._root.after(50, self._repaint_all)
-            except tk.TclError:
-                pass
+            # The freeze alone never made this one frame. Captured on
+            # 2026-10-28, a click to Home showed 2 to 6 distinct frames over
+            # ~150ms with the old page's cards still under the new one: Tk
+            # child windows keep no pixels, so after the present every widget
+            # redraws on its own pass of the event loop and Windows shows each
+            # pass. So the page change runs behind a still picture of the old
+            # page (the sign-in hand-over's SnapshotCover), dropped once the
+            # window has stopped changing: old page, then finished new page.
+            # Already inside the covered change (see the top): this joins it.
+            self._covered_change(_swap)
 
         else:
             _refresh_chrome_and_page()
@@ -3773,6 +3827,149 @@ class AppWindow:
             except Exception:
                 pass
 
+    def _covered_change(self, fn) -> bool:
+        """Run a page-sized change behind a SnapshotCover, dropped once the
+        window has stopped changing. Behind a cover the freeze and its
+        full-window repaint heals buy nothing (nobody sees the passes) and
+        cost ~100ms of redrawing every widget again, which the cover then has
+        to wait out, so fn runs under _covered_ui. With no cover (window
+        hidden, any Win32 failure) it is the old _atomic_ui freeze. Returns
+        whether it was covered."""
+        if getattr(self, "_in_atomic", False):
+            fn()                # inside an outer change: it presents for both
+            return True
+        cover = self._cover_page_change()
+        try:
+            if cover is not None:
+                self._covered_ui(fn)
+            else:
+                self._atomic_ui(fn)
+        finally:
+            if cover is not None:
+                self._drop_cover_when_drawn(cover, max_ms=_PAGE_COVER_MAX_MS,
+                                            poll_ms=_PAGE_COVER_POLL_MS)
+        return cover is not None
+
+    # ── First visits ──────────────────────────────────────────────────────────
+    #
+    # Tk shows a page's widgets for the very first time on its first visit:
+    # every child window maps, lays out and draws its rounded backgrounds.
+    # Measured 2026-10-28 on the laptop: Settings 1.1-1.5s, Hotkey 0.7s,
+    # Learning 0.5-0.6s, against 50-170ms on every later visit. So each page
+    # is laid out once in the background, placed just below the content area
+    # (child windows are clipped to their parent, so nothing of it is ever on
+    # screen), then put back exactly as the grid had it. A later click only
+    # maps the page frame itself, like a second visit. Each page blocks the
+    # UI thread for its own cost, so one page runs at a time and only while
+    # the window is hidden or nobody has touched mouse or keyboard for
+    # _WARM_IDLE_MS: the cost a click used to pay moves to a moment nobody
+    # is using the window.
+
+    _WARM_PAGES = ("settings", "hotkey", "learning", "vocabulary",
+                   "snippets", "phrases")
+    _WARM_IDLE_MS = 1500
+    _WARM_RETRY_MS = 1000
+
+    def _schedule_page_warmup(self, delay_ms: int = 2000) -> None:
+        if getattr(self, "_warm_job", None) is not None:
+            return
+        try:
+            self._warm_job = self._root.after(delay_ms, self._warm_next_page)
+        except tk.TclError:
+            self._warm_job = None
+
+    def _page_frame(self, name: str):
+        return getattr(self, f"_{name}_frame", None)
+
+    def _warm_next_page(self) -> None:
+        self._warm_job = None
+        done = getattr(self, "_warmed_pages", None)
+        if done is None:
+            done = self._warmed_pages = set()
+        todo = [n for n in self._WARM_PAGES
+                if n not in done and n != getattr(self, "_current_tab", None)]
+        if not todo or not getattr(self, "_dash_visible", False):
+            return
+        held = getattr(self, "_held_cover", None)
+        busy = (getattr(self, "_in_atomic", False)
+                or (held is not None and not held["done"])
+                or getattr(self, "_spacing_edit", False))
+        if busy or not self._window_unused():
+            self._schedule_page_warmup(self._WARM_RETRY_MS)
+            return
+        self._warm_page(todo[0])
+        if len(todo) > 1:
+            self._schedule_page_warmup(300)
+
+    def _window_unused(self) -> bool:
+        """True while nobody can be using the window: it is hidden or
+        minimised, or no mouse or keyboard input has arrived for
+        _WARM_IDLE_MS (GetLastInputInfo, system-wide)."""
+        try:
+            if (not self._root.winfo_ismapped()
+                    or self._root.state() not in ("normal", "zoomed")):
+                return True
+        except tk.TclError:
+            return False
+        return _input_idle_ms() >= self._WARM_IDLE_MS
+
+    def _warm_page(self, name: str) -> None:
+        f = self._page_frame(name)
+        self._warmed_pages.add(name)
+        if f is None:
+            return
+        try:
+            # A page hidden by grid_remove reports no manager at all.
+            if f.winfo_manager() not in ("", "grid") or f.winfo_ismapped():
+                return                  # on screen, or not ours to move
+        except tk.TclError:
+            return
+        content = self._dash_content
+        try:
+            f.place(in_=content, x=0, y=content.winfo_height() + 50,
+                    relwidth=1, relheight=1)
+            self._root.update_idletasks()
+        except tk.TclError as exc:
+            print(f"[AppWindow] Page warm-up failed (non-fatal): {exc}")
+        finally:
+            try:
+                f.place_forget()
+                # Exactly how _build_dashboard grids every page.
+                f.grid(row=0, column=0, sticky="nsew")
+                f.grid_remove()
+            except tk.TclError as exc:
+                print(f"[AppWindow] Page warm-up restore failed: {exc}")
+
+    def _covered_ui(self, fn) -> None:
+        """_atomic_ui for a change already hidden behind a SnapshotCover: the
+        same contract for nested _atomic_ui calls (they join, never present
+        half-way) and for _resize (deferred, applied after), without the
+        WM_SETREDRAW freeze or the full-tree repaints. Tk's own invalidation
+        draws the change; the cover hides each pass until it settles."""
+        if getattr(self, "_in_atomic", False):
+            fn()
+            return
+        self._pending_geometry = None
+        self._in_atomic = True
+        try:
+            fn()
+            try:
+                self._root.update_idletasks()
+            except Exception:
+                pass
+        finally:
+            self._in_atomic = False
+            geo = getattr(self, "_pending_geometry", None)
+            if geo:
+                self._pending_geometry = None
+                try:
+                    self._root.geometry(geo)
+                    self._root.update_idletasks()
+                except Exception:
+                    pass
+                # A move/resize leaves pixels outside every widget's area.
+                self._repaint_all(erase=True)
+
     def _switch_to_login(self) -> None:
         self._cancel_signing_in()
         self._login_visible = True
@@ -3792,7 +3989,8 @@ class AppWindow:
                 except Exception:
                     pass
             self._resize(w, h)
-        self._atomic_ui(_swap)
+        # Sign-out drew the login page over 4 frames uncovered (2026-10-28).
+        self._covered_change(_swap)
         if hasattr(self, "_login_ui"):
             self._login_ui.reset()
 
@@ -3815,14 +4013,7 @@ class AppWindow:
         cover (window hidden, or any Win32 failure) this is the old swap."""
         self._cancel_signing_in()
         self._login_visible = False
-        cover = None
-        try:
-            if (self._root.winfo_ismapped()
-                    and self._root.state() in ("normal", "zoomed")):
-                cover = snapshot_cover.SnapshotCover.over(self._top_hwnd())
-        except Exception as exc:
-            print(f"[AppWindow] Hand-over cover skipped (non-fatal): {exc}")
-            cover = None
+        cover = self._cover_window()
         def _swap():
             self._login_frame.pack_forget()
             self._signing_in_frame.pack_forget()
@@ -3834,21 +4025,58 @@ class AppWindow:
             if cover is not None:
                 self._drop_cover_when_drawn(cover)
 
-    def _drop_cover_when_drawn(self, cover) -> None:
+    def _cover_window(self):
+        """A SnapshotCover over the window as it shows now, or None when the
+        window is hidden or minimised (nothing on screen to protect) or the
+        cover fails, in which case the caller swaps uncovered."""
+        try:
+            if (self._root.winfo_ismapped()
+                    and self._root.state() in ("normal", "zoomed")):
+                return snapshot_cover.SnapshotCover.over(self._top_hwnd())
+        except Exception as exc:
+            print(f"[AppWindow] Cover skipped (non-fatal): {exc}")
+        return None
+
+    def _cover_page_change(self):
+        """The cover for a page change. A cover still up from the previous
+        change (a fast second click) is taken over rather than replaced: it
+        shows the last finished page, while a new picture would capture the
+        half-drawn one behind it."""
+        held = getattr(self, "_held_cover", None)
+        if held is not None and not held["done"]:
+            held["done"] = True         # its watch stops; the new one owns it
+            return held["cover"]
+        return self._cover_window()
+
+    def _drop_cover_when_drawn(self, cover, max_ms: int = _COVER_MAX_MS,
+                               poll_ms: int = _COVER_POLL_MS) -> None:
         """Close `cover` once the window behind it has stopped changing.
 
         "Tk is idle" is not enough: some of the dashboard draws from timers
         (measured: closing at the first idle still showed half the cards for
-        160ms). So the window's own pixels are read every _COVER_POLL_MS and
+        160ms). So the window's own pixels are read every `poll_ms` and
         the cover goes once _COVER_STABLE_READS readings in a row match. A
-        hard deadline closes it regardless, so it can never be left up."""
+        hard deadline (`max_ms`) closes it regardless, so it can never be
+        left up. A later page change may take the cover over
+        (_cover_page_change), which ends this watch without closing it."""
         hwnd = self._top_hwnd()
-        state = {"done": False, "last": None, "same": 0}
+        state = {"done": False, "last": None, "same": 0, "cover": cover}
+        self._held_cover = state
 
         def _close():
             if not state["done"]:
                 state["done"] = True
                 cover.close()
+
+        def _poll_when_idle():
+            # Read only once Tk has nothing left queued. A timer alone could
+            # read between a long layout callback and the paint it causes:
+            # equal pixels then, but not finished (caught on the recorder,
+            # 2026-10-28: the cover dropped with half the change undrawn).
+            try:
+                self._root.after_idle(_poll)
+            except tk.TclError:
+                _close()
 
         def _poll():
             if state["done"]:
@@ -3863,13 +4091,13 @@ class AppWindow:
                 _close()
                 return
             try:
-                self._root.after(_COVER_POLL_MS, _poll)
+                self._root.after(poll_ms, _poll_when_idle)
             except tk.TclError:
                 _close()
 
         try:
-            self._root.after(_COVER_POLL_MS, _poll)
-            self._root.after(_COVER_MAX_MS, _close)
+            self._root.after(poll_ms, _poll_when_idle)
+            self._root.after(max_ms, _close)
         except tk.TclError:
             _close()
 
@@ -3937,7 +4165,7 @@ class AppWindow:
             # The dashboard's size, not a splash size of its own: the
             # hand-over must not resize or re-centre the window.
             self._resize(*self._handover_size())
-        self._atomic_ui(_swap)
+        self._covered_change(_swap)
         prog = getattr(self, "_signing_in_progress", None)
         if prog is not None:
             prog.start()
@@ -4048,6 +4276,7 @@ class AppWindow:
         # Cards may be stale after a missed midnight (laptop asleep) or an
         # account switch — recompute whenever the dashboard is shown.
         self._refresh_impact()
+        self._schedule_page_warmup()
 
     # ── Per-account window sizing ─────────────────────────────────────────────
 
@@ -4709,6 +4938,7 @@ class AppWindow:
         )
         title.pack(fill="x", padx=20, pady=(self._gap("status_impact"),
                                             self._gap("impact_cards")))
+        self._impact_title = title      # the range panel borrows its height
         self._gap_widget("status_impact", title)
         self._gap_widget("impact_cards", title)
 
@@ -4916,6 +5146,7 @@ class AppWindow:
         panel = getattr(self, "_impact_range_panel", None)
         if panel is None:
             return
+        title = getattr(self, "_impact_title", None)
         if show:
             self._close_impact_detail()
             try:
@@ -4924,12 +5155,29 @@ class AppWindow:
                 return
             if block_h < 120:          # before the first layout pass
                 block_h = _IMPACT_CARD_H + 56
+            # The panel also takes the "Your impact" heading's line (its own
+            # Periods / From / to header names what it is): ten periods with
+            # their dates in the cards' height alone sat line on line, too
+            # busy to scan (Ryan, 2026-10-28). The status gap above stays, so
+            # the panel ends exactly where the cards did and nothing moves.
+            top_gap = self._gap("status_impact")
+            extra = 0
+            if title is not None:
+                try:
+                    if title.winfo_ismapped():
+                        extra = (title.winfo_height()
+                                 + self._gap("impact_cards"))
+                except tk.TclError:
+                    extra = 0
 
             def _swap():
                 self._impact_today_card.pack_forget()
                 self._impact_row.pack_forget()
-                panel.configure(height=block_h)
-                panel.pack(fill="x", padx=20)
+                if extra:
+                    title.pack_forget()
+                panel.configure(height=block_h + extra)
+                panel.pack(fill="x", padx=20,
+                           pady=(top_gap if extra else 0, 0))
                 # Realise the width before drawing, or the first paint is at
                 # width 1 and shows an empty card for a frame.
                 try:
@@ -4941,9 +5189,18 @@ class AppWindow:
         else:
             def _swap():
                 panel.pack_forget()
+                if title is not None and not title.winfo_ismapped():
+                    title.pack(fill="x", padx=20, before=self._impact_stack,
+                               pady=(self._gap("status_impact"),
+                                     self._gap("impact_cards")))
                 self._impact_today_card.pack(fill="x", padx=20)
                 self._impact_row.pack(fill="x", padx=20,
                                       pady=(self._gap("cards_words"), 0))
+            # Closing redraws the bar and three cards: 3-4 frames over ~100ms
+            # uncovered (captured 2026-10-28). Opening paints one canvas and
+            # was already one frame, so it stays instant.
+            self._covered_change(_swap)
+            return
         self._atomic_ui(_swap)
 
     def _set_impact_card(self, key: str, value: str, unit: str, sub: str) -> None:
@@ -5130,7 +5387,9 @@ class AppWindow:
                 self._impact_cards[k]["hover"] = False
                 self._layout_impact_card(k)
 
-        self._atomic_ui(_swap)
+        # Restoring the bar and three cards drew over 2-3 frames uncovered
+        # (captured 2026-10-28); opening paints one canvas and stays as is.
+        self._covered_change(_swap)
 
     # A click lands as "close" unless it hits a declared control. Guarded by a
     # short window after opening, because the second click of a double-click (or
@@ -7532,7 +7791,8 @@ class AppWindow:
             cover.place(in_=self._dash_frame, x=0, y=0, relwidth=1.0,
                         relheight=1.0)
             cover.lift()
-        self._atomic_ui(_show)
+        # A whole card of new widgets over the page: covered like a page.
+        self._covered_change(_show)
         try:
             st["entry"].focus_set()
             st["entry"].mark_set("insert", "end-1c")
@@ -7797,10 +8057,7 @@ class AppWindow:
         if st:
             self._stop_feedback_play(st, redraw=False)
         if st and st.get("cover") is not None:
-            try:
-                st["cover"].destroy()
-            except tk.TclError:
-                pass
+            self._covered_change(lambda: self._destroy_quietly(st["cover"]))
 
     # ── Fix words: correct a dictation, Echo learns the mishearing ──────────
     #
@@ -7867,7 +8124,8 @@ class AppWindow:
             cover.place(in_=self._dash_frame, x=0, y=0, relwidth=1.0,
                         relheight=1.0)
             cover.lift()
-        self._atomic_ui(_show)
+        # A whole card of new widgets over the page: covered like a page.
+        self._covered_change(_show)
         try:
             box.focus_set()
             box.mark_set("insert", "end-1c")
@@ -7877,10 +8135,14 @@ class AppWindow:
     def _close_word_fix(self) -> None:
         st, self._wf = getattr(self, "_wf", None), None
         if st and st.get("cover") is not None:
-            try:
-                st["cover"].destroy()
-            except tk.TclError:
-                pass
+            self._covered_change(lambda: self._destroy_quietly(st["cover"]))
+
+    @staticmethod
+    def _destroy_quietly(widget) -> None:
+        try:
+            widget.destroy()
+        except tk.TclError:
+            pass
 
     def _save_word_fix(self) -> None:
         st = getattr(self, "_wf", None)

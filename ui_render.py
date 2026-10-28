@@ -93,22 +93,93 @@ def _photo_im(key, master, draw_fn, w: int, h: int):
     return photo
 
 
+def _rr_full(w: int, h: int, r: int, fill: str, outline: str, width: int,
+             bg: str):
+    """The rounded rectangle drawn whole at _SS x and downscaled: the
+    reference render, and the one used when a shape is too small to slice."""
+    from PIL import Image, ImageDraw
+    s = _SS
+    img = Image.new("RGBA", (w * s, h * s), (0, 0, 0, 0))
+    half = (width * s) // 2
+    box = [half, half, w * s - 1 - half, h * s - 1 - half]
+    kw = {"radius": r * s, "fill": fill}
+    if outline and width > 0:
+        kw.update(outline=outline, width=width * s)
+    ImageDraw.Draw(img).rounded_rectangle(box, **kw)
+    img = img.resize((w, h), Image.LANCZOS)
+    base = Image.new("RGB", (w, h), bg)
+    base.paste(img, (0, 0), img)
+    return base
+
+
+# Corner tiles for the sliced render, keyed by everything but the size. PIL
+# images, so they are not tied to a Tk interpreter.
+_rr_tiles: dict = {}
+
+
+def _rr_image(w: int, h: int, r: int, fill: str, outline: str, width: int,
+              bg: str):
+    """The same picture as _rr_full, built from a small render: only the
+    corners are curved, so a (2c+1)-pixel square is drawn once per style and
+    the full size is its four corners plus its middle row and column
+    stretched. Every first visit to a page with cards drew each one at 4x
+    (~7ms a card, ~240ms for Settings' 33, measured 2026-10-28); this is
+    well under 1ms. c leaves LANCZOS's 3px reach clear of the curve, so the
+    stretched middle is exactly what the full render has there."""
+    from PIL import Image
+    c = max(r, 0) + max(width, 0) + 4
+    if w < 2 * c + 1 or h < 2 * c + 1:
+        return _rr_full(w, h, r, fill, outline, width, bg)
+    tkey = (r, fill, outline, width, bg)
+    tile = _rr_tiles.get(tkey)
+    if tile is None:
+        if len(_rr_tiles) > _CACHE_MAX:
+            _rr_tiles.clear()
+        tile = _rr_full(2 * c + 1, 2 * c + 1, r, fill, outline, width, bg)
+        _rr_tiles[tkey] = tile
+    n = 2 * c + 1
+    out = Image.new("RGB", (w, h), tile.getpixel((c, c)))
+    out.paste(tile.crop((0, 0, c, c)), (0, 0))
+    out.paste(tile.crop((c + 1, 0, n, c)), (w - c, 0))
+    out.paste(tile.crop((0, c + 1, c, n)), (0, h - c))
+    out.paste(tile.crop((c + 1, c + 1, n, n)), (w - c, h - c))
+    mid_w, mid_h = w - 2 * c, h - 2 * c
+    out.paste(tile.crop((c, 0, c + 1, c)).resize((mid_w, c), Image.NEAREST),
+              (c, 0))
+    out.paste(tile.crop((c, c + 1, c + 1, n)).resize((mid_w, c),
+                                                     Image.NEAREST),
+              (c, h - c))
+    out.paste(tile.crop((0, c, c, c + 1)).resize((c, mid_h), Image.NEAREST),
+              (0, c))
+    out.paste(tile.crop((c + 1, c, n, c + 1)).resize((c, mid_h),
+                                                     Image.NEAREST),
+              (w - c, c))
+    return out
+
+
 def round_rect(master, w: int, h: int, r: int, fill: str,
                outline: str = "", width: int = 1, bg: str = "#0d0d0d"):
     """Smooth rounded rectangle (card background / button base)."""
     if w <= 0 or h <= 0:
         return None
     key = ("rr", w, h, r, fill, outline, width, bg)
-
-    def _draw(d, s):
-        half = (width * s) // 2
-        box = [half, half, w * s - 1 - half, h * s - 1 - half]
-        kw = {"radius": r * s, "fill": fill}
-        if outline and width > 0:
-            kw.update(outline=outline, width=width * s)
-        d.rounded_rectangle(box, **kw)
-
-    return _photo(key, master, _draw, w, h)
+    try:
+        ckey = (id(master.tk),) + key
+    except Exception:
+        ckey = key
+    cached = _cache.get(ckey)
+    if cached is not None:
+        return cached
+    if len(_cache) > _CACHE_MAX:
+        _cache.clear()
+    try:
+        from PIL import ImageTk
+        photo = ImageTk.PhotoImage(
+            _rr_image(w, h, r, fill, outline, width, bg), master=master)
+    except Exception:
+        return None
+    _cache[ckey] = photo
+    return photo
 
 
 def progress_bar(master, w: int, h: int, fraction: float, fill: str,

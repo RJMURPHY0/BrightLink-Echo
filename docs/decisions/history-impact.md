@@ -44,3 +44,5 @@ Moved verbatim from CLAUDE.md on 2026-09-29. Add new decisions as a dated entry 
 - Kept "Last 12 months", not "Last year" (Ryan's mockup), per the earlier decision; the date line now makes the window plain anyway.
 - An older Echo receiving a new key through Cloud Sync falls back to All time (`_valid_impact_range`).
 - Below 30px tile height (only before first layout) the date line drops and the label sits alone.
+
+- `2026-10-28`: **Range picker periods read calmer.** Ryan: the Periods panel looked busy and hard to read. Ten bordered tiles with ten radio rings, two text lines each, in the cards' ~200px. Now only the chosen period is a tile (accent fill, border, tick: the house Dropdown's selected-row-with-check); the other nine are plain text rows, outlined on hover, with a 12px column gap and 10px margins. The panel also borrows the "Your impact" heading's line (its Periods / From / to header names it), so the rows get ~36px instead of ~30 and the panel still ends exactly where the cards did, so nothing below moves; the heading is re-packed before `_impact_stack` on close. Guarded by `tests/test_range_picker.py::CalmPeriodsTests` and the heading-borrow pin.

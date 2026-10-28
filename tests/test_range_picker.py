@@ -129,6 +129,32 @@ def _picker(test, **kw):
     return root, host, var, p
 
 
+class CalmPeriodsTests(unittest.TestCase):
+    """Only the chosen period is a boxed tile with a tick; the rest are plain
+    rows (2026-10-28: ten bordered tiles and ten rings read as busy)."""
+
+    def setUp(self):
+        self.root, self.host, self.var, self.p = _picker(self)
+
+    def test_only_the_chosen_period_draws_a_tile_and_tick(self):
+        self.p.open()
+        self.assertEqual(2, len(self.p._tile_imgs))
+
+    def test_period_rows_never_overlap_and_stay_inside(self):
+        self.p.open()
+        w, h = self.p._menu_w, self.p._menu_h
+        rows = [x for x in self.p._hits if x[1] > self.p._TAB_H]
+        self.assertEqual(len(_LABELS), len(rows))
+        for a in rows:
+            self.assertGreaterEqual(a[0], 0)
+            self.assertLessEqual(a[2], w)
+            self.assertLessEqual(a[3], h)
+            for b in rows:
+                if a is not b:
+                    self.assertFalse(a[0] < b[2] and b[0] < a[2]
+                                     and a[1] < b[3] and b[1] < a[3])
+
+
 class PickerTests(unittest.TestCase):
     def setUp(self):
         self.periods = []
@@ -376,6 +402,19 @@ class TabSwitchTests(unittest.TestCase):
         self.assertIn("_impact_row.pack_forget()", src)
         self.assertIn("_atomic_ui", src)
         self.assertNotIn("_resize", src)
+
+    def test_the_panel_borrows_the_heading_line_and_gives_it_back(self):
+        # Ten two-line periods in the cards' height alone sat line on line
+        # (Ryan, 2026-10-28). The heading's height goes to the panel, so it
+        # still ends where the cards did and nothing below moves.
+        import inspect
+        from app_window import AppWindow
+        src = inspect.getsource(AppWindow._toggle_range_panel)
+        self.assertIn("title.pack_forget()", src)
+        self.assertIn("height=block_h + extra", src)
+        self.assertIn("before=self._impact_stack", src)
+        build = inspect.getsource(AppWindow._build_impact_section)
+        self.assertIn("self._impact_title = title", build)
 
 
 class NamedWindowTests(unittest.TestCase):

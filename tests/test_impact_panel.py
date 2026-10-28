@@ -30,9 +30,14 @@ class NoResizeContractTests(unittest.TestCase):
         self.assertNotIn("_resize",
                          inspect.getsource(AppWindow._close_impact_detail))
 
-    def test_the_swap_runs_as_one_frozen_frame(self):
-        for fn in (AppWindow._open_impact_detail, AppWindow._close_impact_detail):
-            self.assertIn("_atomic_ui", inspect.getsource(fn), fn.__name__)
+    def test_the_swap_runs_as_one_frame(self):
+        # Opening paints one canvas (one frame under the freeze); closing
+        # restores the bar and three cards, which drew over 2-3 frames until
+        # it went behind the cover (2026-10-28).
+        self.assertIn("_atomic_ui",
+                      inspect.getsource(AppWindow._open_impact_detail))
+        self.assertIn("_covered_change",
+                      inspect.getsource(AppWindow._close_impact_detail))
 
     def test_the_panel_replaces_the_words_bar_as_well_as_the_cards(self):
         # Replacing only the cards would leave the words bar orphaned below a

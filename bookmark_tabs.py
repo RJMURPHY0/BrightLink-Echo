@@ -540,12 +540,18 @@ class BookmarkTabs(tk.Canvas):
                 pass
 
     def _warm(self) -> None:
+        # The hover states for the current tab first, then every tab as the
+        # current one (and none lit, for Settings): a click then swaps a
+        # cached image instead of spending ~40ms rendering the new strip
+        # (measured on each first visit, 2026-10-28).
         self._warm_job = None
-        for tid in [None] + self._ids:
-            key = (self._width, self._active, None if tid == self._active else tid,
-                   self._icons_on)
+        wanted = ([(self._active, tid) for tid in [None] + self._ids]
+                  + [(tid, None) for tid in [None] + self._ids])
+        for active, hovered in wanted:
+            key = (self._width, active,
+                   None if hovered == active else hovered, self._icons_on)
             if key not in self._cache:
-                if self._photo_for(self._active, tid) is not None:
+                if self._photo_for(active, hovered) is not None:
                     self._schedule_warm()
                 return
 

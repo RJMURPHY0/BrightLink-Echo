@@ -52,6 +52,9 @@ class _Root:
         self.jobs.append((ms, fn, args))
         return len(self.jobs)
 
+    def after_idle(self, fn, *args):
+        fn(*args)               # the fake loop is always idle
+
     def run_next(self):
         ms, fn, args = self.jobs.pop(0)
         fn(*args)
@@ -250,6 +253,100 @@ class SnapshotCoverSafetyTests(unittest.TestCase):
         with mock.patch.object(snapshot_cover, "_client_pixels",
                                side_effect=OSError("boom")):
             self.assertIsNone(snapshot_cover.window_fingerprint(5))
+
+    def test_reads_the_window_dc_before_printwindow(self):
+        # PrintWindow cost 35-100ms a read on the UI thread (2026-10-28), so
+        # every covered change waited ~300ms on its own stability checks.
+        src = inspect.getsource(snapshot_cover._client_pixels)
+        self.assertIn("u32.GetDC(top_hwnd)", src)
+        self.assertLess(src.index("g32.BitBlt("), src.index("u32.PrintWindow("))
+
+
+class PageChangeCoverTests(unittest.TestCase):
+    """Tab clicks showed 2 to 6 frames over ~150ms with the old page's cards
+    under the new one (captured 2026-10-28). Page changes now run behind the
+    same SnapshotCover as the sign-in hand-over."""
+
+    def test_the_tab_switch_runs_behind_a_cover(self):
+        self.assertIn("self._covered_change(_swap)",
+                      inspect.getsource(AppWindow._switch_dash_tab))
+        # Closing the range picker redraws the cards: covered too.
+        self.assertIn("self._covered_change(_swap)",
+                      inspect.getsource(AppWindow._toggle_range_panel))
+        src = inspect.getsource(AppWindow._covered_change)
+        self.assertIn("self._cover_page_change()", src)
+        self.assertIn("self._covered_ui(fn)", src)
+        self.assertIn("max_ms=_PAGE_COVER_MAX_MS", src)
+        self.assertIn("poll_ms=_PAGE_COVER_POLL_MS", src)
+        # Uncovered (hidden window, Win32 failure) it is the old freeze.
+        self.assertIn("self._atomic_ui(fn)", src)
+
+    def test_the_cap_is_a_safety_net_not_a_timer(self):
+        # At 600ms a slow moment dropped the cover over a half-drawn page.
+        self.assertGreaterEqual(app_window._PAGE_COVER_MAX_MS, 1500)
+        self.assertLess(app_window._PAGE_COVER_POLL_MS,
+                        app_window._COVER_POLL_MS)
+
+    def test_reads_wait_for_tk_to_be_idle(self):
+        src = inspect.getsource(AppWindow._drop_cover_when_drawn)
+        self.assertIn("self._root.after_idle(_poll)", src)
+        self.assertNotIn("after(poll_ms, _poll)", src)
+
+    def test_a_fast_second_click_takes_the_cover_over(self):
+        root = _Root()
+        w = _window(root=root)
+        w._top_hwnd = lambda: 99
+        first = _Cover()
+        w._drop_cover_when_drawn(first, max_ms=1500, poll_ms=10)
+        with mock.patch.object(snapshot_cover.SnapshotCover, "over") as over:
+            self.assertIs(first, w._cover_page_change())
+        over.assert_not_called()
+        # The first watch is over: its deadline no longer closes the cover
+        # the second change now owns.
+        for ms, fn, args in [j for j in root.jobs if j[0] == 1500]:
+            fn(*args)
+        self.assertEqual(0, first.closed)
+        w._drop_cover_when_drawn(first, max_ms=1500, poll_ms=10)
+        root.jobs[-1][1]()
+        self.assertEqual(1, first.closed)
+
+    def test_no_held_cover_means_a_fresh_picture(self):
+        w = _window(root=_Root())
+        w._top_hwnd = lambda: 99
+        fresh = _Cover()
+        with mock.patch.object(snapshot_cover.SnapshotCover, "over",
+                               staticmethod(lambda _h: fresh)):
+            self.assertIs(fresh, w._cover_page_change())
+
+    def test_covered_ui_joins_nested_changes_and_defers_the_resize(self):
+        w = _window(root=_Root())
+        w._root.update_idletasks = lambda: None
+        geos, repaints, log = [], [], []
+        w._root.geometry = lambda g: geos.append(g)
+        w._repaint_all = lambda erase=False: repaints.append(erase)
+
+        def inner():
+            log.append(("inner", w._in_atomic))
+
+        def change():
+            w._atomic_ui(inner)          # joins: never presents half-way
+            w._pending_geometry = "420x700"
+            log.append(("outer", w._in_atomic))
+
+        w._covered_ui(change)
+        self.assertEqual([("inner", True), ("outer", True)], log)
+        self.assertFalse(w._in_atomic)
+        self.assertEqual(["420x700"], geos)
+        self.assertEqual([True], repaints)
+
+    def test_covered_ui_never_freezes_or_repaints_a_plain_swap(self):
+        src = inspect.getsource(AppWindow._covered_ui)
+        self.assertNotIn("SendMessageW", src)
+        w = _window(root=_Root())
+        w._root.update_idletasks = lambda: None
+        w._repaint_all = mock.Mock()
+        w._covered_ui(lambda: None)
+        w._repaint_all.assert_not_called()
 
 
 if __name__ == "__main__":

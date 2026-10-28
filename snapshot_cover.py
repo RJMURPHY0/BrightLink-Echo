@@ -8,7 +8,8 @@ something covers it while Tk repaints, removing the cover shows the finished
 page in one frame.
 
 The cover is a layered, click-through, never-activating popup owned by the
-window, filled once with PrintWindow's copy of the client area via
+window, filled once with a copy of the client area (BitBlt from the window's
+own DC, PrintWindow if that fails) via
 UpdateLayeredWindow (so it never paints itself and cannot flash white), and
 placed directly above the window in the z-order (so it never jumps in front of
 another app that overlaps the window). Every failure returns None and the
@@ -35,6 +36,7 @@ _SW_SHOWNOACTIVATE = 4
 _PW_CLIENTONLY = 0x1
 _PW_RENDERFULLCONTENT = 0x2
 _ULW_ALPHA = 0x2
+_SRCCOPY = 0x00CC0020
 
 _api = None
 
@@ -92,8 +94,26 @@ def _load():
     g32.SelectObject.argtypes = [W.HDC, W.HGDIOBJ]
     g32.DeleteObject.argtypes = [W.HGDIOBJ]
     g32.DeleteDC.argtypes = [W.HDC]
+    g32.BitBlt.argtypes = [W.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                           ctypes.c_int, W.HDC, ctypes.c_int, ctypes.c_int,
+                           W.DWORD]
     _api = (u32, g32)
     return _api
+
+
+_dwm = None
+
+
+def _dwm_flush() -> None:
+    """Block until DWM's next present (at most one frame). Best effort: on
+    failure the change just runs, as it did before."""
+    global _dwm
+    try:
+        if _dwm is None:
+            _dwm = ctypes.WinDLL("dwmapi")
+        _dwm.DwmFlush()
+    except Exception as exc:
+        print(f"[SnapshotCover] DwmFlush failed (non-fatal): {exc}")
 
 
 def _dib(g32, dc, w: int, h: int):
@@ -116,17 +136,27 @@ def _client_pixels(top_hwnd: int):
         return None
     origin = W.POINT(0, 0)
     u32.ClientToScreen(top_hwnd, ctypes.byref(origin))
-    screen_dc = u32.GetDC(None)
-    mem_dc = g32.CreateCompatibleDC(screen_dc)
+    win_dc = u32.GetDC(top_hwnd)
+    mem_dc = g32.CreateCompatibleDC(win_dc)
     bmp, bits = _dib(g32, mem_dc, w, h)
     old = g32.SelectObject(mem_dc, bmp) if bmp else None
     try:
         if not bmp or not bits.value:
             return None
-        if not u32.PrintWindow(top_hwnd, mem_dc,
-                               _PW_CLIENTONLY | _PW_RENDERFULLCONTENT):
-            return None
-        pixels = ctypes.string_at(bits.value, w * h * 4)
+        # BitBlt from the window's own DC reads the surface DWM composites
+        # from, so a cover or another app over the window is never in it.
+        # ~5ms against PrintWindow's 35-100ms (measured 2026-10-28), and the
+        # cover's watch reads it every _COVER_POLL_MS on the UI thread: at
+        # PrintWindow's cost every page change waited ~300ms on the reads
+        # alone. PrintWindow stays as the fallback.
+        pixels = None
+        if win_dc and g32.BitBlt(mem_dc, 0, 0, w, h, win_dc, 0, 0, _SRCCOPY):
+            pixels = ctypes.string_at(bits.value, w * h * 4)
+        if not pixels or not pixels.strip(b"\x00"):
+            if not u32.PrintWindow(top_hwnd, mem_dc,
+                                   _PW_CLIENTONLY | _PW_RENDERFULLCONTENT):
+                return None
+            pixels = ctypes.string_at(bits.value, w * h * 4)
         if not pixels.strip(b"\x00"):
             return None
         return (origin.x, origin.y, w, h), pixels
@@ -136,7 +166,8 @@ def _client_pixels(top_hwnd: int):
         if bmp:
             g32.DeleteObject(bmp)
         g32.DeleteDC(mem_dc)
-        u32.ReleaseDC(None, screen_dc)
+        if win_dc:
+            u32.ReleaseDC(top_hwnd, win_dc)
 
 
 def window_fingerprint(top_hwnd: int) -> Optional[int]:
@@ -208,6 +239,11 @@ class SnapshotCover:
                 print(f"[SnapshotCover] Cover did not show "
                       f"(error {ctypes.get_last_error()}); swapping uncovered")
                 return None
+            # Shown is not yet on screen: DWM puts a new layered window up at
+            # its next present, and a change made before then reached the
+            # screen first (the recorder caught the search bar's new text a
+            # frame ahead of the cover, 2026-10-28). Wait for that present.
+            _dwm_flush()
             cover = cls(hwnd)
             hwnd = None
             return cover
