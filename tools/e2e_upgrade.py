@@ -210,7 +210,10 @@ def check_migrated(rep: Report, version: str, label: str):
     exe = canonical()
     rep.check(f"{label}: canonical exe is the installed layout", il.is_installed_layout_exe(exe))
     rep.check(f"{label}: installed layout is whole", il.layout_ok(exe))
-    rep.check(f"{label}: app runs {version}", ping_version() == version, ping_version())
+    # The app can take a few seconds to answer right after migration (1.8.19
+    # gate, upgrade from 1.6.86: first ping unanswered, second said 1.8.19).
+    rep.check(f"{label}: app runs {version}",
+              wait_for(lambda: ping_version() == version, 60, every=1), ping_version())
     # activate.ps1 removes pending-<version> as its LAST step, after the new
     # version has reported healthy and been re-registered (~1-2 s later). The
     # app answering ping_version() is therefore not the end of activation:
