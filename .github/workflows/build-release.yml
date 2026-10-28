@@ -132,6 +132,30 @@ jobs:
       - name: Install dependencies
         run: uv pip install --system -r requirements.txt pyinstaller -c constraints.txt
 
+      # The PyPI wheel ships the same prebuilt bootloader every PyInstaller app
+      # uses, malware included, so machine-learning engines (Elastic, SecureAge
+      # on VirusTotal, 2026-10-28) flag our exe on the bootloader's bytes alone.
+      # Compiling the SAME pinned version's bootloader from its sdist here keeps
+      # the C source (and the 6.22.3 launch behaviour constraints.txt depends on)
+      # identical while giving the exe its own bytes. MSVC is on windows-latest.
+      - name: Compile PyInstaller bootloader from source
+        shell: pwsh
+        env:
+          PYINSTALLER_COMPILE_BOOTLOADER: "1"
+        run: |
+          $pin = (Select-String -Path constraints.txt -Pattern '^pyinstaller==').Line
+          if (-not $pin) { throw "pyinstaller pin missing from constraints.txt" }
+          $stock = python -c "import PyInstaller, os; print(os.path.join(os.path.dirname(PyInstaller.__file__), 'bootloader', 'Windows-64bit-intel', 'runw.exe'))"
+          $stockHash = (Get-FileHash $stock -Algorithm SHA256).Hash
+          uv pip install --system --reinstall --no-deps --no-binary pyinstaller --no-cache $pin
+          if ($LASTEXITCODE -ne 0) { throw "bootloader compile failed" }
+          $built = python -c "import PyInstaller, os; print(os.path.join(os.path.dirname(PyInstaller.__file__), 'bootloader', 'Windows-64bit-intel', 'runw.exe'))"
+          $builtHash = (Get-FileHash $built -Algorithm SHA256).Hash
+          Write-Host "stock runw.exe $stockHash"
+          Write-Host "built runw.exe $builtHash"
+          if ($builtHash -eq $stockHash) { Write-Host "::error title=bootloader::runw.exe is still the stock PyPI build"; throw "bootloader was not recompiled" }
+          python -c "import PyInstaller; print('PyInstaller', PyInstaller.__version__)"
+
       - name: Prepare build-time config (no secrets)
         shell: pwsh
         run: Copy-Item "config_default.json" "config.json" -Force
