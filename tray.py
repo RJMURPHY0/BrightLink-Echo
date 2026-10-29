@@ -25,51 +25,37 @@ def _resource_path(relative_path: str) -> str:
     return os.path.join(base, relative_path)
 
 
-def _create_icon_image(color: str = "#4A9EFF", ring_color: str = "#FFFFFF") -> Image.Image:
-    """
-    Programmatically create a microphone-style tray icon.
+def _create_icon_image(dot: Optional[str] = None) -> Image.Image:
+    """The app icon's small form (the link and bars, no waves: the tray draws
+    at 16-24px), with a coloured dot in the corner while busy.
 
-    Colors by state:
-        idle:       blue circle (#4A9EFF)
-        recording:  red circle (#FF4444)
-        processing: amber circle (#FFB347)
+    Dots by state:
+        idle:       none
+        recording:  red (#FF4444)
+        processing: amber (#FFB347)
     """
+    import logo_cache
+
     size = 64
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    padding = 4
-    draw.ellipse(
-        [padding, padding, size - padding, size - padding],
-        fill=color, outline=ring_color, width=2,
-    )
-
-    mic_color = "#FFFFFF"
-    cx, cy = size // 2, size // 2
-
-    mic_w, mic_h = 10, 18
-    draw.rounded_rectangle(
-        [cx - mic_w // 2, cy - mic_h // 2 - 4, cx + mic_w // 2, cy + mic_h // 2 - 4],
-        radius=5, fill=mic_color,
-    )
-
-    arc_w = 16
-    draw.arc(
-        [cx - arc_w // 2, cy - 10, cx + arc_w // 2, cy + 8],
-        start=0, end=180, fill=mic_color, width=2,
-    )
-
-    draw.line([cx, cy + 8,  cx, cy + 14],       fill=mic_color, width=2)
-    draw.line([cx - 6, cy + 14, cx + 6, cy + 14], fill=mic_color, width=2)
-
+    img = logo_cache.app_icon_image(size, simple=True)
+    if img is None:
+        img = Image.new("RGBA", (size, size), (13, 13, 13, 255))
+    if dot:
+        big = img.resize((size * 4, size * 4), Image.LANCZOS)
+        d = ImageDraw.Draw(big)
+        r = size * 4 * 0.19
+        c = size * 4 - r - 6
+        d.ellipse([c - r - 14, c - r - 14, c + r + 14, c + r + 14], fill="#0d0d0d")
+        d.ellipse([c - r, c - r, c + r, c + r], fill=dot)
+        img = big.resize((size, size), Image.LANCZOS)
     return img
 
 
 # Pre-generate icons for each state
 ICON_IMAGES = {
-    "idle":       _create_icon_image(color="#4A9EFF"),
-    "recording":  _create_icon_image(color="#FF4444"),
-    "processing": _create_icon_image(color="#FFB347"),
+    "idle":       _create_icon_image(),
+    "recording":  _create_icon_image(dot="#FF4444"),
+    "processing": _create_icon_image(dot="#FFB347"),
 }
 
 
@@ -78,9 +64,9 @@ class TrayApp:
     System tray application with dynamic icon and right-click menu.
 
     States:
-        idle       → blue microphone icon
-        recording  → red microphone icon
-        processing → amber microphone icon
+        idle       → the app icon
+        recording  → the app icon with a red dot
+        processing → the app icon with an amber dot
     """
 
     APP_NAME = brand.PRODUCT_NAME
