@@ -90,17 +90,36 @@ class IconTests(unittest.TestCase):
             self.assertLessEqual(diff, 2, f"{name} is not built from the chain mark; "
                                           "regenerate with logo_cache.write_icon")
 
-    def test_echo_is_in_the_icon_where_it_can_be_read(self):
-        # Orange text sits in the lower part of the tile from TEXT_MIN_PX up;
-        # below that the frame is the chain alone.
-        def orange_rows(size):
+    def test_icon_is_the_link_with_waves_where_they_can_be_read(self):
+        # Orange and white halves of the link at every size; the waves (orange
+        # in the right-hand strip of the tile) only above SIMPLE_MAX_PX, where
+        # they don't smudge. No "Echo" text: nothing orange along the bottom.
+        def mask(size):
             a = np.asarray(logo_cache.app_icon_image(size).convert("RGB"), dtype=int)
             r, g, b = a[..., 0], a[..., 1], a[..., 2]
-            lower = (r > 180) & (b < 90) & (r - g > 60)
-            return lower[int(size * 0.62):].sum()
-        self.assertGreater(orange_rows(32), 8)
-        self.assertGreater(orange_rows(48), 20)
-        self.assertLess(orange_rows(16), orange_rows(32))
+            return (r > 180) & (b < 90) & (r - g > 60), (r > 170) & (g > 170) & (b > 170)
+        for size in (16, 24, 32, 48, 256):
+            orange, white = mask(size)
+            self.assertGreater(orange.sum(), size * size * 0.03, size)
+            self.assertGreater(white.sum(), size * size * 0.02, size)
+            self.assertEqual(0, orange[int(size * 0.85):].sum(), size)
+
+        def wave_strip(size):
+            return mask(size)[0][:, int(size * 0.8):].sum()
+        self.assertGreater(wave_strip(48), 10)
+        self.assertGreater(wave_strip(256), 500)
+        self.assertEqual(0, wave_strip(24))
+        self.assertEqual(0, wave_strip(16))
+
+    def test_notification_icon_follows_the_icon_revision(self):
+        import app_install
+        self.assertIn(f"-{logo_cache.ICON_REV}.png", app_install.notification_icon_path())
+
+    def test_tray_uses_the_app_icon(self):
+        import tray
+        got = np.asarray(tray.ICON_IMAGES["idle"], dtype=int)
+        want = np.asarray(logo_cache.app_icon_image(64, simple=True), dtype=int)
+        self.assertLessEqual(np.abs(got - want).max(), 2)
 
     def test_own_app_history_icon_is_the_app_icon(self):
         got = np.asarray(Image.open(os.path.join(

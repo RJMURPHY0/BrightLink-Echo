@@ -194,53 +194,110 @@ def get_logo_photo(master, bg_color: str, max_w: int = 180, max_h: int = 60):
 
 ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
 
-# The app icon: the chain over "Echo" on a dark rounded tile, so the taskbar
-# tells Echo apart from the BrightLink CRM's plain chain. Stacked, not side by
-# side as the pop-up badge is: in a square, side by side leaves "Echo" about
-# 4px tall at taskbar size (a smudge, as "whisper" was on the old FTC tile),
-# stacked gives it the full width. Below TEXT_MIN_PX there is no legible
-# "Echo" at all, so those frames (the title bar's 16px, beside a title that
-# already says Echo) carry the chain alone.
+# The app icon (Ryan, 2026-10-28): one tilted BrightLink link, orange half and
+# white half, with sound bars inside it and two sound waves off its right end,
+# on a dark rounded tile. No "Echo" text: the shape says Echo on its own and
+# tells it apart from the CRM's plain chain. Drawn here as distance fields, not
+# from a bitmap, so every frame is crisp. At SIMPLE_MAX_PX and under the waves
+# go (they smudge) and the link grows to fill the tile, with three bars.
+# Bump ICON_REV whenever the drawing changes: installs re-render their cached
+# notification icon and refresh Windows' icon cache once per revision.
+ICON_REV = 2
 ICON_TILE = (13, 13, 13, 255)
 ICON_RADIUS = 0.2
-TEXT_MIN_PX = 24
-_ICON_SS = 8
+SIMPLE_MAX_PX = 24
+_ORANGE = ((255, 184, 0), (255, 98, 0))     # top-left -> bottom-right
+_WHITE = ((246, 246, 246), (196, 196, 200))
 
 
-def app_icon_image(size: int):
-    """One square frame of the app icon, `size` px, RGBA."""
-    from PIL import Image, ImageDraw
-    mark, echo = _asset(MARK), _asset(ECHO)
-    if mark is None:
-        return None
-    mark = mark.crop(mark.getchannel("A").getbbox())
-    big = size * _ICON_SS
-    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    ImageDraw.Draw(img).rounded_rectangle(
-        [0, 0, big - 1, big - 1], radius=int(big * ICON_RADIUS), fill=ICON_TILE)
-    ma = mark.width / mark.height
+def app_icon_image(size: int, simple: bool = None):
+    """One square frame of the app icon, `size` px, RGBA. `simple` (no waves,
+    three bars, heavier strokes) defaults to the small-size rule; the tray
+    asks for it at 64px because Windows shows that frame at 16-24px."""
+    import math
 
-    def put(src, w, h, x, y):
-        part = src.resize((max(1, int(w)), max(1, int(h))), Image.LANCZOS)
-        img.paste(part, (int(x), int(y)), part)
+    import numpy as np
+    from PIL import Image
+    if simple is None:
+        simple = size <= SIMPLE_MAX_PX
+    small = simple  # the simple form is for small sizes: heavier strokes
+    ss = 4 if size <= 64 else 2
+    n = size * ss
+    ys, xs = np.mgrid[0:n, 0:n].astype(np.float32)
+    x, y = (xs + 0.5) / n, (ys + 0.5) / n
+    aa = 1.0 / n
 
-    if size < TEXT_MIN_PX or echo is None:
-        inner = big * 0.84
-        w, h = (inner, inner / ma) if ma >= 1 else (inner * ma, inner)
-        put(mark, w, h, (big - w) / 2, (big - h) / 2)
-    else:
-        echo = echo.crop(echo.getchannel("A").getbbox())
-        inner = big * 0.84
-        gap = big * 0.04
-        ew, eh = inner, inner * echo.height / echo.width
-        ch = inner - eh - gap
-        cw = ch * ma
-        if cw > inner:
-            cw, ch = inner, inner / ma
-        top = (big - (ch + gap + eh)) / 2
-        put(mark, cw, ch, (big - cw) / 2, top)
-        put(echo, ew, eh, (big - ew) / 2, top + ch + gap)
-    return img.resize((size, size), Image.LANCZOS)
+    def cov(d):  # coverage from a signed distance, negative inside
+        return np.clip(0.5 - d / aa, 0.0, 1.0)
+
+    def ramp(t, pair):
+        a, b = (np.array(c, np.float32) for c in pair)
+        t = np.clip(t, 0, 1)[..., None]
+        return a * (1 - t) + b * t
+
+    rgb = np.zeros((n, n, 3), np.float32)
+    alpha = np.zeros((n, n), np.float32)
+
+    def layer(mask, colour):
+        m = mask[..., None]
+        rgb[:] = rgb * (1 - m) + colour * m
+        alpha[:] = alpha * (1 - mask) + mask
+
+    # Tile
+    q = 0.5 - ICON_RADIUS
+    qx, qy = np.abs(x - 0.5) - q, np.abs(y - 0.5) - q
+    d = (np.sqrt(np.maximum(qx, 0) ** 2 + np.maximum(qy, 0) ** 2)
+         + np.minimum(np.maximum(qx, qy), 0) - ICON_RADIUS)
+    layer(cov(d), np.array(ICON_TILE[:3], np.float32))
+
+    # The link: a stadium outline along an axis rising 28 degrees, cut in two
+    # by screen-vertical slants, the upper arm right of centre, the lower left.
+    cx, cy = (0.5, 0.5) if simple else (0.42, 0.5)
+    h, r, w = (0.19, 0.18, 0.085) if simple else (0.16, 0.15, 0.07)
+    if small:
+        w *= 1.25
+    th = math.radians(28)
+    ux, uy = math.cos(th), -math.sin(th)
+    dx, dy = x - cx, y - cy
+    u = dx * ux + dy * uy
+    v = -dx * uy + dy * ux
+    dist = np.sqrt((u - np.clip(u, -h, h)) ** 2 + v ** 2)
+    ring = cov(np.abs(dist - r) - w / 2)
+    gap, cut = (0.06 if small else 0.045), 0.05
+    # One straight line per cut; the end caps lie wholly on their own side.
+    edge = np.where(v < 0, cut, -cut)
+    tint = x + y - 0.4
+    layer(ring * cov(dx - (edge - gap / 2)), ramp(tint, _ORANGE))
+    layer(ring * cov((edge + gap / 2) - dx), ramp(tint, _WHITE))
+
+    # Sound bars: round-ended, centred in the link
+    heights = (0.55, 1.0, 0.55) if simple else (0.36, 0.64, 1.0, 0.64, 0.36)
+    bw, pitch = (0.07, 0.1) if small else (0.04, 0.06)
+    tall = 0.26 if small else 0.25 if simple else 0.21
+    bars = np.zeros_like(x)
+    for i, k in enumerate(heights):
+        bx = cx + (i - (len(heights) - 1) / 2) * pitch
+        reach = max(0.0, tall * k / 2 - bw / 2)
+        py = np.clip(y - cy, -reach, reach)
+        bars = np.maximum(bars, cov(np.sqrt((x - bx) ** 2 + (y - cy - py) ** 2) - bw / 2))
+    layer(bars, ramp((y - (cy - tall / 2)) / tall, _ORANGE))
+
+    # Sound waves: two round-capped arcs off the link's right end
+    if not simple:
+        acx, acy, span, ww = 0.675, 0.545, math.radians(38), 0.036
+        ang = np.arctan2(y - acy, x - acx)
+        rr = np.sqrt((x - acx) ** 2 + (y - acy) ** 2)
+        waves = np.zeros_like(x)
+        for R in (0.165, 0.235):
+            d = np.where(np.abs(ang) <= span, np.abs(rr - R) - ww / 2, 1.0)
+            for s in (-span, span):
+                ex, ey = acx + R * math.cos(s), acy + R * math.sin(s)
+                d = np.minimum(d, np.sqrt((x - ex) ** 2 + (y - ey) ** 2) - ww / 2)
+            waves = np.maximum(waves, cov(d))
+        layer(waves, ramp((y - 0.3) / 0.45, _ORANGE))
+
+    px = np.dstack([rgb, alpha[..., None] * 255]).clip(0, 255).astype(np.uint8)
+    return Image.fromarray(px, "RGBA").resize((size, size), Image.LANCZOS)
 
 
 def icon_frames():
