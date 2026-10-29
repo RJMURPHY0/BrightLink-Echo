@@ -75,7 +75,7 @@ class SpanLabelTests(unittest.TestCase):
     def test_two_dates(self):
         self.assertEqual(_span_label(datetime.date(2026, 9, 1),
                                      datetime.date(2026, 9, 9)),
-                         "1 Sep – 9 Sep")
+                         "1 Sep to 9 Sep")
 
     def test_single_day(self):
         d = datetime.date(2026, 9, 9)
@@ -84,7 +84,7 @@ class SpanLabelTests(unittest.TestCase):
     def test_crossing_years_shows_the_year(self):
         self.assertEqual(_span_label(datetime.date(2025, 12, 30),
                                      datetime.date(2026, 1, 2)),
-                         "30 Dec 25 – 2 Jan 26")
+                         "30 Dec 25 to 2 Jan 26")
 
 
 class _Host:
@@ -190,7 +190,7 @@ class PickerTests(unittest.TestCase):
         self.p._apply_custom()
         self.assertEqual(self.spans,
                          [(datetime.date(2026, 9, 1), datetime.date(2026, 9, 9))])
-        self.assertEqual(self.var.get(), "1 Sep – 9 Sep")
+        self.assertEqual(self.var.get(), "1 Sep to 9 Sep")
         self.assertEqual(self.host.toggles, [True, False], "panel left open")
 
     def _day_items(self, cv):
@@ -233,12 +233,12 @@ class PickerTests(unittest.TestCase):
     def test_every_period_tile_shows_its_dates(self):
         # At the real panel height the tiles come out under 30px; the date
         # line must still be drawn on every one of them.
-        root, host, var, p = _picker(self, describe=lambda v: "19 – 25 Oct")
+        root, host, var, p = _picker(self, describe=lambda v: "19 to 25 Oct")
         p._tab = "periods"
         p.open()
         cv = p._menu_cv
         dates = [i for i in cv.find_all() if cv.type(i) == "text"
-                 and cv.itemcget(i, "text") == "19 – 25 Oct"]
+                 and cv.itemcget(i, "text") == "19 to 25 Oct"]
         self.assertEqual(len(dates), len(_LABELS))
 
     def test_apply_with_one_date_is_a_single_day(self):
@@ -278,7 +278,7 @@ class PickerTests(unittest.TestCase):
 
     def test_control_widens_for_a_span_label(self):
         narrow = self.p._natural_width()
-        self.var.set("30 Dec 25 – 2 Jan 26")
+        self.var.set("30 Dec 25 to 2 Jan 26")
         self.assertGreater(self.p._natural_width(), narrow)
 
 
@@ -460,11 +460,11 @@ class NamedWindowTests(unittest.TestCase):
         self.assertEqual(_period_span_label(d(2026, 10, 27), d(2026, 10, 27)),
                          "Tue 27 Oct")
         self.assertEqual(_period_span_label(d(2026, 10, 19), d(2026, 10, 25)),
-                         "19 – 25 Oct")
+                         "19 to 25 Oct")
         self.assertEqual(_period_span_label(d(2026, 7, 28), d(2026, 10, 27)),
-                         "28 Jul – 27 Oct")
+                         "28 Jul to 27 Oct")
         self.assertEqual(_period_span_label(d(2025, 10, 28), d(2026, 10, 27)),
-                         "28 Oct 25 – 27 Oct 26")
+                         "28 Oct 25 to 27 Oct 26")
 
     def test_every_key_is_a_valid_saved_value(self):
         for k in config_mod.IMPACT_RANGES:

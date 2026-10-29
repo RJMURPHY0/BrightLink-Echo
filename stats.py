@@ -763,7 +763,7 @@ class StatsStore:
                         client.table(_STATS_TABLE).upsert(
                             slim, on_conflict="user_id,day").execute()
                         print(f"[Stats] Synced {len(slim)} day(s) to Supabase "
-                              "(voiced columns missing — run the updated "
+                              "(voiced columns missing, run the updated "
                               "user_daily_stats.sql).")
                     except Exception as e:
                         print(f"[Stats] Sync push failed (non-fatal): {e}")

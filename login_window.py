@@ -900,7 +900,7 @@ class LoginWindow:
                 {"provider": "google", "options": {"redirect_to": redirect_uri}}
             )
             webbrowser.open(result.url)
-            self._set_status("Browser opened — sign in with Google…", error=False)
+            self._set_status("Browser opened, sign in with Google…", error=False)
         except Exception as e:
             self._set_status(f"Google sign-in failed: {e}", error=True)
             return
@@ -911,7 +911,7 @@ class LoginWindow:
                 if code:
                     self._root.after(0, self._exchange_oauth_code, code)
                 else:
-                    self._root.after(0, self._set_status, "Google sign-in failed — no code received.", True)
+                    self._root.after(0, self._set_status, "Google sign-in failed, no code received.", True)
             else:
                 self._root.after(0, self._set_status, "Google sign-in timed out.", True)
 
@@ -927,7 +927,7 @@ class LoginWindow:
                     self._auth._save_session(r.session)
                     self._root.after(0, self._handle_result, True, f"Welcome, {r.user.email}")
                 else:
-                    self._root.after(0, self._set_status, "Google sign-in failed — could not verify session.", True)
+                    self._root.after(0, self._set_status, "Google sign-in failed, could not verify session.", True)
             except Exception as e:
                 self._root.after(0, self._set_status, f"Google sign-in error: {e}", True)
 

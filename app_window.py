@@ -1,5 +1,5 @@
 ﻿"""
-BrightLink Echo — Main application window.
+BrightLink Echo, Main application window.
 
 Dashboard: Home / Hotkey / History tabs.
 Dark theme with rounded-corner cards via Canvas.
@@ -964,7 +964,7 @@ def _span_label(a, b) -> str:
     same_year = a.year == b.year
     left = f"{a.day} {a.strftime('%b')}" + ("" if same_year else f" {a.year % 100:02d}")
     right = f"{b.day} {b.strftime('%b')}" + ("" if same_year else f" {b.year % 100:02d}")
-    return f"{left} – {right}"
+    return f"{left} to {right}"
 
 
 def _period_span_label(a, b) -> str:
@@ -973,7 +973,7 @@ def _period_span_label(a, b) -> str:
     if a == b:
         return f"{a.strftime('%a')} {a.day} {a.strftime('%b')}"
     if (a.year, a.month) == (b.year, b.month):
-        return f"{a.day} – {b.day} {b.strftime('%b')}"
+        return f"{a.day} to {b.day} {b.strftime('%b')}"
     return _span_label(a, b)
 
 
@@ -2497,7 +2497,7 @@ class AppWindow:
             err_frame = tk.Frame(self._root, bg=C["bg"])
             err_frame.pack(fill="both", expand=True, padx=16, pady=16)
             tk.Label(
-                err_frame, text=f"{brand.PRODUCT_NAME} — Startup Error",
+                err_frame, text=f"{brand.PRODUCT_NAME} - Startup Error",
                 fg=C["error"], bg=C["bg"],
                 font=("Segoe UI", 12, "bold"), anchor="w",
             ).pack(fill="x", pady=(0, 8))
@@ -3130,7 +3130,7 @@ class AppWindow:
         if token != self._usearch_query.strip():
             return          # the query moved on while the model was thinking
         ans = (ans or "").strip()
-        self._usearch_ai = ("answer", ans or "No answer — try rephrasing.")
+        self._usearch_ai = ("answer", ans or "No answer, try rephrasing.")
         self._render_usearch_panel()
 
     # ── Results panel ────────────────────────────────────────────────────────
@@ -3185,7 +3185,7 @@ class AppWindow:
             for e in results:
                 self._usearch_result_row(p, e)
         elif not ai and self._usearch_query:
-            tk.Label(p, text="No matches — press Enter to ask AI",
+            tk.Label(p, text="No matches, press Enter to ask AI",
                      fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 9),
                      anchor="w").pack(fill="x", padx=14, pady=(0, 10))
 
@@ -4836,7 +4836,7 @@ class AppWindow:
         # Hotkey pill
         pill_bg = tk.Frame(hint_row, bg=C["accent_dim"], padx=8, pady=3)
         pill_bg.pack(side="left")
-        hint_text = self._hotkey if self._hotkey else "—"
+        hint_text = self._hotkey if self._hotkey else "-"
         self._home_hotkey_lbl = tk.Label(
             pill_bg, text=hint_text,
             fg=C["accent"], bg=C["accent_dim"],
@@ -4867,7 +4867,7 @@ class AppWindow:
 
         refine_pill_bg = tk.Frame(refine_hint_row, bg=C["accent_dim"], padx=8, pady=3)
         refine_pill_bg.pack(side="left")
-        refine_hint_text = self._refine_hotkey if self._refine_hotkey else "—"
+        refine_hint_text = self._refine_hotkey if self._refine_hotkey else "-"
         self._home_refine_hotkey_lbl = tk.Label(
             refine_pill_bg, text=refine_hint_text,
             fg=C["accent"], bg=C["accent_dim"],
@@ -4892,7 +4892,7 @@ class AppWindow:
                                 padx=8, pady=3)
         _ptt_pill_bg.pack(side="left")
         self._home_ptt_lbl = tk.Label(
-            _ptt_pill_bg, text=self._ptt_hotkey or "—",
+            _ptt_pill_bg, text=self._ptt_hotkey or "-",
             fg=C["accent"], bg=C["accent_dim"],
             font=("Segoe UI", 10, "bold"),
         )
@@ -5742,7 +5742,7 @@ class AppWindow:
             # lifetime rate rather than dropping to the nominal default.
             _p = f" for {_phrase}" if _phrase else ""
             body = (f"Your typical speed, from {life_w:,} words over "
-                    f"{self._fmt_span(life_m)} of speech — not enough{_p} yet.")
+                    f"{self._fmt_span(life_m)} of speech, not enough{_p} yet.")
         cv.create_text(pad, min(y + 2, h - 30), anchor="nw", width=inner,
                        text=body, fill=C["subtext"], font=("Segoe UI", 8))
 
@@ -5993,7 +5993,7 @@ class AppWindow:
             # "dictation speed" on a fresh account is the same untruth the time
             # card told. The nominal fallback still stands once there IS data
             # but the window is too thin to measure (see the v1.6.70 decision).
-            self._set_impact_card("speed", "—", "wpm", "Dictate to measure")
+            self._set_impact_card("speed", "-", "wpm", "Dictate to measure")
         else:
             self._set_impact_card("speed", "160", "wpm", "4× faster than typing")
 
@@ -6054,12 +6054,12 @@ class AppWindow:
     _HELP_HANDS_FREE = (
         f"Tap the keys once and {brand.PRODUCT_SHORT_NAME} starts listening. Tap them again "
         "and it stops, then types what you said into whatever you were "
-        "already working in — no need to hold anything down.\n\n"
+        "already working in, no need to hold anything down.\n\n"
         "Press Change Hotkey to set your own. Any single key (F9, for "
         "instance) or any combination of two works."
     )
     _HELP_PTT = (
-        "Hold the keys down while you talk and let go when you are done — "
+        "Hold the keys down while you talk and let go when you are done, "
         f"the way a walkie-talkie works. {brand.PRODUCT_SHORT_NAME} types what you said the "
         "moment you release. Best when you want short bursts and nothing "
         "left listening by accident.\n\n"
@@ -6067,7 +6067,7 @@ class AppWindow:
         "instance) or any combination of two works."
     )
     _HELP_REFINE = (
-        "Highlight some text anywhere — an email, a document, a chat box — "
+        "Highlight some text anywhere, an email, a document, a chat box, "
         f"then press these keys. {brand.PRODUCT_SHORT_NAME} reads what you selected and offers "
         "a tidier version you can drop straight back in its place.\n\n"
         "Press Change Hotkey to set your own. Any single key (F9, for "
@@ -6455,7 +6455,7 @@ class AppWindow:
         c = combo.lower()
         base = c.split("+")[-1]
         if "+" not in c and base not in self._STANDALONE_KEYS:
-            return ("Needs Ctrl, Alt or Shift — a plain key would fire "
+            return ("Needs Ctrl, Alt or Shift, a plain key would fire "
                     "while you type.")
         others = {
             "main":   [("push-to-talk", self._ptt_hotkey),
@@ -6476,7 +6476,7 @@ class AppWindow:
             return "", C["success"]
         combo = (status.get("combo") or "").upper()
         if not status.get("ok"):
-            return (f"{combo} could not be registered — another app is "
+            return (f"{combo} could not be registered, another app is "
                     "probably using it. Pick a different combo."), C["error"]
         if not status.get("os_level"):
             return (f"{combo} is shared with another app, so it may also do "
@@ -6512,20 +6512,20 @@ class AppWindow:
         conflict = self._combo_conflict(self._pending_hotkey or "", "main")
         if conflict and not cancelled:
             self._pending_hotkey = None
-            self._hotkey_display_lbl.configure(text=self._hotkey or "—")
+            self._hotkey_display_lbl.configure(text=self._hotkey or "-")
             self._hotkey_record_msg.configure(text=conflict, fg=C["error"])
             self._disarm_save(self._save_btn)
             return
 
         if cancelled or not self._pending_hotkey:
-            self._hotkey_display_lbl.configure(text=self._hotkey or "—")
+            self._hotkey_display_lbl.configure(text=self._hotkey or "-")
             self._hotkey_record_msg.configure(
                 text=self._hotkey_help_text(), fg=C["subtext"])
             self._disarm_save(self._save_btn)
         else:
             self._hotkey_display_lbl.configure(text=self._pending_hotkey.upper())
             self._hotkey_record_msg.configure(
-                text=f"New shortcut: {self._pending_hotkey.upper()} — Click Save to apply.",
+                text=f"New shortcut: {self._pending_hotkey.upper()} - Click Save to apply.",
                 fg=C["success"],
             )
             self._arm_save(self._save_btn, self._save_hotkey)
@@ -6535,9 +6535,9 @@ class AppWindow:
             return
         new_hotkey = self._pending_hotkey
         self._hotkey = new_hotkey.upper()
-        self._hotkey_display_lbl.configure(text=self._hotkey or "—")
+        self._hotkey_display_lbl.configure(text=self._hotkey or "-")
         if hasattr(self, "_home_hotkey_lbl"):
-            self._home_hotkey_lbl.configure(text=self._hotkey or "—")
+            self._home_hotkey_lbl.configure(text=self._hotkey or "-")
         self._pending_hotkey = None
         self._disarm_save(self._save_btn)
         self._hotkey_record_msg.configure(
@@ -6660,7 +6660,7 @@ class AppWindow:
             self._ptt_display_lbl.configure(
                 text=self._pending_ptt_hotkey.upper(), fg=C["accent"])
             self._ptt_record_msg.configure(
-                text=f"New shortcut: {self._pending_ptt_hotkey.upper()} — Click Save to apply.",
+                text=f"New shortcut: {self._pending_ptt_hotkey.upper()} - Click Save to apply.",
                 fg=C["success"],
             )
             self._arm_save(self._ptt_save_btn, self._save_ptt_hotkey)
@@ -6757,13 +6757,13 @@ class AppWindow:
         conflict = self._combo_conflict(self._pending_refine_hotkey or "", "refine")
         if conflict and not cancelled:
             self._pending_refine_hotkey = None
-            self._refine_hotkey_display_lbl.configure(text=self._refine_hotkey or "—")
+            self._refine_hotkey_display_lbl.configure(text=self._refine_hotkey or "-")
             self._refine_record_msg.configure(text=conflict, fg=C["error"])
             self._disarm_save(self._refine_save_btn)
             return
 
         if cancelled or not self._pending_refine_hotkey:
-            self._refine_hotkey_display_lbl.configure(text=self._refine_hotkey or "—")
+            self._refine_hotkey_display_lbl.configure(text=self._refine_hotkey or "-")
             self._refine_record_msg.configure(
                 text="Select text, then press it. AI improves the wording.",
                 fg=C["subtext"],
@@ -6772,7 +6772,7 @@ class AppWindow:
         else:
             self._refine_hotkey_display_lbl.configure(text=self._pending_refine_hotkey.upper())
             self._refine_record_msg.configure(
-                text=f"New shortcut: {self._pending_refine_hotkey.upper()} — Click Save to apply.",
+                text=f"New shortcut: {self._pending_refine_hotkey.upper()} - Click Save to apply.",
                 fg=C["success"],
             )
             self._arm_save(self._refine_save_btn, self._save_refine_hotkey)
@@ -6782,8 +6782,8 @@ class AppWindow:
             return
         new_hotkey = self._pending_refine_hotkey
         self._refine_hotkey = new_hotkey.upper()
-        self._refine_hotkey_display_lbl.configure(text=self._refine_hotkey or "—")
-        self._home_refine_hotkey_lbl.configure(text=self._refine_hotkey or "—")
+        self._refine_hotkey_display_lbl.configure(text=self._refine_hotkey or "-")
+        self._home_refine_hotkey_lbl.configure(text=self._refine_hotkey or "-")
         self._pending_refine_hotkey = None
         self._disarm_save(self._refine_save_btn)
         self._refine_record_msg.configure(
@@ -8480,7 +8480,7 @@ class AppWindow:
     @staticmethod
     def _hist_created_label(dt) -> str:
         if not dt:
-            return "—"
+            return "-"
         label = f"{dt.day} {dt.strftime('%b')}"
         if dt.year != datetime.now().year:
             label += f" {dt.year}"
@@ -8667,7 +8667,7 @@ class AppWindow:
             lang = (getattr(self._config, "language", "en") or "").lower()
         cols = [
             ("CREATED", self._hist_created_label(entry.get("dt"))),
-            ("DURATION", self._fmt_clock(duration) if path else "—"),
+            ("DURATION", self._fmt_clock(duration) if path else "-"),
             ("WORDS", str(len(text.split()))),
             ("LANGUAGE", self._LANG_NAMES.get(lang, lang.upper() or "Auto")),
         ]
@@ -9449,7 +9449,7 @@ class AppWindow:
         def _poll_mic(attempt=0):
             if _mic_done[0]:
                 if not _mic_devs:
-                    print("[Settings] No input devices found — dropdown shows Auto-detect only")
+                    print("[Settings] No input devices found, dropdown shows Auto-detect only")
                 _populate_mic_menu(list(_mic_devs))
             elif attempt < 100:                 # up to ~10s of polling
                 self._root.after(100, lambda: _poll_mic(attempt + 1))
@@ -9586,13 +9586,13 @@ class AppWindow:
             scan_btn.bind("<Button-1>", lambda _e: _start_scan())
             if best_name and best_level > 0.005:
                 short = best_name if len(best_name) <= 30 else best_name[:27] + "…"
-                test_status.configure(text=f"Best mic: {short} — applied ✓", fg=C["success"])
+                test_status.configure(text=f"Best mic: {short} - applied ✓", fg=C["success"])
                 mic_var.set(best_name)
                 if self._on_settings_change:
                     self._on_settings_change("input_device", best_name)
             else:
                 test_status.configure(
-                    text="No signal detected — try speaking louder", fg=C["error"])
+                    text="No signal detected, try speaking louder", fg=C["error"])
 
         def _run_scan():
             import sounddevice as _sd
@@ -9677,7 +9677,7 @@ class AppWindow:
                 countdown[0] -= 1
                 if countdown[0] > 0:
                     test_status.configure(
-                        text=f"Get ready to speak — starting in {countdown[0]}s…",
+                        text=f"Get ready to speak, starting in {countdown[0]}s…",
                         fg=C["accent"])
                     self._root.after(1000, _tick)
                 else:
@@ -9687,7 +9687,7 @@ class AppWindow:
                     threading.Thread(target=_run_scan, daemon=True).start()
 
             test_status.configure(
-                text=f"Get ready to speak — starting in 3s…",
+                text=f"Get ready to speak, starting in 3s…",
                 fg=C["accent"])
             self._root.after(1000, _tick)
 
@@ -9730,7 +9730,7 @@ class AppWindow:
 
         # Kept as short as the popup-position labels: a Dropdown sizes itself
         # to its widest option, and a long one overflows the card it sits in.
-        _END_LABELS = {"smart":  "Smart — finished sentences only",
+        _END_LABELS = {"smart":  "Smart, finished sentences only",
                        "always": "Always add a full stop",
                        "never":  "Never add a full stop"}
         _END_FROM_LABEL = {v: k for k, v in _END_LABELS.items()}
@@ -9824,9 +9824,9 @@ class AppWindow:
         _height_desc.pack(fill="x")
         self._autowrap(_height_desc)
 
-        _HEIGHT_LABELS = {"low": "Low — near the taskbar",
-                          "medium": "Medium — mid-screen",
-                          "high": "High — above the chat window"}
+        _HEIGHT_LABELS = {"low": "Low, near the taskbar",
+                          "medium": "Medium, mid-screen",
+                          "high": "High, above the chat window"}
         _HEIGHT_FROM_LABEL = {v: k for k, v in _HEIGHT_LABELS.items()}
         _cur_height = (getattr(cfg, "popup_height", "low") if cfg else "low")
         if _cur_height not in _HEIGHT_LABELS:
@@ -10632,7 +10632,7 @@ class AppWindow:
                     add.append(c)
                     existing.add(c.lower())
             if not add:
-                return _say("No new suggestions — add any mishearings yourself.")
+                return _say("No new suggestions, add any mishearings yourself.")
             try:
                 cur = self._read_field(f_sounds).rstrip()
                 merged = (cur + "\n" if cur else "") + "\n".join(add)
@@ -10640,7 +10640,7 @@ class AppWindow:
                 f_sounds.insert("1.0", merged)
             except tk.TclError:
                 return
-            _say(f"Added {len(add)} suggestion{'' if len(add) == 1 else 's'} — "
+            _say(f"Added {len(add)} suggestion{'' if len(add) == 1 else 's'}, "
                  "review and Save.")
 
         threading.Thread(target=_work, daemon=True,
@@ -10782,7 +10782,7 @@ class AppWindow:
                     continue
                 ok, reason = validate_sounds_like(line, term)
                 if not ok:
-                    return _fail(f"“{line}” — {reason}")
+                    return _fail(f"“{line}”, {reason}")
                 variants.append(line)
             payload.update(term=term, sounds_like=variants)
         else:
@@ -10907,7 +10907,7 @@ class AppWindow:
 
         blurb = tk.Label(
             parent,
-            text=("Picked up from your own dictation — nothing to type. A "
+            text=("Picked up from your own dictation, nothing to type. A "
                   "phrase you repeat, always heard clearly, is remembered and "
                   "then used to fix the times it comes out wrong. Kept on this "
                   "computer only."),

@@ -201,7 +201,7 @@ class WhisperFlowApp:
 
     def __init__(self, auth: AuthManager, config: Config):
         print("=" * 50)
-        print(f"  {brand.PRODUCT_NAME} — Voice-to-Text Desktop App")
+        print(f"  {brand.PRODUCT_NAME} - Voice-to-Text Desktop App")
         print("=" * 50)
 
         self._auth = auth
@@ -650,7 +650,7 @@ class WhisperFlowApp:
             waits = self._PARAKEET_RETRY_WAITS_S
             wait = (waits[attempt - 1] if attempt <= len(waits)
                     else self._PARAKEET_RETRY_EVERY_S)
-            print(f"[App] Parakeet download failed (attempt {attempt}) — "
+            print(f"[App] Parakeet download failed (attempt {attempt}), "
                   f"whisper stays in charge; retrying in {wait}s")
             time.sleep(wait)
             if not getattr(self.config, "use_parakeet", True):
@@ -664,7 +664,7 @@ class WhisperFlowApp:
         try:
             from asr_engine import model_files_present, verify_model_files
             if not getattr(self.config, "use_parakeet", True):
-                print("[App] Parakeet disabled in config — whisper pipeline only.")
+                print("[App] Parakeet disabled in config, whisper pipeline only.")
                 return
             _ver = getattr(self.config, "parakeet_version", "v2")
             # Presence is a size check; verify_model_files reads the bytes
@@ -673,7 +673,7 @@ class WhisperFlowApp:
             if not (model_files_present(version=_ver)
                     and verify_model_files(version=_ver)):
                 print(f"[App] Parakeet model ({_ver}) missing or not the pinned "
-                      f"build — downloading (~660 MB, one-time)…")
+                      f"build, downloading (~660 MB, one-time)…")
                 # Whisper carries dictation for as long as the download takes.
                 threading.Thread(target=self._load_whisper_fallback,
                                  daemon=True, name="whisper-fallback").start()
@@ -684,9 +684,9 @@ class WhisperFlowApp:
             if not self.parakeet.is_loaded and self._repair_parakeet_model(_ver):
                 self.parakeet.load_model()
             if self.parakeet.is_loaded:
-                print("[App] Parakeet engine active — near-instant transcription enabled.")
+                print("[App] Parakeet engine active, near-instant transcription enabled.")
         except Exception as e:
-            print(f"[App] Parakeet init failed ({e}) — using Whisper pipeline.")
+            print(f"[App] Parakeet init failed ({e}), using Whisper pipeline.")
 
     def _repair_parakeet_model(self, version: str) -> bool:
         """After a failed load: download the model again when its files were
@@ -704,7 +704,7 @@ class WhisperFlowApp:
         if model_files_present(version=version) and verify_model_files(version=version):
             return False
         print(f"[App] Parakeet model ({version}) went missing or changed after "
-              f"the startup check — downloading it again.")
+              f"the startup check, downloading it again.")
         self._log_error_event("parakeet_model_repair", {"error": err[:300]})
         threading.Thread(target=self._load_whisper_fallback,
                          daemon=True, name="whisper-fallback").start()
@@ -742,7 +742,7 @@ class WhisperFlowApp:
             return model_files_present(
                 version=getattr(self.config, "parakeet_version", "v2"))
         except Exception as e:
-            print(f"[App] Parakeet check failed ({e}) — preloading whisper.")
+            print(f"[App] Parakeet check failed ({e}), preloading whisper.")
             return False
 
     def _load_whisper_fallback(self) -> None:
@@ -781,7 +781,7 @@ class WhisperFlowApp:
                 if all(freed):
                     return
             time.sleep(self._WHISPER_RELEASE_WAIT_S)
-        print("[App] Whisper models still busy — left loaded.")
+        print("[App] Whisper models still busy, left loaded.")
 
     def _use_parakeet(self) -> bool:
         """Parakeet handles English; anything else stays on the whisper path."""
@@ -953,7 +953,7 @@ class WhisperFlowApp:
         if self.db.is_enabled:
             print(f"[App] Supabase logging enabled.")
         else:
-            print("[App] Supabase logging disabled — set supabase_url/key in config.")
+            print("[App] Supabase logging disabled, set supabase_url/key in config.")
 
         print("[App] Ready! Hold the hotkey and start speaking.")
 
@@ -1091,7 +1091,7 @@ class WhisperFlowApp:
 
         exe_path = current_exe_path()
         if not exe_path:
-            print("[App] Auto-update skipped — running from source.")
+            print("[App] Auto-update skipped, running from source.")
             return
         if version in self._auto_update_versions:
             return
@@ -1187,7 +1187,7 @@ class WhisperFlowApp:
             pass
         try:
             def _announce():
-                if not self.tray.notify(warning, f"{brand.PRODUCT_NAME} — settings reset"):
+                if not self.tray.notify(warning, f"{brand.PRODUCT_NAME} - settings reset"):
                     self.app_window.show_toast(f"{brand.PRODUCT_NAME}: {warning}", 8000)
 
             self.app_window._ui_after(1500, _announce)
@@ -1309,7 +1309,7 @@ class WhisperFlowApp:
                     f"Dictation failed: {short}", brand.PRODUCT_NAME
                 ):
                     self.app_window.show_toast(
-                        f"{brand.PRODUCT_NAME} — dictation failed: {short}", 6000
+                        f"{brand.PRODUCT_NAME} - dictation failed: {short}", 6000
                     )
 
             self.app_window._ui_after(0, _notify)
@@ -1635,7 +1635,7 @@ class WhisperFlowApp:
             # Deliberately NOT in _EXPECTED_PIPELINE_ERRORS: the user must see
             # this one (their words were lost; the next attempt will work).
             self.feedback.error_occurred(
-                f"No audio on '{_from}' — switched to '{_to}'. "
+                f"No audio on '{_from}', switched to '{_to}'. "
                 "Please dictate again.")
             return True
         mic_side = peak < 0.004 or _voiced < 0.2
@@ -1772,7 +1772,7 @@ class WhisperFlowApp:
             held = 0.0
         if held < self._DEAD_CAPTURE_HELD_SECONDS:
             return False
-        print(f"[App] Held {held:.1f}s but captured {captured_seconds:.2f}s — "
+        print(f"[App] Held {held:.1f}s but captured {captured_seconds:.2f}s, "
               f"mic stream is dead; reconnecting.")
         _dead = {
             "held_seconds": round(held, 2),
@@ -1802,7 +1802,7 @@ class WhisperFlowApp:
             self.feedback.error_occurred(self._AUDIO_ENGINE_DOWN_MSG)
         else:
             self.feedback.error_occurred(
-                "Microphone stopped responding — reconnected. Please dictate again.")
+                "Microphone stopped responding, reconnected. Please dictate again.")
         return True
 
     _DEAD_CAPTURE_REPEAT_SECONDS = 300.0
@@ -2135,7 +2135,7 @@ class WhisperFlowApp:
                 # is on screen: it is still what the user said, just less
                 # polished, which beats garbled text every time. Same rule the
                 # direct-inject paths follow after a partial send.
-                print(f"[App] Live reconcile: delete of {n_del} chars failed — "
+                print(f"[App] Live reconcile: delete of {n_del} chars failed, "
                       "leaving the streamed text as-is, no retype")
                 return False, len(streamed)
             ok_type = self.injector.inject_stream(tail) if tail else True
@@ -2406,7 +2406,7 @@ class WhisperFlowApp:
                              if tail_audio is not None and len(tail_audio) else 0.0)
                     if _peak < 0.004:
                         print(f"[App] Discarding near-silence result ({len(text)} chars) "
-                              f"(peak={_peak:.4f}) — mic delivered no speech.")
+                              f"(peak={_peak:.4f}), mic delivered no speech.")
                         text = ""
                 if not text:
                     if _streamed:
@@ -2465,7 +2465,7 @@ class WhisperFlowApp:
                 import numpy as _np
                 _clip_peak = float(_np.max(_np.abs(final_audio))) if len(final_audio) else 0.0
                 if _clip_peak < 0.002:
-                    print(f"[App] Near-silent clip (peak={_clip_peak:.4f}) — "
+                    print(f"[App] Near-silent clip (peak={_clip_peak:.4f}), "
                           "skipping transcription entirely.")
                     if audio_writer is not None:
                         audio_writer.abort()
@@ -2495,7 +2495,7 @@ class WhisperFlowApp:
                     import numpy as _np
                     peak = float(_np.max(_np.abs(final_audio))) if len(final_audio) else 0.0
                     if peak < 0.002:
-                        print("[App] Silence detected — skipping accurate fallback.")
+                        print("[App] Silence detected, skipping accurate fallback.")
                         if audio_writer is not None:
                             audio_writer.abort()
                         self.hotkey_manager.set_idle()
@@ -3672,7 +3672,7 @@ class WhisperFlowApp:
                         rect.left <= x <= rect.right and rect.top <= y <= rect.bottom
                     ):
                         print(
-                            f"[App] Click pos ({x},{y}) outside window rect — skipping"
+                            f"[App] Click pos ({x},{y}) outside window rect, skipping"
                         )
                         return
 
@@ -3723,7 +3723,7 @@ class WhisperFlowApp:
             style = u32.GetWindowLongW(hwnd, -16)    # GWL_STYLE
             ex_style = u32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
             if (ex_style & WS_EX_TOPMOST) and not (style & WS_CAPTION):
-                print(f"[App] Window {hwnd:#x} appears fullscreen-exclusive — skipping SetForegroundWindow")
+                print(f"[App] Window {hwnd:#x} appears fullscreen-exclusive, skipping SetForegroundWindow")
                 return True
         except Exception:
             pass
@@ -3799,11 +3799,11 @@ class WhisperFlowApp:
         actual = u32.GetForegroundWindow()
         if actual and u32.IsWindow(hwnd):
             print(
-                f"[App] Using current foreground {actual:#x} — target {hwnd:#x} may be fullscreen/exclusive"
+                f"[App] Using current foreground {actual:#x} - target {hwnd:#x} may be fullscreen/exclusive"
             )
             return True
 
-        print(f"[App] Focus failed after retries — injecting anyway")
+        print(f"[App] Focus failed after retries, injecting anyway")
         return False
 
     def _get_caret_screen_pos(self, hwnd: int) -> tuple[int, int]:
@@ -3939,7 +3939,7 @@ class WhisperFlowApp:
                 prompt_words=m.get("prompt_words", 0),
                 prompt_spoken=m.get("prompt_spoken", False),
             )
-            print(f"[App] Refine applied — {m.get('elapsed_seconds', 0):.1f}s in-app, "
+            print(f"[App] Refine applied, {m.get('elapsed_seconds', 0):.1f}s in-app, "
                   f"{m.get('prompt_words', 0)} prompt words")
         except Exception as e:
             print(f"[App] Refine stat failed (non-fatal): {e}")
@@ -4092,7 +4092,7 @@ class WhisperFlowApp:
             if self.hotkey_manager.state != AppState.IDLE:
                 # Dictating (or still transcribing) — say so instead of doing
                 # nothing at all, which reads as a dead hotkey.
-                print("[App] Refine selection ignored — "
+                print("[App] Refine selection ignored, "
                       f"state is {self.hotkey_manager.state.value}.")
                 try:
                     self.popup.flash_status("Finish dictating first")
@@ -4260,7 +4260,7 @@ class WhisperFlowApp:
             self.tray.set_user_email("")
         if self.app_window._root:
             self.app_window._root.after(0, self.app_window._apply_auth_ui)
-        print("[App] Signed out — running in offline mode.")
+        print("[App] Signed out, running in offline mode.")
 
     def _shutdown(self) -> None:
         print("[App] Shutting down...")
@@ -4838,7 +4838,7 @@ def _handoff_to_canonical_if_newer() -> None:
     # An installed-layout exe also needs its whole app-<version> folder.
     from updater import pyi_archive_intact
     if not pyi_archive_intact(target) or not install_layout.layout_ok(target):
-        print(f"[App] Installed exe at {target} is incomplete — not handing off.")
+        print(f"[App] Installed exe at {target} is incomplete, not handing off.")
         return
     try:
         import subprocess
@@ -4855,7 +4855,7 @@ def _handoff_to_canonical_if_newer() -> None:
               f"installed v{'.'.join(map(str, tgt_v))} at {target}.")
         os._exit(0)
     except Exception as e:
-        print(f"[App] Handoff to installed version failed ({e}) — continuing.")
+        print(f"[App] Handoff to installed version failed ({e}), continuing.")
 
 
 # Every sign-in launcher passes this. Two of them fire at sign-in (the logon
@@ -5578,7 +5578,7 @@ def _main() -> None:
         try:
             if not ctypes.windll.shell32.IsUserAnAdmin():
                 print(
-                    "[App] Note: running without admin — some hotkeys may not work "
+                    "[App] Note: running without admin, some hotkeys may not work "
                     "in elevated windows."
                 )
         except Exception:

@@ -58,7 +58,7 @@ class ImpactSpeedTests(unittest.TestCase):
         # savings maths uses, not this person's, and showing it as "your
         # dictation speed" on day one is the same untruth the time card told.
         self.assertEqual(
-            ("—", "wpm", "Dictate to measure"),
+            ("-", "wpm", "Dictate to measure"),
             self._speed_card(0, total_words=0),
         )
 

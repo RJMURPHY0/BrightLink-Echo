@@ -143,7 +143,7 @@ def report_text(report: dict) -> str:
     or a vendor form's notes field."""
     r = report or {}
     lines = [
-        f"{r.get('product', brand.PRODUCT_NAME)} — antivirus false-positive report",
+        f"{r.get('product', brand.PRODUCT_NAME)} - antivirus false-positive report",
         "",
         f"Version:      {r.get('app_version') or 'unknown'}",
         f"OS:           {r.get('os') or 'unknown'}",

@@ -35,10 +35,10 @@ def setup_config() -> None:
             print("  [OK] config.json created from template.")
             print()
             print("  *** Optional: open config.json to add your API keys ***")
-            print("    anthropic_api_key  — enables AI text refinement")
-            print("    supabase_url/key   — enables transcription history & sync")
+            print("    anthropic_api_key, enables AI text refinement")
+            print("    supabase_url/key, enables transcription history & sync")
         else:
-            print("  [WARN] config.example.json not found — skipping config setup.")
+            print("  [WARN] config.example.json not found, skipping config setup.")
     else:
         print("  [OK] config.json already present.")
 

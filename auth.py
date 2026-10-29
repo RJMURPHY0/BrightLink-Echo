@@ -269,7 +269,7 @@ class AuthManager:
                         httpx_client=httpx.Client(
                             timeout=httpx.Timeout(30.0, connect=15.0)))
                 except Exception as e:  # a future SDK rename must not kill auth
-                    print(f"[Auth] Timeout options unavailable ({e}) — "
+                    print(f"[Auth] Timeout options unavailable ({e}), "
                           "using SDK defaults")
                 if options is not None:
                     self._client = create_client(self._url, self._key,
@@ -349,9 +349,9 @@ class AuthManager:
                 state["ok"] = ok
                 late = state["abandoned"]
             if late and ok:
-                print("[Auth] Session restored after the startup wait — promoting.")
+                print("[Auth] Session restored after the startup wait, promoting.")
                 _restore_log("OK (late): restored after the startup wait "
-                             "— promoting the dashboard")
+                             ", promoting the dashboard")
                 self._fire_restore_listener()
 
         def _restore() -> None:
@@ -375,7 +375,7 @@ class AuthManager:
         # Still in flight. Keep the session file — the worker owns the outcome
         # now and will promote the UI itself if it succeeds.
         print(f"[Auth] Session restore still running after {wait_seconds:.0f}s "
-              f"— continuing in the background (session kept)")
+              f"- continuing in the background (session kept)")
         return False
 
     def _restore_once(self, path: str) -> bool:
@@ -401,9 +401,9 @@ class AuthManager:
                     # error text contains "invalid", which used to delete
                     # the session and silently sign the user out).
                     print("[Auth] Session file unreadable (decrypt/parse "
-                          "failed) — keeping it; will retry next launch.")
+                          "failed), keeping it; will retry next launch.")
                     _restore_log("FAIL: session file unreadable "
-                                 "(decrypt/parse) — kept")
+                                 "(decrypt/parse), kept")
                     return False
 
             client = self._get_client()
@@ -429,12 +429,12 @@ class AuthManager:
                 print(f"[Auth] Restored session for {_who(self._user)}")
                 _restore_log(f"OK: restored session for {_who(self._user)}")
                 return True
-            _restore_log("FAIL: set_session returned no user — kept")
+            _restore_log("FAIL: set_session returned no user, kept")
             return False
         except Exception as e:
             if not _is_definitive_auth_error(str(e)):
                 print(f"[Auth] Session restore failed (network/other): {e}")
-                _restore_log(f"RETRY: network/other error — session kept: "
+                _restore_log(f"RETRY: network/other error, session kept: "
                              f"{_short_err(e)}")
                 return False
             # A server verdict of "these tokens are dead" — but only act on it
@@ -453,7 +453,7 @@ class AuthManager:
                              f"meanwhile): {_short_err(e)}")
                 return False
             print(f"[Auth] Session restore failed (auth error): {e}")
-            _restore_log(f"DEFINITIVE auth failure — SESSION CLEARED: "
+            _restore_log(f"DEFINITIVE auth failure, SESSION CLEARED: "
                          f"{_short_err(e)}")
             self._clear_session()
             return False
@@ -584,7 +584,7 @@ class AuthManager:
                     self._save_session(result.session)
                     return True, "Account created and signed in!"
                 # User created but email confirmation required
-                return True, "Account created — confirmation email sent."
+                return True, "Account created, confirmation email sent."
             return False, "Sign-up failed: no user returned. Please try again."
         except Exception as e:
             msg = str(e)
@@ -592,7 +592,7 @@ class AuthManager:
             if "already registered" in msg.lower() or "already exists" in msg.lower():
                 return False, "An account with that email already exists. Try signing in."
             if "password" in msg.lower() and "weak" in msg.lower():
-                return False, "Password too weak — use at least 6 characters."
+                return False, "Password too weak, use at least 6 characters."
             return False, f"Sign-up failed: {msg}"
 
     def sign_in(self, email: str, password: str) -> tuple[bool, str]:
@@ -611,7 +611,7 @@ class AuthManager:
                     _restore_log(f"MANUAL sign-in succeeded for "
                                  f"{_who(result.user, email)}")
                     return True, f"Welcome back, {result.user.email}"
-                return False, "Sign-in failed — please check your email and password."
+                return False, "Sign-in failed, please check your email and password."
             except Exception as e:
                 # Supabase wraps the real message in several ways
                 msg = getattr(e, "message", None) or (e.args[0] if e.args else str(e))
@@ -627,38 +627,38 @@ class AuthManager:
                         # reassociating) must not surface as a failure.
                         time.sleep(1.5)
                         continue
-                    return False, ("Can't reach the sign-in server — check "
+                    return False, ("Can't reach the sign-in server, check "
                                    "your internet connection and try again.")
                 if "email not confirmed" in low or "email_not_confirmed" in low:
-                    return False, "Email not confirmed — check your inbox and click the confirmation link."
+                    return False, "Email not confirmed, check your inbox and click the confirmation link."
                 if "invalid" in low or "credentials" in low or "wrong" in low:
                     return False, "Incorrect email or password."
                 if "user not found" in low or "no user" in low:
                     return False, "No account found with that email."
-                return False, f"Sign-in failed: {msg or 'unknown error — check your connection.'}"
-        return False, f"Sign-in failed: {msg or 'unknown error — check your connection.'}"
+                return False, f"Sign-in failed: {msg or 'unknown error, check your connection.'}"
+        return False, f"Sign-in failed: {msg or 'unknown error, check your connection.'}"
 
     def reset_password(self, email: str) -> tuple[bool, str]:
         try:
             client = self._get_client()
             client.auth.reset_password_email(email)
-            return True, "Password reset email sent — check your inbox."
+            return True, "Password reset email sent, check your inbox."
         except Exception as e:
             msg = str(e)
             print(f"[Auth] Reset password error: {msg}")
             if "user not found" in msg.lower() or "no user" in msg.lower():
                 return False, "No account found with that email."
-            return False, "Reset failed — please try again."
+            return False, "Reset failed, please try again."
 
     def resend_confirmation(self, email: str) -> tuple[bool, str]:
         try:
             client = self._get_client()
             client.auth.resend({"type": "signup", "email": email})
-            return True, "Confirmation email resent — check your inbox."
+            return True, "Confirmation email resent, check your inbox."
         except Exception as e:
             msg = str(e)
             print(f"[Auth] Resend confirmation error: {msg}")
-            return False, "Could not resend — please try again."
+            return False, "Could not resend, please try again."
 
     def sign_out(self) -> None:
         # Grab client before clearing so we can revoke server-side in background
