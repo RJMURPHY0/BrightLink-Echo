@@ -508,11 +508,11 @@ def verify_exe(path: str, min_bytes: int = _MIN_EXE_BYTES,
     corrupt/HTML-error-page 'exe' bricks the install until manual reinstall."""
     size = os.path.getsize(path)
     if size < min_bytes:
-        raise IOError(f"Downloaded file too small ({size} bytes) — not a release exe")
+        raise IOError(f"Downloaded file too small ({size} bytes), not a release exe")
     if expected_bytes and size != expected_bytes:
         raise IOError(
             f"Downloaded file is {size} bytes but the release asset is "
-            f"{expected_bytes} — truncated or tampered download"
+            f"{expected_bytes} - truncated or tampered download"
         )
     with open(path, "rb") as f:
         if f.read(2) != b"MZ":
@@ -1259,7 +1259,7 @@ def _run_installer_update(version, is_idle, on_status, poll_interval, idle_sampl
     install_layout.log(f"Staged {v}; waiting for idle.", root)
 
     _set_progress("ready")
-    on_status("Update ready — installing when idle…")
+    on_status("Update ready, installing when idle…")
     consecutive = 0
     while consecutive < idle_samples and not _apply_now.is_set():
         _apply_now.wait(poll_interval)
@@ -1276,7 +1276,7 @@ def _run_installer_update(version, is_idle, on_status, poll_interval, idle_sampl
         return False
 
     _set_progress("install")
-    on_status(f"Installing v{v} — restarting…")
+    on_status(f"Installing v{v} - restarting…")
     _emit(on_event, "swap_started", True, f"v{v} installer")
     install_layout.log(f"Handing over to activate.ps1 for {v}.", root)
     activate = activate_fn or (lambda ver, r: apply_installed_update(ver, r, is_idle=is_idle))
@@ -1356,7 +1356,7 @@ def _run_auto_update_once(version, url, current_exe, is_idle, on_status,
 
     _emit(on_event, "download_ok", True, f"{os.path.getsize(dest)} bytes")
     _set_progress("ready")
-    on_status("Update downloaded — installing when idle…")
+    on_status("Update downloaded, installing when idle…")
     consecutive = 0
     while consecutive < idle_samples and not _apply_now.is_set():
         _apply_now.wait(poll_interval)
@@ -1379,7 +1379,7 @@ def _run_auto_update_once(version, url, current_exe, is_idle, on_status,
         return False
 
     _set_progress("install")
-    on_status(f"Installing v{version.lstrip('v')} — restarting…")
+    on_status(f"Installing v{version.lstrip('v')} - restarting…")
     _emit(on_event, "swap_started", True, f"v{version.lstrip('v')}")
     apply = apply_fn or (lambda n, c, sha256: apply_update(n, c, sha256=sha256, is_idle=is_idle))
     if apply(dest, current_exe, sha256=digest) is False:

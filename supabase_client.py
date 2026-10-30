@@ -845,7 +845,7 @@ class SupabaseLogger:
 
         remote, error = self._fetch_remote_history(owner, limit)
         if error is not None:
-            print(f"[Supabase] Fetch history failed: {error} — keeping local cache")
+            print(f"[Supabase] Fetch history failed: {error} - keeping local cache")
             local = self._local_snapshot(owner, max(200, limit))
             with self._history_lock:
                 cached = [dict(r) for r in self._history_cache.get(owner, [])]
@@ -1851,7 +1851,7 @@ class SupabaseLogger:
         try:
             self._write_queue.put_nowait(payload)
         except Full:
-            print("[Supabase] Log queue full — dropping oldest entry")
+            print("[Supabase] Log queue full, dropping oldest entry")
             try:
                 _ = self._write_queue.get_nowait()
             except Exception:
@@ -1859,7 +1859,7 @@ class SupabaseLogger:
             try:
                 self._write_queue.put_nowait(payload)
             except Exception:
-                print("[Supabase] Log drop persisted — queue saturated")
+                print("[Supabase] Log drop persisted, queue saturated")
 
     def _ensure_worker(self) -> None:
         if self._worker_started:

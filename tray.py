@@ -71,9 +71,9 @@ class TrayApp:
 
     APP_NAME = brand.PRODUCT_NAME
     TOOLTIP_STATES = {
-        "idle":       f"{brand.PRODUCT_NAME} — Ready",
-        "recording":  f"{brand.PRODUCT_NAME} — Recording…",
-        "processing": f"{brand.PRODUCT_NAME} — Transcribing…",
+        "idle":       f"{brand.PRODUCT_NAME} - Ready",
+        "recording":  f"{brand.PRODUCT_NAME} - Recording…",
+        "processing": f"{brand.PRODUCT_NAME} - Transcribing…",
     }
 
     def __init__(

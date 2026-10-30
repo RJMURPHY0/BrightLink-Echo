@@ -625,7 +625,7 @@ class Recorder:
         silent_for = self._silent_run_seconds()
         device = self._active_device_name
         print(f"[Recorder] Watchdog: stream silent for {silent_for:.0f}s "
-              f"while still callbacking — reopening.")
+              f"while still callbacking, reopening.")
         # Arm the backoff BEFORE reopening: a genuinely muted mic starts a new
         # silent run the moment the fresh stream opens.
         idx = min(self._silence_recovery_count, len(_SILENCE_RETRY_BACKOFF) - 1)
@@ -690,7 +690,7 @@ class Recorder:
                 if self._stream_looks_alive():
                     return True
                 print(f"[Recorder] Warm stream is stale (no audio callback for "
-                      f"{self._heartbeat_age():.1f}s) — reopening.")
+                      f"{self._heartbeat_age():.1f}s), reopening.")
                 force_fresh = True
                 # A stale stream means the device is gone/changed — its ring is
                 # untrustworthy, so never carry it across this kind of reopen.
@@ -724,7 +724,7 @@ class Recorder:
             except Exception as e:
                 self._stream = None
                 self._warm_stream_is_open = False
-                print(f"[Recorder] Warm stream unavailable ({e}) — cold-open per recording.")
+                print(f"[Recorder] Warm stream unavailable ({e}), cold-open per recording.")
                 return False
 
     def _start_watchdog(self) -> None:
@@ -751,7 +751,7 @@ class Recorder:
                 continue
             try:
                 if not self._stream_looks_alive():
-                    print("[Recorder] Watchdog: warm stream dead — recovering.")
+                    print("[Recorder] Watchdog: warm stream dead, recovering.")
                     self._ensure_warm_stream(force_fresh=True)
                 elif self._stream_is_silently_dead():
                     # Callbacks still arriving, but carrying nothing at all —
@@ -798,7 +798,7 @@ class Recorder:
             if self._recording:
                 # Defensive: a previous session that was never stopped must not
                 # leak its audio into this one.
-                print("[Recorder] Already recording — resetting buffer.")
+                print("[Recorder] Already recording, resetting buffer.")
                 self._chunks = []
                 self._chunks_samples = 0
                 self._chunks_offset = 0
@@ -911,7 +911,7 @@ class Recorder:
                     f"{self.active_sample_rate} Hz, seed {self.last_seed_ms}ms)."
                 )
                 return
-            print("[Recorder] Warm stream produced no audio after start — "
+            print("[Recorder] Warm stream produced no audio after start, "
                   "falling back to a fresh cold stream.")
             with self._stream_lifecycle_lock:
                 self._close_stream_locked()
@@ -1419,7 +1419,7 @@ class Recorder:
                     }
                 print(f"[Recorder] Mic probe: '{best_name}' hears speech "
                       f"(rms {best_rms:.4f}) while '{active_name}'"
-                      f" is silent (rms {primary_rms:.4f}) — advice armed.")
+                      f" is silent (rms {primary_rms:.4f}), advice armed.")
             else:
                 print(f"[Recorder] Mic probe: no better mic found "
                       f"(best '{best_name}' rms {best_rms:.4f}).")

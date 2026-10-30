@@ -2,33 +2,33 @@
 
 > **[⬇ Install BrightLink Echo](https://github.com/RJMURPHY0/BrightLink-Echo/releases/latest/download/BrightLink-Echo.exe)**
 >
-> Digitally signed by **BRIGHTLINK (OS) LTD**. Windows may still show an "unrecognised app" warning on first run — click **More info → Run anyway**. That prompt appears because the signing certificate is new, and it stops once enough people have installed.
+> Digitally signed by **BRIGHTLINK (OS) LTD**. Windows may still show an "unrecognised app" warning on first run, click **More info → Run anyway**. That prompt appears because the signing certificate is new, and it stops once enough people have installed.
 
 ---
 
-Hold a hotkey, speak, release — your words appear wherever your cursor is.
+Hold a hotkey, speak, release, your words appear wherever your cursor is.
 
-Built for Windows. Transcription runs **fully locally** using [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — no audio ever leaves your machine. Cloud features (AI refinement, history sync) are optional.
+Built for Windows. Transcription runs **fully locally** using [faster-whisper](https://github.com/SYSTRAN/faster-whisper), no audio ever leaves your machine. Cloud features (AI refinement, history sync) are optional.
 
 ---
 
 ## Features
 
-- **Hold-to-talk or toggle mode** — hold your hotkey while speaking, release to transcribe
-- **Local Whisper transcription** — runs on CPU or GPU, no internet required
-- **AI text refinement** — rewrite as email, formal, casual, or fix punctuation (requires Anthropic API key)
-- **Refine Selected Text** — press **Alt+R** to capture the currently selected text and open the refinement panel instantly
-- **Floating action badge** — appears directly below your inserted text after each transcription; click to open AI refinement
-- **Live waveform** — animated bars react to your voice in real time (orange when speaking, like iPhone Voice Memos)
-- **System tray** — runs quietly in the background with status icons
-- **Transcription history** — optional sync via Supabase
-- **Works fully offline** — Supabase and Claude API are both optional
+- **Hold-to-talk or toggle mode**: hold your hotkey while speaking, release to transcribe
+- **Local Whisper transcription**: runs on CPU or GPU, no internet required
+- **AI text refinement**: rewrite as email, formal, casual, or fix punctuation (requires Anthropic API key)
+- **Refine Selected Text**: press **Alt+R** to capture the currently selected text and open the refinement panel instantly
+- **Floating action badge**: appears directly below your inserted text after each transcription; click to open AI refinement
+- **Live waveform**: animated bars react to your voice in real time (orange when speaking, like iPhone Voice Memos)
+- **System tray**: runs quietly in the background with status icons
+- **Transcription history**: optional sync via Supabase
+- **Works fully offline**: Supabase and Claude API are both optional
 
 ---
 
 ## Installation
 
-### Option 1 — Single exe (recommended, no Python needed)
+### Option 1: Single exe (recommended, no Python needed)
 
 1. [**Download BrightLink-Echo.exe**](https://github.com/RJMURPHY0/BrightLink-Echo/releases/latest/download/BrightLink-Echo.exe)
 2. Double-click it. Windows may show a SmartScreen warning: click **More info → Run anyway**. The exe is signed by BRIGHTLINK (OS) LTD, so the dialog names the publisher; the warning is purely because the certificate is new and has not built reputation yet
@@ -38,7 +38,7 @@ Built for Windows. Transcription runs **fully locally** using [faster-whisper](h
 
 To remove it: **Settings → Apps → Installed apps → BrightLink Echo → Uninstall**. You're asked whether to keep your settings and history.
 
-### Option 2 — Run from source (developers)
+### Option 2: Run from source (developers)
 
 Requires [Python 3.10+](https://www.python.org/downloads/) with **Add to PATH** ticked.
 
@@ -50,7 +50,7 @@ Requires [Python 3.10+](https://www.python.org/downloads/) with **Add to PATH** 
 
 ## First Use
 
-The app works out of the box — no sign-in or API keys required.
+The app works out of the box, no sign-in or API keys required.
 
 1. The app starts minimised to the system tray (look for the microphone icon)
 2. Click the tray icon → **Open BrightLink Echo** to see the dashboard
@@ -64,13 +64,13 @@ A small badge appears near your cursor after each transcription. Click it to ope
 ## Configuration
 
 Edit **`config.json`** (in the same folder as the app) to customise settings.
-Defaults below are the built-in fallbacks from `config.py` — any key missing from
+Defaults below are the built-in fallbacks from `config.py`, any key missing from
 `config.json` uses these. (Frozen `.exe` builds seed a starter `config.json` on
 first run.)
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `hotkey` | `alt+v` | Trigger key — e.g. `caps lock`, `f9`, `ctrl+shift+space` |
+| `hotkey` | `alt+v` | Trigger key, e.g. `caps lock`, `f9`, `ctrl+shift+space` |
 | `refine_hotkey` | `alt+r` | Select text anywhere and press this to refine it |
 | `mode` | `toggle` | `toggle` (press to start/stop) or `hold` (hold while speaking) |
 | `whisper_model` | `small.en` | Accurate-pass Whisper model: `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo` (or `.en` variants) |
@@ -83,7 +83,7 @@ first run.)
 | `anthropic_api_key` | *(empty)* | Dev builds only. Released builds refine through the BrightLink relay when signed in |
 | `openrouter_api_key` | *(empty)* | Dev builds only. A local key wins over the relay |
 | `openrouter_model` | `google/gemini-2.5-flash-lite` | OpenRouter model used for refinement/context-fix |
-| `warm_mic` | `true` | Keep the mic stream warm with a ~1.5 s pre-roll — instant start, first syllable never lost |
+| `warm_mic` | `true` | Keep the mic stream warm with a ~1.5 s pre-roll, instant start, first syllable never lost |
 | `auto_update` | `true` | Silently download new releases and install them when the app is idle |
 | `use_parakeet` | `true` | Parakeet TDT engine (near-instant, high accuracy, English) with Whisper fallback |
 | `custom_vocabulary` | *(empty)* | Comma-separated terms to boost (names, acronyms, domain words) |
@@ -94,14 +94,14 @@ first run.)
 | `auto_enter` | `false` | Press Enter after injection (useful for chat/search boxes) |
 | `toggle_timeout` | `0` | Seconds before auto-stopping in toggle mode (`0` = disabled) |
 | `max_recording_duration` | `0` | Hard cap on recording length in seconds (`0` = unlimited) |
-| `supabase_url` | *(empty)* | Supabase project URL — enables history & sync |
+| `supabase_url` | *(empty)* | Supabase project URL, enables history & sync |
 | `supabase_key` | *(empty)* | Supabase anon/publishable key |
 | `supabase_email` | *(empty)* | Auto sign-in email on startup |
 | `supabase_password` | *(empty)* | Auto sign-in password on startup |
 
 > **Tip:** With `use_parakeet` on (the default), English dictation uses the
 > Parakeet TDT engine and `whisper_model` is the accurate upgrade pass / fallback.
-> Larger Whisper models are more accurate but slower to load — `small.en` (the
+> Larger Whisper models are more accurate but slower to load, `small.en` (the
 > default) is the best balance on CPU.
 
 ### Model Sizes
@@ -110,9 +110,9 @@ first run.)
 |-------|------|-------|----------|
 | `tiny.en` | ~75 MB | Fastest | ★★☆☆☆ |
 | `base.en` | ~150 MB | Fast | ★★★☆☆ |
-| `small.en` | ~500 MB | Medium | ★★★★☆ — **default** |
+| `small.en` | ~500 MB | Medium | ★★★★☆, **default** |
 | `medium.en` | ~1.5 GB | Slow | ★★★★☆ |
-| `large-v3` | ~3 GB | Slowest | ★★★★★ — GPU recommended |
+| `large-v3` | ~3 GB | Slowest | ★★★★★, GPU recommended |
 
 ---
 
@@ -151,9 +151,9 @@ Needs you signed in: refine runs through the BrightLink relay, which holds the m
 
 ## Privacy & Security
 
-- **Audio never leaves your device** — Whisper runs entirely locally
+- **Audio never leaves your device**: Whisper runs entirely locally
 - **Session tokens** are encrypted on disk using Windows DPAPI (only readable by your Windows account)
-- **`config.json` is excluded from git** — your API keys are never committed to the repository
+- **`config.json` is excluded from git**: your API keys are never committed to the repository
 - Transcriptions are only uploaded if you configure Supabase credentials
 
 ---
@@ -167,13 +167,13 @@ Some elevated (admin) windows block hotkeys from non-admin processes. Try runnin
 The Whisper model starts loading in the background as soon as the app opens. The first transcription may still take a few seconds while the model finishes loading; all subsequent ones are instant.
 
 **App doesn't appear after double-clicking the shortcut**  
-Check the system tray — the app runs minimised by default. Click the microphone icon → Open BrightLink Echo.
+Check the system tray, the app runs minimised by default. Click the microphone icon → Open BrightLink Echo.
 
 **`install.bat` fails with "Python not found"**  
 Re-install Python from [python.org](https://www.python.org/downloads/) and tick **Add Python to PATH**.
 
 **Text not appearing after transcription**  
-Make sure a text field is focused before releasing the hotkey. Some apps (e.g. games) block clipboard paste — try switching `inject_method` to `keystrokes` in `config.json`.
+Make sure a text field is focused before releasing the hotkey. Some apps (e.g. games) block clipboard paste, try switching `inject_method` to `keystrokes` in `config.json`.
 
 **A stray letter appears before the transcribed text (e.g. `vHello world`)**  
 This happens in hold mode when you release the modifier key (Alt) before the base key (V). BrightLink Echo now suppresses the bare base key during recording so no stray character reaches the target window.
@@ -197,4 +197,4 @@ BrightLink Echo normalises modifier key state on hotkey release to prevent stuck
 
 ## Licence
 
-Internal tool — FTC Safety Solutions. All rights reserved.
+Internal tool, FTC Safety Solutions. All rights reserved.

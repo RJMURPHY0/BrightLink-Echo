@@ -448,7 +448,7 @@ class Config:
                     print(f"[Config] Could not back up corrupt config (non-fatal): {be}")
                 print(f"[Config] Warning: Could not load {path}: {e}. Using defaults.")
                 config._load_warning = (
-                    "Settings file was corrupt — settings were reset to defaults."
+                    "Settings file was corrupt, settings were reset to defaults."
                     + (f" Old file saved as {os.path.basename(backup)}." if backup else "")
                 )
         else:

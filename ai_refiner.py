@@ -96,6 +96,25 @@ _KEEP_EMOJI = (
 )
 
 
+
+
+
+def drop_new_dashes(original: str, out: str) -> str:
+    """AI-written text must not carry em or en dashes the speaker never dictated.
+
+    If the original had none, any dash in the result is the model's: a number
+    range becomes "8 to 12", a dash at a line edge goes, any other becomes a
+    comma. If the speaker used one, the result is left exactly as it is.
+    """
+    if not out or not re.search("[\u2014\u2013]", out) or re.search("[\u2014\u2013]", original or ""):
+        return out
+    out = re.sub(r"(\d)[ \t]*[\u2014\u2013][ \t]*(\d)", r"\1 to \2", out)
+    out = re.sub(r"^[ \t]*[\u2014\u2013][ \t]*", "", out, flags=re.M)
+    out = re.sub(r"[ \t]*[\u2014\u2013][ \t]*$", "", out, flags=re.M)
+    out = re.sub(r"[ \t]*[\u2014\u2013][ \t]*", ", ", out)
+    return re.sub(r",[ \t]*([,.?!:;])", r"\1", out)
+
+
 def _restore_emoji(original: str, out: str) -> str:
     """Safety net: if the model dropped an emoji the user had, put it back.
     Emoji missing from the result are appended to the end, so they are never
@@ -447,7 +466,7 @@ class AIRefiner:
         "You are a text refinement assistant. Write in plain prose only. "
         "No bullet points, numbered lists, dashes at line starts, asterisks, markdown, or headers. "
         "Use clear, simple language. Keep sentences short and direct. Use active voice. "
-        "Avoid em dashes, semicolons, filler words, and cliches. "
+        "Never use em dashes or en dashes. Avoid semicolons, filler words, and cliches. "
         "Write as a human would: natural, direct, easy to read. "
         "Return only the refined text, nothing else."
     )
@@ -457,7 +476,7 @@ class AIRefiner:
     _EDITOR_SYSTEM_PROMPT = (
         "You are a proofreader for dictated text. You correct grammar, "
         "spelling and punctuation and mend the sentence boundaries dictation "
-        "leaves behind. You never rephrase, restyle or change what the "
+        "leaves behind. Never add em dashes or en dashes. You never rephrase, restyle or change what the "
         "speaker said: the words, the meaning and the tone stay theirs. "
         "Return only the corrected text, nothing else."
     )
@@ -466,7 +485,7 @@ class AIRefiner:
     # words" and push the model to rewrite.
     _CORRECTOR_SYSTEM_PROMPT = (
         "You are a transcription corrector. You fix misheard words and the "
-        "punctuation artefacts dictation pauses leave behind. "
+        "punctuation artefacts dictation pauses leave behind. Never add em dashes or en dashes. "
         "You never rewrite, rephrase, or restyle. "
         "Return only the corrected text, nothing else."
     )
@@ -492,7 +511,7 @@ class AIRefiner:
         try:
             import openai  # type: ignore
         except ImportError:
-            print("[AIRefiner] openai package not installed — falling back to Anthropic")
+            print("[AIRefiner] openai package not installed, falling back to Anthropic")
             return ""
 
         if self._openrouter_client is None:
@@ -552,7 +571,7 @@ class AIRefiner:
 
         if not self.is_available:
             self.last_relay_error = "signed_out"
-            print("[AIRefiner] No API key and not signed in — returning original text.")
+            print("[AIRefiner] No API key and not signed in, returning original text.")
             return text
 
         prompt = custom_prompt or REFINE_PROMPTS.get(mode, REFINE_PROMPTS["punctuation"])
@@ -578,6 +597,7 @@ class AIRefiner:
 
         def _finish(out: str) -> str:
             out = self._apply_sender_name(out, mode, name)
+            out = drop_new_dashes(text, out)
             out = _restore_emoji(text, out)
             return restore_spacing(text, out) if keep_spacing else out
 
@@ -589,7 +609,7 @@ class AIRefiner:
         if _looks_like_a_list(text):
             prompt += (
                 " The text already contains a numbered or bulleted list. Keep "
-                "that list exactly as it is — same items, same order, same "
+                "that list exactly as it is, same items, same order, same "
                 "line breaks and same markers. Do not turn it back into "
                 "prose, and do not add any list that is not already there."
             )
@@ -624,7 +644,7 @@ class AIRefiner:
                 f" The sender's name is '{name}'. If the speech ends with a sign-off "
                 f"phrase that has no name after it (for example 'Thanks,' or 'Cheers,'), "
                 f"put '{name}' on the next line as the signature. Never output a "
-                f"placeholder such as [Your Name] or [Sender's Name] — use the real name."
+                f"placeholder such as [Your Name] or [Sender's Name], use the real name."
             )
 
         # OpenRouter takes priority over Anthropic direct

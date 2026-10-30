@@ -181,7 +181,7 @@ def message_for(cause: str, *, download_tamper: bool = False) -> tuple[str, str]
         return (
             f"{product} can't start speech recognition on this PC.",
             "Your antivirus has most likely quarantined one of the speech "
-            f"engine files. Restore it (or allow {product}) and restart — see "
+            f"engine files. Restore it (or allow {product}) and restart, see "
             "the error report for the exact file.",
         )
     if cause == MODEL_BLOCKED:
@@ -195,7 +195,7 @@ def message_for(cause: str, *, download_tamper: bool = False) -> tuple[str, str]
         if download_tamper:
             return (
                 f"{product} couldn't finish downloading its speech model.",
-                "The download kept arriving damaged — usually antivirus "
+                "The download kept arriving damaged, usually antivirus "
                 f"scanning the file. Allow {product} (or huggingface.co) and it "
                 "will retry on its own.",
             )
