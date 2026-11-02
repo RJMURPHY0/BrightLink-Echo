@@ -134,6 +134,11 @@ _COVER_MAX_MS = 1500
 # a busy PC dropped the cover over a half-drawn page, which IS the glitch.
 _PAGE_COVER_POLL_MS = 10
 _PAGE_COVER_MAX_MS = _COVER_MAX_MS
+# Scrolling a page of widgets runs behind the same cover, refreshed once per
+# scroll step with the finished frame (_scroll_step). It is handed to the
+# page-change watch this long after the last step, which drops it once the
+# window stops changing.
+_SCROLL_COVER_END_MS = 60
 
 
 class _LASTINPUTINFO(ctypes.Structure):
@@ -348,14 +353,15 @@ class ScrollPane(tk.Frame):
 
     Replaces the Canvas + create_window pattern for the Settings/Hotkey tabs.
     A tk.Canvas scrolls by bit-copying its own pixels, and the cards inside
-    those tabs are real child HWNDs — every blit could stamp a stale copy of
-    a card into a region Windows then considered valid. That is the
-    duplicated-card / torn-page ghost that kept resurfacing no matter how
-    many RedrawWindow heals ran afterwards: Tk paints asynchronously, so any
-    post-blit heal is a race it can lose. Moving a child window instead makes
-    Windows invalidate both the vacated and newly covered regions itself and
-    everything repaints from the live widget tree — no pixels are ever
-    copied, so a stale duplicate cannot exist even transiently.
+    those tabs are real child HWNDs: every blit could stamp a stale copy of
+    a card into a region Windows then considered valid (the duplicated-card
+    ghost). Moving a child window makes Windows track the vacated and newly
+    uncovered regions itself. It still copies the moved frame's pixels, and
+    Tk draws the uncovered strip on a later pass of its event loop, so a
+    step taken before that paint lands carries half-drawn cards along (the
+    scroll glitch, 2026-11-02). Never scroll one directly: every step goes
+    through AppWindow._scroll_step, which paints at once and shows the
+    finished frame through the scroll cover.
 
     Duck-types the slice of the Canvas scroll API the shared wheel /
     scrollbar / scrollregion machinery drives (yview, yview_moveto,
@@ -363,11 +369,15 @@ class ScrollPane(tk.Frame):
     surface they're scrolling. Build content into `.content`.
     """
 
-    def __init__(self, parent, bg):
+    def __init__(self, parent, bg, stepper=None):
         super().__init__(parent, bg=bg)
         self.content = tk.Frame(self, bg=bg)
         self._top = 0.0
         self._yscrollcommand = None
+        # AppWindow._scroll_step: a move this pane makes itself (the content
+        # shrank under a scrolled page) goes through it too.
+        self.stepper = stepper
+        self._last_h = None
         # relwidth=1.0 keeps the content exactly viewport-wide (the old
         # itemconfigure(width=e.width) sync); height follows reqheight.
         self.content.place(x=0, y=0, relwidth=1.0)
@@ -382,11 +392,27 @@ class ScrollPane(tk.Frame):
         except tk.TclError:
             return 1.0
 
+    def _view_h(self) -> float:
+        try:
+            return max(float(self.winfo_height()), 1.0)
+        except tk.TclError:
+            return 1.0
+
     def _max_top(self) -> float:
-        return max(self._content_h() - max(float(self.winfo_height()), 1.0), 0.0)
+        return max(self._content_h() - self._view_h(), 0.0)
 
     def _refresh(self) -> None:
-        self._apply(self._top)
+        h = self._view_h()
+        resized, self._last_h = h != self._last_h, h
+        top = max(0.0, min(self._max_top(), self._top))
+        if self.stepper is not None and not resized and abs(top - self._top) >= 0.5:
+            # The content shrank under a scrolled page (a card collapsed, a
+            # search hid rows): the clamp moves the cards, so it is a scroll
+            # step like any other. A window resize keeps the plain path: the
+            # whole window redraws then anyway.
+            self.stepper(self, lambda: self._apply(top))
+        else:
+            self._apply(self._top)
 
     def _apply(self, top: float) -> None:
         self._top = max(0.0, min(self._max_top(), float(top)))
@@ -398,8 +424,7 @@ class ScrollPane(tk.Frame):
             h = self._content_h()
             try:
                 self._yscrollcommand(
-                    self._top / h,
-                    min(1.0, (self._top + max(self.winfo_height(), 1)) / h))
+                    self._top / h, min(1.0, (self._top + self._view_h()) / h))
             except tk.TclError:
                 pass
 
@@ -407,14 +432,12 @@ class ScrollPane(tk.Frame):
     def yview(self, *args):
         if not args:
             h = self._content_h()
-            return (self._top / h,
-                    min(1.0, (self._top + max(self.winfo_height(), 1)) / h))
+            return (self._top / h, min(1.0, (self._top + self._view_h()) / h))
         if args[0] == "moveto":
             self._apply(float(args[1]) * self._content_h())
         elif args[0] == "scroll":
             n = int(float(args[1]))
-            unit = 30.0 if str(args[2]).startswith("unit") \
-                else max(float(self.winfo_height()), 1.0)
+            unit = 30.0 if str(args[2]).startswith("unit") else self._view_h()
             self._apply(self._top + n * unit)
         return None
 
@@ -2332,6 +2355,7 @@ class AppWindow:
         # pixel target; a single scheduled frame eases toward it.
         self._scroll_states = {}
         self._scrollregion_jobs = {}
+        self._scroll_cover = None       # {"cover", "end_job"} while scrolling
 
         # Per-account window sizing. _applied_size is the last size WE set
         # programmatically, so its Configure echo is never mistaken for a user
@@ -4042,11 +4066,23 @@ class AppWindow:
         change (a fast second click) is taken over rather than replaced: it
         shows the last finished page, while a new picture would capture the
         half-drawn one behind it."""
+        scroll = getattr(self, "_scroll_cover", None)
+        if scroll is not None:          # mid-scroll: it shows the last frame
+            self._scroll_cover = None
+            self._cancel_after(scroll.get("end_job"))
+            return scroll["cover"]
         held = getattr(self, "_held_cover", None)
         if held is not None and not held["done"]:
             held["done"] = True         # its watch stops; the new one owns it
             return held["cover"]
         return self._cover_window()
+
+    def _cancel_after(self, job) -> None:
+        if job is not None:
+            try:
+                self._root.after_cancel(job)
+            except tk.TclError:
+                pass
 
     def _drop_cover_when_drawn(self, cover, max_ms: int = _COVER_MAX_MS,
                                poll_ms: int = _COVER_POLL_MS) -> None:
@@ -6087,7 +6123,7 @@ class AppWindow:
     def _build_hotkey_tab(self, parent: tk.Frame) -> None:
         # Scrollable container — ScrollPane, not a Canvas: cards are child
         # HWNDs and canvas blit-scroll is what minted the ghost duplicates.
-        self._hk_cv = ScrollPane(parent, bg=C["bg"])
+        self._hk_cv = ScrollPane(parent, bg=C["bg"], stepper=self._scroll_step)
         _hk_cv = self._hk_cv
         _hk_sb = ModernScrollbar(
             parent, command=lambda *a: self._scrollbar_command(_hk_cv, *a))
@@ -7027,22 +7063,148 @@ class AppWindow:
             if abs(step) < 2.0:
                 step = 2.0 if diff > 0 else -2.0
             state["current"] += step
+        # Busy, not None: a wheel event the step's paint pass dispatches
+        # must not schedule a second animation alongside this one.
+        state["job"] = "step"
+        started = time.perf_counter()
         try:
-            cv.yview_moveto(state["current"] / content_h)
-            # Repaint-heal only applies to blit-scrolled canvases that embed
-            # widgets. History is one native canvas (no child HWNDs) and the
-            # Settings/Hotkey ScrollPanes never blit at all — repainting them
-            # per frame would be pure overhead that reads as scroll lag.
-            if isinstance(cv, tk.Canvas) and cv is not getattr(self, "_hist_cv", None):
-                self._repaint(cv)
+            self._scroll_step(
+                cv, lambda: cv.yview_moveto(state["current"] / content_h))
         except tk.TclError:
             self._scroll_states.pop(cv, None)
             return
+        finally:
+            # Whatever the step raised, the wheel must keep working.
+            if state.get("job") == "step":
+                state["job"] = None
+        if self._scroll_states.get(cv) is not state:
+            return      # a scrollbar drag during the paint pass took over
 
         if abs(state["target"] - state["current"]) > self._SCROLL_SNAP:
-            state["job"] = cv.after(12, self._animate_scroll, cv)
+            # Frames start 12ms apart: a step that painted for a while
+            # (_scroll_step paints before it returns) waits only the rest.
+            spent = int((time.perf_counter() - started) * 1000)
+            state["job"] = cv.after(max(1, 12 - spent), self._animate_scroll, cv)
         elif cv is getattr(self, "_hist_cv", None):
             cv.after(16, self._refresh_history_hover)
+
+    def _scroll_step(self, cv, move) -> None:
+        """Run one scroll step (`move`) so the screen only ever shows whole
+        frames.
+
+        A ScrollPane moves a frame of real child windows. Windows copies the
+        frame's pixels to the new place and asks for the uncovered strip to
+        be drawn, but Tk draws it later, from its event loop: the next step's
+        copy then carried half-drawn cards along and the screen showed rows
+        stamped twice and cards torn in half (tools/scroll_check.py,
+        2026-11-02: 58 of 60 frames of a wheel flick on Settings). So the
+        step runs behind the page-change cover: move, paint everything right
+        now (_paint_now), then put the finished frame on the cover in one
+        UpdateLayeredWindow. The cover goes back to the page-change watch
+        shortly after the last step, which drops it once the window stops
+        changing.
+
+        History is one canvas (no child windows) and scrolls as before.
+        Other canvases that embed widgets keep their blit heal."""
+        if not isinstance(cv, ScrollPane):
+            move()
+            if isinstance(cv, tk.Canvas) and cv is not getattr(self, "_hist_cv", None):
+                self._repaint(cv)
+            return
+        if getattr(self, "_in_atomic", False):
+            move()              # inside a covered or frozen change: it presents
+            return
+        scroll = getattr(self, "_scroll_cover", None)
+        if scroll is None:
+            held = getattr(self, "_held_cover", None)
+            if held is not None and not held["done"]:
+                if not held.get("scroll"):
+                    # A page change is still drawing under its cover (some
+                    # cards draw from timers): its watch shows the page once
+                    # it has settled, scrolled.
+                    move()
+                    self._paint_now()
+                    return
+                held["done"] = True     # our own last scroll: carry on with it
+                cover = held["cover"]
+            else:
+                cover = self._cover_window()
+            if cover is None:   # hidden, minimised or no cover: just move
+                move()
+                self._paint_now()
+                return
+            scroll = self._scroll_cover = {"cover": cover, "end_job": None}
+        # The hand-over is armed before anything can raise, so a failing step
+        # still gives the cover to the watch, which never leaves it up.
+        self._cancel_after(scroll["end_job"])
+        try:
+            scroll["end_job"] = self._root.after(
+                _SCROLL_COVER_END_MS, self._end_scroll_cover)
+        except tk.TclError:
+            self._end_scroll_cover()
+            move()
+            return
+        move()
+        painted = self._paint_now()
+        if self._scroll_cover is not scroll:
+            return              # the paint pass ran a page change: it owns the cover
+        if not painted:
+            # A half-painted window must never reach the cover.
+            print("[AppWindow] Scroll paint failed; handing the cover over")
+            self._end_scroll_cover()
+            return
+        if not scroll["cover"].refresh(self._top_hwnd(), self._scroll_region(cv)):
+            print("[AppWindow] Scroll cover refresh failed; handing it over")
+            self._end_scroll_cover()
+
+    def _scroll_region(self, cv):
+        """The pane and its scrollbar (the pane's parent frame) in the
+        window's client pixels: all a scroll step changes."""
+        try:
+            box = cv.master
+            return (box.winfo_rootx() - self._root.winfo_rootx(),
+                    box.winfo_rooty() - self._root.winfo_rooty(),
+                    box.winfo_width(), box.winfo_height())
+        except tk.TclError as exc:
+            print(f"[AppWindow] Scroll region unknown, copying the window: {exc}")
+            return None
+
+    def _end_scroll_cover(self) -> None:
+        scroll, self._scroll_cover = getattr(self, "_scroll_cover", None), None
+        if scroll is None:
+            return
+        self._cancel_after(scroll["end_job"])
+        self._drop_cover_when_drawn(scroll["cover"], max_ms=_PAGE_COVER_MAX_MS,
+                                    poll_ms=_PAGE_COVER_POLL_MS)
+        held = getattr(self, "_held_cover", None)
+        if held is not None and held["cover"] is scroll["cover"]:
+            held["scroll"] = True   # the next wheel turn takes it straight back
+
+    def _paint_now(self) -> bool:
+        """Finish every pending layout and paint of the window before
+        returning; False if Tk failed part way (logged). Tk turns WM_PAINT into a queued Expose event and draws on
+        a later pass of its event loop; this asks Windows for the paint
+        messages now (RDW_UPDATENOW|RDW_ALLCHILDREN, no new invalidation),
+        runs the Expose events they queued, then the idle redraws, until
+        nothing is left. Window events only (no timers), with a bound."""
+        import _tkinter
+        flags = _tkinter.WINDOW_EVENTS | _tkinter.DONT_WAIT
+        hwnd = self._top_hwnd()
+        for _ in range(4):
+            try:
+                self._root.update_idletasks()
+                if hwnd:
+                    ctypes.windll.user32.RedrawWindow(hwnd, None, None, 0x180)
+                ran = 0
+                while ran < 500 and self._root.tk.dooneevent(flags):
+                    ran += 1
+                self._root.update_idletasks()
+            except tk.TclError as exc:
+                print(f"[AppWindow] Paint pass failed: {exc}")
+                return False
+            if not ran:
+                return True
+        return True
 
     def _cancel_smooth_scroll(self, cv) -> None:
         state = self._scroll_states.get(cv)
@@ -7057,11 +7219,9 @@ class AppWindow:
         """Thumb/track motion remains direct and one-to-one with the pointer."""
         self._cancel_smooth_scroll(cv)
         try:
-            cv.yview(*args)
+            self._scroll_step(cv, lambda: cv.yview(*args))
         except tk.TclError:
             return
-        if isinstance(cv, tk.Canvas) and cv is not getattr(self, "_hist_cv", None):
-            self._repaint(cv)
 
     def _queue_scrollregion_sync(self, cv) -> None:
         """Recompute a scroll canvas's scrollregion once geometry has settled.
@@ -9035,7 +9195,7 @@ class AppWindow:
         self._cat_location = ("Learning", "learning")
         self._setting_pills = getattr(self, "_setting_pills", {})
         self._setting_vars = getattr(self, "_setting_vars", {})
-        self._learning_cv = ScrollPane(parent, bg=C["bg"])
+        self._learning_cv = ScrollPane(parent, bg=C["bg"], stepper=self._scroll_step)
         cv = self._learning_cv
         sb = ModernScrollbar(
             parent, command=lambda *a: self._scrollbar_command(cv, *a))
@@ -9127,7 +9287,7 @@ class AppWindow:
     def _build_settings_tab(self, parent: tk.Frame) -> None:
         # Scrollable container — ScrollPane, not a Canvas: cards are child
         # HWNDs and canvas blit-scroll is what minted the ghost duplicates.
-        self._settings_cv = ScrollPane(parent, bg=C["bg"])
+        self._settings_cv = ScrollPane(parent, bg=C["bg"], stepper=self._scroll_step)
         self._settings_sb = ModernScrollbar(
             parent, command=lambda *a: self._scrollbar_command(
                 self._settings_cv, *a))
@@ -10009,14 +10169,17 @@ class AppWindow:
                     except tk.TclError:
                         pass
             self._show_settings_empty(bool(q) and hits == 0, q)
+            # Back to the top in the same frame: a jump on its own moves the
+            # cards uncovered, which is the scroll glitch (_scroll_step).
+            try:
+                self._cancel_smooth_scroll(self._settings_cv)
+                self._settings_cv.yview_moveto(0.0)
+            except (tk.TclError, AttributeError):
+                pass
 
         # One visual frame: a forget/pack sweep over thirty cards paints every
         # intermediate layout otherwise.
         self._atomic_ui(_swap)
-        try:
-            self._settings_cv.yview_moveto(0.0)
-        except (tk.TclError, AttributeError):
-            pass
 
     def _show_settings_empty(self, show: bool, query: str = "") -> None:
         lbl = getattr(self, "_settings_empty", None)
@@ -10423,7 +10586,7 @@ class AppWindow:
         # ghost duplicates the v1.6.36 structural fix removed.
         body = tk.Frame(parent, bg=C["bg"])
         body.pack(fill="both", expand=True)
-        pane = ScrollPane(body, bg=C["bg"])
+        pane = ScrollPane(body, bg=C["bg"], stepper=self._scroll_step)
         bar = ModernScrollbar(
             body, command=lambda *a: self._scrollbar_command(pane, *a))
         pane.configure(yscrollcommand=bar.set)
@@ -10935,7 +11098,7 @@ class AppWindow:
 
         body = tk.Frame(parent, bg=C["bg"])
         body.pack(fill="both", expand=True)
-        pane = ScrollPane(body, bg=C["bg"])
+        pane = ScrollPane(body, bg=C["bg"], stepper=self._scroll_step)
         bar = ModernScrollbar(
             body, command=lambda *a: self._scrollbar_command(pane, *a))
         pane.configure(yscrollcommand=bar.set)

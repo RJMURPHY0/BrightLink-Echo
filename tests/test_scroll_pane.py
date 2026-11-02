@@ -3,8 +3,9 @@
 The duplicated-card / torn-page ghost was minted by tk.Canvas blit-scroll
 copying child-HWND pixels (settings/hotkey cards are real child windows) and
 by hidden tabs staying mapped underneath a z-order raise. The structural fix
-is: those tabs scroll on ScrollPane (place()-moved content, nothing ever
-bit-copies pixels) and inactive tabs are UNMAPPED. These tests pin both.
+is: those tabs scroll on ScrollPane (place()-moved content, no canvas blit;
+every step goes through AppWindow._scroll_step, see test_scroll_step.py) and
+inactive tabs are UNMAPPED. These tests pin both.
 """
 
 import inspect
@@ -83,6 +84,7 @@ class ScrollPaneTests(unittest.TestCase):
         root, pane = _make_pane()
         try:
             window = object.__new__(AppWindow)
+            window._root = root     # a scroll step paints through it
             window._scroll_states = {}
             window._hist_cv = None
             window._scrollbar_command(pane, "moveto", 0.5)

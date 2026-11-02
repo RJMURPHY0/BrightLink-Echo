@@ -36,6 +36,7 @@ _SW_SHOWNOACTIVATE = 4
 _PW_CLIENTONLY = 0x1
 _PW_RENDERFULLCONTENT = 0x2
 _ULW_ALPHA = 0x2
+_ULW_OPAQUE = 0x4
 _SRCCOPY = 0x00CC0020
 
 _api = None
@@ -48,6 +49,15 @@ class _BIH(ctypes.Structure):
                 ("biSizeImage", W.DWORD), ("biXPelsPerMeter", ctypes.c_long),
                 ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", W.DWORD),
                 ("biClrImportant", W.DWORD)]
+
+
+class _ULWInfo(ctypes.Structure):
+    _fields_ = [("cbSize", W.DWORD), ("hdcDst", W.HDC),
+                ("pptDst", ctypes.POINTER(W.POINT)),
+                ("psize", ctypes.POINTER(W.SIZE)), ("hdcSrc", W.HDC),
+                ("pptSrc", ctypes.POINTER(W.POINT)), ("crKey", W.COLORREF),
+                ("pblend", ctypes.c_void_p), ("dwFlags", W.DWORD),
+                ("prcDirty", ctypes.POINTER(W.RECT))]
 
 
 class _Blend(ctypes.Structure):
@@ -77,6 +87,8 @@ def _load():
                                         ctypes.POINTER(W.SIZE), W.HDC,
                                         ctypes.POINTER(W.POINT), W.COLORREF,
                                         ctypes.POINTER(_Blend), W.DWORD]
+    u32.UpdateLayeredWindowIndirect.argtypes = [W.HWND,
+                                                ctypes.POINTER(_ULWInfo)]
     u32.GetWindow.restype = W.HWND
     u32.GetWindow.argtypes = [W.HWND, W.UINT]
     u32.SetWindowPos.argtypes = [W.HWND, W.HWND, ctypes.c_int, ctypes.c_int,
@@ -136,6 +148,7 @@ def _client_pixels(top_hwnd: int):
         return None
     origin = W.POINT(0, 0)
     u32.ClientToScreen(top_hwnd, ctypes.byref(origin))
+    g32.GdiFlush()      # this thread's batched Tk drawing lands first
     win_dc = u32.GetDC(top_hwnd)
     mem_dc = g32.CreateCompatibleDC(win_dc)
     bmp, bits = _dib(g32, mem_dc, w, h)
@@ -170,6 +183,35 @@ def _client_pixels(top_hwnd: int):
             u32.ReleaseDC(top_hwnd, win_dc)
 
 
+def _push(hwnd: int, shot) -> bool:
+    """Put `shot` ((x, y, w, h), BGRA bytes from _client_pixels) on the
+    layered window `hwnd`, opaque, at that place and size."""
+    u32, g32 = _load()
+    (x, y, w, h), pixels = shot
+    pixels = bytearray(pixels)
+    pixels[3::4] = bytes([255]) * (w * h)        # opaque
+    screen_dc = u32.GetDC(None)
+    mem_dc = g32.CreateCompatibleDC(screen_dc)
+    bmp, bits = _dib(g32, mem_dc, w, h)
+    old = g32.SelectObject(mem_dc, bmp) if bmp else None
+    try:
+        if not bmp or not bits.value:
+            return False
+        ctypes.memmove(bits.value, bytes(pixels), len(pixels))
+        blend = _Blend(0, 0, 255, 1)              # AC_SRC_OVER, AC_SRC_ALPHA
+        return bool(u32.UpdateLayeredWindow(
+            hwnd, screen_dc, ctypes.byref(W.POINT(x, y)),
+            ctypes.byref(W.SIZE(w, h)), mem_dc,
+            ctypes.byref(W.POINT(0, 0)), 0, ctypes.byref(blend), _ULW_ALPHA))
+    finally:
+        if old:
+            g32.SelectObject(mem_dc, old)
+        if bmp:
+            g32.DeleteObject(bmp)
+        g32.DeleteDC(mem_dc)
+        u32.ReleaseDC(None, screen_dc)
+
+
 def window_fingerprint(top_hwnd: int) -> Optional[int]:
     """A hash of what the window's client area currently shows (None if it
     cannot be read). Two equal readings a moment apart mean Tk has finished
@@ -184,6 +226,7 @@ def window_fingerprint(top_hwnd: int) -> Optional[int]:
 class SnapshotCover:
     def __init__(self, hwnd: int):
         self._hwnd = hwnd
+        self._buf = None    # (mem_dc, bmp, old, bits, w, h) kept for refresh()
 
     @classmethod
     def over(cls, top_hwnd: int) -> Optional["SnapshotCover"]:
@@ -198,36 +241,19 @@ class SnapshotCover:
 
     @classmethod
     def _over(cls, top_hwnd: int) -> Optional["SnapshotCover"]:
-        u32, g32 = _load()
+        u32, _g32 = _load()
         shot = _client_pixels(top_hwnd)
         if shot is None:
             return None
-        (x, y, w, h), pixels = shot
-        pixels = bytearray(pixels)
-        pixels[3::4] = bytes([255]) * (w * h)        # opaque
-        screen_dc = u32.GetDC(None)
-        mem_dc = g32.CreateCompatibleDC(screen_dc)
-        bmp, bits = _dib(g32, mem_dc, w, h)
-        old = g32.SelectObject(mem_dc, bmp) if bmp else None
+        (x, y, w, h), _pixels = shot
         hwnd = None
         try:
-            if not bmp or not bits.value:
-                return None
-            ctypes.memmove(bits.value, bytes(pixels), len(pixels))
             hwnd = u32.CreateWindowExW(
                 _WS_EX_LAYERED | _WS_EX_TRANSPARENT | _WS_EX_TOOLWINDOW
                 | _WS_EX_NOACTIVATE,
                 "STATIC", None, _WS_POPUP, x, y, w, h,
                 top_hwnd, None, None, None)
-            if not hwnd:
-                return None
-            origin = W.POINT(x, y)
-            blend = _Blend(0, 0, 255, 1)              # AC_SRC_OVER, AC_SRC_ALPHA
-            if not u32.UpdateLayeredWindow(
-                    hwnd, screen_dc, ctypes.byref(origin),
-                    ctypes.byref(W.SIZE(w, h)), mem_dc,
-                    ctypes.byref(W.POINT(0, 0)), 0, ctypes.byref(blend),
-                    _ULW_ALPHA):
+            if not hwnd or not _push(hwnd, shot):
                 return None
             # Directly above the window, not above everything: under whatever
             # already sits over it.
@@ -250,15 +276,100 @@ class SnapshotCover:
         finally:
             if hwnd:
                 u32.DestroyWindow(hwnd)
-            if old:
-                g32.SelectObject(mem_dc, old)
-            if bmp:
-                g32.DeleteObject(bmp)
-            g32.DeleteDC(mem_dc)
-            u32.ReleaseDC(None, screen_dc)
+
+    def refresh(self, top_hwnd: int, region=None) -> bool:
+        """Show what `top_hwnd` draws now, in one step: UpdateLayeredWindow
+        swaps the whole picture at once, so the screen goes straight from the
+        last frame to this one. The caller makes sure the window has finished
+        drawing first (a scroll step paints synchronously before this).
+        `region` (x, y, w, h in client pixels) limits the copy to the part
+        that changed; the first refresh always copies everything.
+        False if it could not (the cover still shows the previous frame)."""
+        if not self._hwnd:
+            return False
+        try:
+            return self._refresh(top_hwnd, region)
+        except Exception as exc:
+            print(f"[SnapshotCover] Refresh failed (non-fatal): {exc}")
+            return False
+
+    def _refresh(self, top_hwnd: int, region) -> bool:
+        # One GDI copy into a bitmap kept for the cover's life, shown opaque:
+        # no Python pixel work, ~1ms where the full _push path took ~16ms
+        # (measured 2026-11-02), which every scroll step pays.
+        u32, g32 = _load()
+        rc = W.RECT()
+        if not u32.GetClientRect(top_hwnd, ctypes.byref(rc)):
+            return False
+        w, h = rc.right - rc.left, rc.bottom - rc.top
+        if w <= 0 or h <= 0:
+            return False
+        if self._buf is None or self._buf[4:] != (w, h):
+            region = None
+            self._free_buf()
+            screen_dc = u32.GetDC(None)
+            mem_dc = bmp = None
+            try:
+                mem_dc = g32.CreateCompatibleDC(screen_dc)
+                bmp, bits = _dib(g32, mem_dc, w, h)
+            finally:
+                u32.ReleaseDC(None, screen_dc)
+                if mem_dc and not bmp:
+                    g32.DeleteDC(mem_dc)
+            if not bmp:
+                return False
+            self._buf = (mem_dc, bmp, g32.SelectObject(mem_dc, bmp), bits, w, h)
+        mem_dc = self._buf[0]
+        origin = W.POINT(0, 0)
+        u32.ClientToScreen(top_hwnd, ctypes.byref(origin))
+        g32.GdiFlush()      # this thread's batched Tk drawing lands first
+        win_dc = u32.GetDC(top_hwnd)
+        if not win_dc:
+            return False
+        try:
+            x, y, cw, ch = region or (0, 0, w, h)
+            if not g32.BitBlt(mem_dc, x, y, cw, ch, win_dc, x, y, _SRCCOPY):
+                return False
+        finally:
+            u32.ReleaseDC(top_hwnd, win_dc)
+        # Only the copied part goes to DWM (prcDirty); the rest of the
+        # cover keeps the pixels it already has.
+        dirty = W.RECT(x, y, x + cw, y + ch)
+        info = _ULWInfo(ctypes.sizeof(_ULWInfo), None, ctypes.pointer(origin),
+                        ctypes.pointer(W.SIZE(w, h)), mem_dc,
+                        ctypes.pointer(W.POINT(0, 0)), 0, None, _ULW_OPAQUE,
+                        ctypes.pointer(dirty))
+        if u32.UpdateLayeredWindowIndirect(self._hwnd, ctypes.byref(info)):
+            return True
+        return bool(u32.UpdateLayeredWindow(
+            self._hwnd, None, ctypes.byref(origin), ctypes.byref(W.SIZE(w, h)),
+            mem_dc, ctypes.byref(W.POINT(0, 0)), 0, None, _ULW_OPAQUE))
+
+    def picture(self):
+        """(w, h, BGRA bytes) of what the cover shows since its last
+        refresh(), or None before the first. For tools/scroll_check.py."""
+        if self._buf is None:
+            return None
+        _dc, _bmp, _old, bits, w, h = self._buf
+        return w, h, ctypes.string_at(bits.value, w * h * 4)
+
+    def _free_buf(self) -> None:
+        buf, self._buf = self._buf, None
+        if buf is None:
+            return
+        _u32, g32 = _load()
+        mem_dc, bmp, old, _bits, _w, _h = buf
+        if old:
+            g32.SelectObject(mem_dc, old)
+        g32.DeleteObject(bmp)
+        g32.DeleteDC(mem_dc)
 
     def close(self) -> None:
         hwnd, self._hwnd = self._hwnd, None
+        try:
+            self._free_buf()
+        except Exception as exc:
+            print(f"[SnapshotCover] Freeing the picture failed (non-fatal): {exc}")
         if hwnd:
             try:
                 _load()[0].DestroyWindow(hwnd)
