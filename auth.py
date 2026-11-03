@@ -724,7 +724,9 @@ class AuthManager:
             print(f"[Auth] Two-factor methods unavailable ({e}); "
                   f"{len(local)} authenticator method(s) from the session")
             if local:
-                return {"methods": local}
+                # "offline": the web app could not be asked, so neither can
+                # it approve this sign-in.
+                return {"methods": local, "offline": True}
             raise
         listed = [m for m in (data.get("methods") or []) if isinstance(m, dict)]
         usable = mfa.usable_methods(listed, bool(data.get("emailMayFinish")))
@@ -774,8 +776,17 @@ class AuthManager:
                 r = mfa.call("verify", token,
                              {"factorId": factor_id, "code": code})
                 totp = r.get("totp") or ""
-            if not factor_id or not totp:
-                return False, "Could not finish the check. Try again."
+        except mfa.MfaError as e:
+            return False, str(e)
+        ok, msg = self._complete_step(factor_id, totp)
+        return ok, (note if ok else msg)
+
+    def _complete_step(self, factor_id: str, totp: str) -> tuple[bool, str]:
+        """Supabase's own verify with a code for `factor_id`, then the refresh
+        that puts the aal2 token on database calls. Never raises."""
+        if not factor_id or not totp:
+            return False, "Could not finish the check. Try again."
+        try:
             self._supabase_verify(factor_id, totp)
             session = self._refresh_after_step()
         except mfa.MfaError as e:
@@ -784,7 +795,41 @@ class AuthManager:
             _restore_log("FAIL: code accepted but the session is still aal1")
             return False, "Could not finish signing in. Try again."
         self._finish_second_step(session.user)
-        return True, note
+        return True, ""
+
+    def request_approval(self) -> dict:
+        """Ask the web app to approve this sign-in. Returns {requestId, claim,
+        number, expiresInSeconds}. The claim alone can collect the answer, so
+        the caller keeps it in memory only. Raises mfa.MfaError; its `code`
+        says when approvals cannot be used at all (mfa.APPROVAL_UNAVAILABLE)."""
+        r = mfa.call("approval-request", self._session_token(),
+                     {"app": mfa.APPROVAL_APP, "device": mfa.device_label()})
+        request_id, claim = str(r.get("requestId") or ""), str(r.get("claim") or "")
+        number = r.get("number")
+        if not request_id or not claim or not isinstance(number, int):
+            raise mfa.MfaError("Could not ask for approval. Use a code.")
+        seconds = r.get("expiresInSeconds")
+        _restore_log("two-factor approval requested")
+        return {"requestId": request_id, "claim": claim, "number": number,
+                "expiresInSeconds": seconds if isinstance(seconds, int)
+                and seconds > 0 else mfa.APPROVAL_SECONDS}
+
+    def check_approval(self, request: dict) -> tuple[str, str]:
+        """One look at the request. Returns (status, message): "pending",
+        "denied", "expired", "none", "approved" (signed in now), or "failed"
+        with the reason. Raises mfa.MfaError when the check itself failed."""
+        r = mfa.call("approval-check", self._session_token(),
+                     {"requestId": request.get("requestId"),
+                      "claim": request.get("claim")})
+        status = str(r.get("status") or "none")
+        if status != "approved":
+            return status, ""
+        ok, msg = self._complete_step(str(r.get("factorId") or ""),
+                                      str(r.get("totp") or ""))
+        if ok:
+            _restore_log("two-factor approved in the web app")
+            return "approved", ""
+        return "failed", msg
 
     def _supabase_verify(self, factor_id: str, code: str) -> None:
         auth_api = self._get_client().auth

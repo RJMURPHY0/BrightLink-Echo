@@ -16,6 +16,7 @@ Nothing here touches Tk, so it is all testable on its own.
 
 import base64
 import json
+import os
 import urllib.error
 import urllib.request
 from typing import Optional
@@ -51,7 +52,55 @@ NOT_ACCEPTED = "That code was not accepted. Check it and try again."
 
 
 class MfaError(Exception):
-    """A failure whose message can be shown to the person as it is."""
+    """A failure whose message can be shown to the person as it is.
+
+    `code` is the server's machine-readable reason when it gave one
+    ("sharing_off", "no_server_factor", "rate_limited", ...), `status` the
+    HTTP status (0 when the server was never reached)."""
+
+    def __init__(self, message: str = "", code: str = "", status: int = 0):
+        super().__init__(message)
+        self.code = code or ""
+        self.status = status
+
+
+# ── Approve from the web app ─────────────────────────────────────────────────
+# The person verifies once in an open, fully signed-in web app tab: Echo asks,
+# the tab shows the request, and they pick the number Echo shows. Echo then
+# collects the current code of a factor the server holds and verifies it with
+# Supabase like any other. The claim the server hands back is the only thing
+# that can collect the answer: it stays in memory, never on disk or in a log.
+
+APPROVAL_APP = "echo"
+APPROVAL_POLL_MS = 2000
+APPROVAL_SECONDS = 120
+# The person cannot use approvals at all: offer typed codes only, quietly.
+APPROVAL_UNAVAILABLE = ("sharing_off", "no_server_factor")
+
+
+def approval_unavailable(err) -> bool:
+    """True when this person cannot approve from the web app at all, so the
+    option should vanish quietly: switched off, no server-held factor, no
+    two-factor to approve, or a web app too old to know the action (a 400
+    with no reason code)."""
+    code = getattr(err, "code", "")
+    if code in APPROVAL_UNAVAILABLE:
+        return True
+    return getattr(err, "status", 0) == 400 and not code
+
+
+def device_label() -> str:
+    """How the request names this PC in the web app: Echo on RYAN-LAPTOP."""
+    import brand
+    import socket
+    name = (os.environ.get("COMPUTERNAME") or "").strip()
+    if not name:
+        try:
+            name = socket.gethostname().strip()
+        except OSError:
+            name = ""
+    label = f"{brand.PRODUCT_SHORT_NAME} on {name}" if name else brand.PRODUCT_SHORT_NAME
+    return label[:80]
 
 
 def kind_of(friendly_name: Optional[str]) -> str:
@@ -178,14 +227,16 @@ def call(action: str, token: str, body: Optional[dict] = None) -> dict:
             data = json.loads(r.read().decode("utf-8") or "{}")
         return data if isinstance(data, dict) else {}
     except urllib.error.HTTPError as e:
-        message = ""
+        message, code = "", ""
         try:
-            message = (json.loads(e.read().decode("utf-8") or "{}")
-                       .get("error") or "")
+            body = json.loads(e.read().decode("utf-8") or "{}")
+            if isinstance(body, dict):
+                message = str(body.get("error") or "")
+                code = str(body.get("code") or "")
         except Exception:
             pass
         raise MfaError(message or f"Something went wrong ({e.code}). "
-                                  "Try again.") from e
+                                  "Try again.", code=code, status=e.code) from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise MfaError(NO_CONNECTION) from e
     except ValueError as e:

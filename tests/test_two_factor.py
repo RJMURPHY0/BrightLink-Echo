@@ -321,6 +321,111 @@ class VerifyTests(unittest.TestCase):
                          (call.call_args[0][0], call.call_args[0][2]))
 
 
+class ApprovalTests(unittest.TestCase):
+    """Approve in the web app: verify once for every app (2026-11-03)."""
+
+    CLAIM = "c" * 48
+
+    def _pending(self, factors=(APP, BACKUP)):
+        mgr, fake = _manager(_user(factors))
+        mgr.sign_in("person@example.com", "pw")
+        return mgr, fake
+
+    def test_request_names_this_pc_and_returns_the_number(self):
+        mgr, _ = self._pending()
+        with mock.patch.dict(os.environ, {"COMPUTERNAME": "RYAN-LAPTOP"}), \
+                mock.patch.object(mfa, "call", return_value={
+                    "requestId": "r1", "claim": self.CLAIM, "number": 47,
+                    "expiresInSeconds": 120}) as call:
+            req = mgr.request_approval()
+        action, token, body = call.call_args[0]
+        self.assertEqual("approval-request", action)
+        self.assertEqual("aal1", mfa.token_aal(token))
+        self.assertEqual({"app": "echo", "device": "Echo on RYAN-LAPTOP"}, body)
+        self.assertEqual(47, req["number"])
+        self.assertEqual(120, req["expiresInSeconds"])
+
+    def test_approved_finishes_on_the_factor_the_web_app_names(self):
+        mgr, fake = self._pending()
+        req = {"requestId": "r1", "claim": self.CLAIM}
+        with mock.patch.object(mfa, "call", return_value={
+                "status": "approved", "factorId": "f-backup",
+                "totp": "123456"}) as call:
+            self.assertEqual(("approved", ""), mgr.check_approval(req))
+        self.assertEqual(("approval-check", {"requestId": "r1",
+                                             "claim": self.CLAIM}),
+                         (call.call_args[0][0], call.call_args[0][2]))
+        self.assertEqual([("f-backup", "123456")], fake.mfa.verified)
+        self.assertTrue(mgr.is_authenticated)
+        self.assertEqual(1, fake.refreshes)
+        self.assertEqual("aal2", mfa.token_aal(_saved_tokens()["access_token"]))
+
+    def test_other_states_leave_the_step_open(self):
+        mgr, fake = self._pending()
+        for state in ("pending", "denied", "expired", "none"):
+            with mock.patch.object(mfa, "call", return_value={"status": state}):
+                self.assertEqual((state, ""),
+                                 mgr.check_approval({"requestId": "r", "claim": "c"}))
+        self.assertEqual([], fake.mfa.verified)
+        self.assertTrue(mgr.needs_second_step)
+
+    def test_an_approved_code_that_supabase_refuses_reports_failed(self):
+        mgr, _ = self._pending()
+        with mock.patch.object(mfa, "call", return_value={
+                "status": "approved", "factorId": "f-backup", "totp": "000000"}):
+            status, msg = mgr.check_approval({"requestId": "r", "claim": "c"})
+        self.assertEqual("failed", status)
+        self.assertEqual(mfa.NOT_ACCEPTED, msg)
+        self.assertTrue(mgr.needs_second_step)
+
+    def test_the_claim_is_never_written_down(self):
+        mgr, _ = self._pending()
+        with mock.patch.object(mfa, "call", return_value={
+                "requestId": "r1", "claim": self.CLAIM, "number": 47,
+                "expiresInSeconds": 120}):
+            mgr.request_approval()
+        with mock.patch.object(mfa, "call", return_value={
+                "status": "approved", "factorId": "f-backup", "totp": "123456"}):
+            mgr.check_approval({"requestId": "r1", "claim": self.CLAIM})
+        for name in os.listdir(_SANDBOX):
+            with open(os.path.join(_SANDBOX, name), "rb") as f:
+                raw = f.read()
+            self.assertNotIn(self.CLAIM.encode(), raw, name)
+
+    def test_server_refusal_codes_reach_the_caller(self):
+        import io
+        import urllib.error
+        err = urllib.error.HTTPError(
+            "https://x", 403, "Forbidden", {},
+            io.BytesIO(b'{"error":"Approving is switched off.","code":"sharing_off"}'))
+        with mock.patch("urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(mfa.MfaError) as cm:
+                mfa.call("approval-request", _jwt("aal1"), {})
+        self.assertEqual("sharing_off", cm.exception.code)
+        self.assertEqual(403, cm.exception.status)
+        self.assertEqual("Approving is switched off.", str(cm.exception))
+        self.assertIn(cm.exception.code, mfa.APPROVAL_UNAVAILABLE)
+
+    def test_which_refusals_hide_the_option(self):
+        E = mfa.MfaError
+        self.assertTrue(mfa.approval_unavailable(E("x", code="sharing_off", status=403)))
+        self.assertTrue(mfa.approval_unavailable(E("x", code="no_server_factor", status=400)))
+        # A web app without approvals yet answers "Unknown action".
+        self.assertTrue(mfa.approval_unavailable(E("Unknown action", status=400)))
+        self.assertFalse(mfa.approval_unavailable(E("x", code="rate_limited", status=429)))
+        self.assertFalse(mfa.approval_unavailable(E(mfa.NO_CONNECTION)))
+        self.assertFalse(mfa.approval_unavailable(E("boom", status=500)))
+
+    def test_no_connection_has_no_status(self):
+        import urllib.error
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=urllib.error.URLError("down")):
+            with self.assertRaises(mfa.MfaError) as cm:
+                mfa.call("approval-check", _jwt("aal1"), {})
+        self.assertEqual(0, cm.exception.status)
+        self.assertEqual(mfa.NO_CONNECTION, str(cm.exception))
+
+
 class MethodsTests(unittest.TestCase):
 
     def test_methods_come_from_the_web_app_filtered_and_ordered(self):
@@ -422,7 +527,14 @@ class CodePageTests(unittest.TestCase):
         done = []
         lw = LW.LoginWindow(auth_obj, on_success=lambda a: done.append(a))
         lw.embed(frame)
-        lw._in_background = lambda work, cb: cb(work())
+        def inline(work, cb):
+            # Same contract as the real one: an exception is the result.
+            try:
+                result = work()
+            except Exception as e:
+                result = e
+            cb(result)
+        lw._in_background = inline
         # Short timers (focus, the hand-over) run at once; the once-a-second
         # resend countdown is left alone.
         lw._root.after = lambda ms, fn=None, *a: (
@@ -436,7 +548,103 @@ class CodePageTests(unittest.TestCase):
         a.is_authenticated = False
         a.second_step_methods.return_value = {"methods": methods}
         a.send_second_step_code.return_value = (True, "")
+        # Typed codes only unless a test turns approvals on.
+        a.request_approval.side_effect = mfa.MfaError(
+            "needs backup codes", code="no_server_factor", status=400)
         return a
+
+    def _approving(self, methods=None):
+        a = self._fake_auth(methods or [{"factorId": "f-app", "kind": "app"}])
+        a.request_approval.side_effect = None
+        a.request_approval.return_value = {
+            "requestId": "r1", "claim": "secret-claim", "number": 47,
+            "expiresInSeconds": 120}
+        a.check_approval.return_value = ("pending", "")
+        return a
+
+    def test_approval_is_offered_first_with_the_number(self):
+        a = self._approving()
+        lw, _ = self._page(a)
+        lw.show_second_step()
+        a.request_approval.assert_called_once()
+        self.assertEqual("pack", lw._approve_view.winfo_manager())
+        self.assertEqual("47", lw._approve_number.cget("text"))
+        self.assertIn("pick this number", lw._step_prompt.cget("text"))
+
+    def test_approved_signs_in_and_hands_over(self):
+        a = self._approving()
+        lw, done = self._page(a)
+        lw.show_second_step()
+
+        def approved(request):
+            self.assertEqual("secret-claim", request["claim"])
+            a.is_authenticated = True
+            a.needs_second_step = False
+            return "approved", ""
+        a.check_approval.side_effect = approved
+        lw._poll_approval(lw._approval_gen)
+        self.assertEqual([a], done)
+        self.assertIsNone(lw._approval)
+
+    def test_pending_keeps_waiting_and_denied_offers_it_again(self):
+        a = self._approving()
+        lw, done = self._page(a)
+        lw.show_second_step()
+        lw._poll_approval(lw._approval_gen)
+        self.assertIsNotNone(lw._approval)     # still waiting
+        self.assertEqual("", lw._approve_again_btn.winfo_manager())
+        a.check_approval.return_value = ("denied", "")
+        lw._poll_approval(lw._approval_gen)
+        self.assertIsNone(lw._approval)        # claim forgotten
+        self.assertEqual("pack", lw._approve_again_btn.winfo_manager())
+        self.assertIn("turned down", lw._step_status.cget("text"))
+        self.assertEqual([], done)
+        lw._start_approval()                   # Ask again
+        self.assertEqual(2, a.request_approval.call_count)
+
+    def test_switched_off_hides_approval_and_keeps_typed_codes(self):
+        a = self._approving([{"factorId": "f-app", "kind": "app"},
+                             {"factorId": "f-b", "kind": "backup"}])
+        a.request_approval.side_effect = mfa.MfaError(
+            "switched off", code="sharing_off", status=403)
+        lw, _ = self._page(a)
+        lw.show_second_step()
+        self.assertEqual("pack", lw._code_view.winfo_manager())
+        self.assertEqual("", lw._step_status.winfo_manager())   # no fuss
+        lw._show_picker()
+        self.assertEqual(2, len(lw._pick_list.winfo_children()))
+
+    def test_rate_limited_shows_why_and_keeps_the_option(self):
+        a = self._approving()
+        a.request_approval.side_effect = mfa.MfaError(
+            "Too many sign-in requests.", code="rate_limited", status=429)
+        lw, _ = self._page(a)
+        lw.show_second_step()
+        self.assertEqual("pack", lw._code_view.winfo_manager())
+        self.assertEqual("Too many sign-in requests.",
+                         lw._step_status.cget("text"))
+        lw._show_picker()
+        self.assertEqual(2, len(lw._pick_list.winfo_children()))
+
+    def test_type_a_code_instead_stops_asking(self):
+        a = self._approving()
+        lw, _ = self._page(a)
+        lw.show_second_step()
+        gen = lw._approval_gen
+        lw._approval_to_code()
+        self.assertIsNone(lw._approval)
+        self.assertEqual("pack", lw._code_view.winfo_manager())
+        lw._poll_approval(gen)                 # a late poll does nothing
+        a.check_approval.assert_not_called()
+
+    def test_offline_methods_skip_approval(self):
+        a = self._approving()
+        a.second_step_methods.return_value = {
+            "methods": [{"factorId": "f-app", "kind": "app"}], "offline": True}
+        lw, _ = self._page(a)
+        lw.show_second_step()
+        a.request_approval.assert_not_called()
+        self.assertEqual("pack", lw._code_view.winfo_manager())
 
     def test_password_result_swaps_the_form_for_the_code_page(self):
         a = self._fake_auth([{"factorId": "f-app", "kind": "app"}])

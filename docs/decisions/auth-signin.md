@@ -44,3 +44,10 @@ Moved verbatim from CLAUDE.md on 2026-09-29. Add new decisions as a dated entry 
 - If the web app cannot be reached, the authenticator still works from the session alone (`mfa.local_app_methods`).
 - The page is the same card: the toggle and form swap for "Two-step sign-in", white code field, orange Verify, "Send a new code" (30s), "Use another way", "Use a different account" (ends the half-finished sign-in and puts back the offline stand-in).
 - Proved live on a throwaway account with an authenticator factor (created without an org, deleted after): password then code, wrong code refused, aal2 on the database header, restart and refresh stay aal2, a saved aal1 session goes back to the code page. Guarded by `tests/test_two_factor.py`.
+
+## 2026-11-03: Approve in BrightLink (v1.8.29)
+
+- Ryan: two-factor should be done once across every app. The web app (eb3897b) lets an open, fully signed-in tab approve another app's sign-in: Echo calls `approval-request` (app `echo`, device "Echo on <computer name>") with its aal1 token, shows the number, and polls `approval-check` every 2 seconds until it runs out (120s). On `approved` the server hands back the current code of a factor it holds (backup codes first), which Echo verifies with Supabase and then refreshes, exactly like a typed code.
+- The approval view comes first after the password; "Type a code instead" and "Use another way" keep every typed method. The claim that collects the answer lives in memory only: never on disk, never in a log (pinned by a test).
+- Quiet fallback to typed codes when approvals cannot work for this person: `sharing_off`, `no_server_factor`, or a 400 with no reason code (a web app without the actions answers "Unknown action"). A 429 shows its text and keeps the option. A dropped connection keeps polling until the request runs out.
+- Proved live on a throwaway account with an authenticator and backup codes (deleted after): wrong number refused, turned down refused, pending before the answer, approved signs Echo in at aal2, an answer is collected once, claim not on disk, and the real code page signs in when the web app approves.

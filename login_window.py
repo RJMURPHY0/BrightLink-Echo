@@ -886,6 +886,32 @@ class LoginWindow:
         self._step_link(self._pick_view, "Use a different account",
                         self._use_other_account).pack(pady=(10, 0))
 
+        # ── Approve in the web app ─────────────────────────────────────
+        # Verify once for every app: an open, signed-in web app tab shows the
+        # request and the person picks the number shown here.
+        self._approval_ok = True
+        self._approval: Optional[dict] = None   # holds the claim: memory only
+        self._approval_gen = 0
+        self._approval_deadline = 0.0
+        self._approval_job = None
+        self._approve_view = tk.Frame(self._step, bg=C["surface"])
+        self._approve_number = tk.Label(
+            self._approve_view, text="", fg=C["accent"], bg=C["surface"],
+            font=("Segoe UI", 44, "bold"))
+        self._approve_number.pack(pady=(0, 2))
+        self._approve_wait = tk.Label(
+            self._approve_view, text="", fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 9))
+        self._approve_wait.pack(pady=(0, 12))
+        self._approve_again_btn = _RoundedButton(
+            self._approve_view, "Ask again", self._start_approval,
+            bg=C["accent"], fg=C["bg"], hover=C["accent_hover"], height=46)
+        self._approve_code_lbl = self._step_link(
+            self._approve_view, "Type a code instead", self._approval_to_code)
+        self._approve_code_lbl.pack(pady=(0, 0))
+        self._step_link(self._approve_view, "Use a different account",
+                        self._use_other_account).pack(pady=(8, 0))
+
         # ── Loading / load failed ──────────────────────────────────────
         self._load_view = tk.Frame(self._step, bg=C["surface"])
         self._retry_btn = _RoundedButton(
@@ -919,6 +945,7 @@ class LoginWindow:
         """Back to the sign-in form (cancelled, or finished and reused)."""
         self._step_gen += 1
         self._cancel_resend_timer()
+        self._stop_approval()
         if not self._step_active:
             return
         self._step_active = False
@@ -930,8 +957,12 @@ class LoginWindow:
         self._card.pack(fill="both", expand=True)
         self._sync_height()
 
+    def _views(self) -> tuple:
+        return (self._code_view, self._pick_view, self._load_view,
+                self._approve_view)
+
     def _show_view(self, view) -> None:
-        for v in (self._code_view, self._pick_view, self._load_view):
+        for v in self._views():
             if v is not view:
                 v.pack_forget()
         view.pack(fill="x")
@@ -944,8 +975,7 @@ class LoginWindow:
             self._step_status.configure(
                 text=msg, fg=C["error"] if error else C["success"])
             # Under the prompt, above whichever view is showing.
-            shown = [v for v in (self._code_view, self._pick_view,
-                                 self._load_view) if v.winfo_manager()]
+            shown = [v for v in self._views() if v.winfo_manager()]
             opts = {"before": shown[0]} if shown else {}
             self._step_status.pack(fill="x", pady=(0, 8), **opts)
         self._sync_height()
@@ -988,12 +1018,18 @@ class LoginWindow:
                 self._step_done("")
                 return
             self._step_methods = list(result.get("methods") or [])
-            self._choose(self._step_methods[0])
+            # The web app could not be reached: it cannot approve either.
+            self._approval_ok = not result.get("offline")
+            if self._approval_ok:
+                self._start_approval()
+            else:
+                self._choose(self._step_methods[0])
 
         self._in_background(self._auth.second_step_methods, _done)
 
     def _choose(self, method: dict) -> None:
         import mfa
+        self._stop_approval()
         self._chosen = method
         self._cancel_resend_timer()
         self._sent_at = 0.0
@@ -1006,7 +1042,7 @@ class LoginWindow:
         self._other_way_lbl.pack_forget()
         if method.get("kind") in mfa.SENDS_CODE:
             self._resend_code_lbl.pack(pady=(10, 0))
-        if len(self._step_methods) > 1:
+        if len(self._step_methods) > 1 or self._approval_ok:
             self._other_way_lbl.pack(pady=(10 if not self._resend_code_lbl
                                        .winfo_manager() else 4, 0))
         self._show_view(self._code_view)
@@ -1022,10 +1058,18 @@ class LoginWindow:
 
     def _show_picker(self) -> None:
         import mfa
+        self._stop_approval()
         for w in self._pick_list.winfo_children():
             w.destroy()
         self._step_prompt.configure(text="Choose how to get your code.")
         self._set_step_status("")
+        if self._approval_ok:
+            _RoundedButton(
+                self._pick_list, f"Approve in {brand.CRM_NAME}",
+                self._start_approval,
+                bg=C["input_bg"], fg=C["text"], hover=C["divider"],
+                font=("Segoe UI", 10), height=44,
+            ).pack(fill="x", pady=(0, 8))
         for m in self._step_methods:
             name = mfa.KIND_NAME.get(m.get("kind"), "Authenticator app")
             dest = m.get("destination")
@@ -1129,11 +1173,153 @@ class LoginWindow:
         self._in_background(
             lambda: self._auth.verify_second_step(method, code), _done)
 
-    def _step_done(self, note: str) -> None:
+    # ── Approve in the web app ─────────────────────────────────────────
+    def _start_approval(self) -> None:
+        """Ask the web app to approve, show the number, then wait for it."""
+        self._stop_approval()
+        self._cancel_resend_timer()
+        self._chosen = None
+        gen = self._approval_gen
+        self._set_step_status("")
+        self._step_prompt.configure(text=f"Asking {brand.CRM_NAME}…")
+        # A space keeps the number's full height, so nothing moves or gets
+        # clipped when it arrives.
+        self._approve_number.configure(text=" ", fg=C["accent"])
+        self._approve_wait.configure(text=" ", fg=C["subtext"])
+        self._approve_again_btn.pack_forget()
+        self._show_view(self._approve_view)
+
+        def _done(result):
+            import time as _t
+            import mfa
+            if gen != self._approval_gen:
+                return
+            if isinstance(result, Exception):
+                first = self._step_methods[0]
+                if mfa.approval_unavailable(result):
+                    # Switched off, or nothing the server can answer with:
+                    # typed codes only, without a fuss.
+                    self._approval_ok = False
+                    self._choose(first)
+                    return
+                msg = str(result) if isinstance(result, mfa.MfaError) else \
+                    "Could not ask for approval. Use a code."
+                self._choose(first)
+                self._set_step_status(msg)
+                return
+            self._approval = result
+            self._approval_deadline = (_t.monotonic()
+                                       + int(result["expiresInSeconds"]))
+            self._step_prompt.configure(
+                text=f"Open {brand.CRM_NAME} and pick this number to "
+                     f"approve the sign-in.")
+            self._approve_number.configure(text=str(result["number"]))
+            self._show_approval_wait()
+            self._sync_height()
+            self._schedule_approval_poll(gen)
+
+        self._in_background(self._auth.request_approval, _done)
+
+    def _show_approval_wait(self) -> None:
+        import time as _t
+        left = max(0, int(self._approval_deadline - _t.monotonic()))
+        self._approve_wait.configure(
+            text=f"Waiting for approval, {left // 60}:{left % 60:02d} left",
+            fg=C["subtext"])
+
+    def _schedule_approval_poll(self, gen: int) -> None:
+        import mfa
+        try:
+            self._approval_job = self._root.after(
+                mfa.APPROVAL_POLL_MS, lambda: self._poll_approval(gen))
+        except tk.TclError:
+            self._approval_job = None
+
+    def _poll_approval(self, gen: int) -> None:
+        import time as _t
+        import mfa
+        self._approval_job = None
+        request = self._approval
+        if gen != self._approval_gen or request is None:
+            return
+        if _t.monotonic() >= self._approval_deadline:
+            self._approval_ended("The request timed out. Ask again, or type a code.")
+            return
+        self._show_approval_wait()
+
+        def _done(result):
+            if gen != self._approval_gen:
+                return
+            if isinstance(result, mfa.MfaError):
+                if not result.status:
+                    # No connection for a moment: keep asking until the
+                    # request runs out.
+                    self._schedule_approval_poll(gen)
+                else:
+                    self._approval_ended(str(result))
+                return
+            if isinstance(result, Exception):
+                self._approval_ended("Could not check the request. Ask again, "
+                                     "or type a code.")
+                return
+            status, msg = result
+            if status == "pending":
+                self._schedule_approval_poll(gen)
+            elif status == "approved":
+                self._approval = None
+                self._step_done("", via_approval=True)
+            elif status == "denied":
+                self._approval_ended(
+                    f"The sign-in was turned down in {brand.CRM_NAME}.")
+            elif status == "failed":
+                self._approval_ended(msg or "Could not finish signing in. "
+                                            "Ask again, or type a code.")
+            elif status == "expired":
+                self._approval_ended("The request timed out. Ask again, or "
+                                     "type a code.")
+            else:
+                self._approval_ended("The request is no longer waiting. Ask "
+                                     "again, or type a code.")
+
+        self._in_background(lambda: self._auth.check_approval(request), _done)
+
+    def _approval_ended(self, msg: str) -> None:
+        """The request is over without a sign-in: say why, offer it again."""
+        self._stop_approval()
+        self._approve_number.configure(fg=C["divider"])
+        self._approve_wait.configure(text=" ")
+        self._set_step_status(msg)
+        self._approve_again_btn.pack(fill="x", pady=(0, 10),
+                                     before=self._approve_code_lbl)
+        self._sync_height()
+
+    def _stop_approval(self) -> None:
+        """Forget the request (and its claim) and stop asking about it."""
+        self._approval_gen = getattr(self, "_approval_gen", 0) + 1
+        self._approval = None
+        job = getattr(self, "_approval_job", None)
+        if job is not None:
+            try:
+                self._root.after_cancel(job)
+            except Exception:
+                pass
+            self._approval_job = None
+
+    def _approval_to_code(self) -> None:
+        if self._step_methods:
+            self._choose(self._step_methods[0])
+
+    def _step_done(self, note: str, via_approval: bool = False) -> None:
         """Signed in: say so on the button, then hand over like a sign-in."""
         if not self._auth.is_authenticated:
             return
         self._cancel_resend_timer()
+        if via_approval:
+            self._approve_number.configure(fg=C["success"])
+            self._approve_wait.configure(text="✓  Approved, signing you in",
+                                         fg=C["success"])
+            self._root.after(700, self._finish)
+            return
         if not self._code_view.winfo_manager():
             self._show_view(self._code_view)
             self._resend_code_lbl.pack_forget()
