@@ -135,6 +135,8 @@ class LoginWindow:
     def reset(self) -> None:
         """Clear form fields and reset to login mode — call before showing again."""
         self._submitting = False
+        if hasattr(self, "_step"):
+            self._leave_second_step()
         if hasattr(self, "_email_var"):
             try:
                 self._email_var.set(self._auth.last_email or "")
@@ -465,7 +467,11 @@ class LoginWindow:
             self._divider_frame.pack(fill="x", pady=(12, 0))
             self._google_btn.pack(fill="x", pady=(8, 0))
 
-        # Enter key submits
+        # Two-factor code page: replaces the toggle + form inside the same card
+        # once the password is accepted and the account has a second step.
+        self._build_second_step(holder)
+
+        # Enter key submits (the code page's Verify while that is showing)
         self._root.bind("<Return>", lambda _e: self._submit())
 
         self._switch("login")
@@ -718,6 +724,9 @@ class LoginWindow:
     # ------------------------------------------------------------------
 
     def _submit(self) -> None:
+        if getattr(self, "_step_active", False):
+            self._verify_code()
+            return
         if self._submitting:
             return
         email = self._email_entry.get().strip()
@@ -765,6 +774,15 @@ class LoginWindow:
         self._submitting = False
         print(f"[Login] ok={ok} msg={msg!r}")
 
+        if ok and getattr(self._auth, "needs_second_step", False):
+            # Password accepted; the account asks for its two-factor code.
+            self._hide_progress()
+            self._submit_btn.set(bg=C["accent"], hover=C["accent_hover"],
+                                 cursor="hand2")
+            self._password_var.set("")
+            self.show_second_step()
+            return
+
         if ok and self._auth.is_authenticated:
             self._pending_confirm_email = None
             if self._progress_frame.winfo_manager():
@@ -807,6 +825,333 @@ class LoginWindow:
         self._root.after(3000, lambda: self._submit_btn.set(
             text="Sign In", bg=C["accent"], fg=C["bg"], hover=C["accent_hover"], cursor="hand2"
         ))
+
+    # ------------------------------------------------------------------
+    # Two-factor code page
+    # ------------------------------------------------------------------
+    # Same flow as the web app's second step (Brightlink SecondStepForm.tsx):
+    # the best method is chosen for you (authenticator first), email,
+    # WhatsApp and text send their code as soon as they are chosen, and
+    # "Use another way" lists the rest. Trusted browsers are a browser's own
+    # and never offered here: the saved session already keeps this PC signed
+    # in after the code, so it is asked for once per sign-in.
+
+    def _build_second_step(self, holder) -> None:
+        self._step_active = False
+        self._step_gen = 0
+        self._step_methods: list = []
+        self._chosen: Optional[dict] = None
+        self._sent_at = 0.0
+        self._resend_job = None
+        self._verifying = False
+
+        self._step = tk.Frame(holder, bg=C["surface"])
+        tk.Label(self._step, text="Two-step sign-in", fg=C["text"],
+                 bg=C["surface"], font=("Segoe UI", 13, "bold"),
+                 anchor="w").pack(fill="x", pady=(2, 4))
+        self._step_prompt = tk.Label(
+            self._step, text="", fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 10), anchor="w", justify="left", wraplength=310)
+        self._step_prompt.pack(fill="x", pady=(0, 10))
+
+        # Status line shared by every view, packed only with a message.
+        self._step_status = tk.Label(
+            self._step, text="", fg=C["error"], bg=C["surface"],
+            font=("Segoe UI", 10, "bold"), wraplength=310, justify="center",
+            pady=4)
+
+        # ── Code view ──────────────────────────────────────────────────
+        self._code_view = tk.Frame(self._step, bg=C["surface"])
+        self._code_label = self._field_label(self._code_view, "Code")
+        self._code_var = tk.StringVar()
+        code_wrap, self._code_entry, _ = self._rounded_field(
+            self._code_view, self._code_var)
+        code_wrap.pack(fill="x", pady=(4, 12))
+        self._code_var.trace_add("write", lambda *_a: self._clean_code())
+        self._verify_btn = _RoundedButton(
+            self._code_view, "Verify", self._verify_code,
+            bg=C["accent"], fg=C["bg"], hover=C["accent_hover"], height=46)
+        self._verify_btn.pack(fill="x")
+        self._resend_code_lbl = self._step_link(
+            self._code_view, "Send a new code", self._resend_code)
+        self._other_way_lbl = self._step_link(
+            self._code_view, "Use another way", self._show_picker)
+        self._step_link(self._code_view, "Use a different account",
+                        self._use_other_account).pack(pady=(8, 0))
+
+        # ── Method picker ──────────────────────────────────────────────
+        self._pick_view = tk.Frame(self._step, bg=C["surface"])
+        self._pick_list = tk.Frame(self._pick_view, bg=C["surface"])
+        self._pick_list.pack(fill="x")
+        self._step_link(self._pick_view, "Use a different account",
+                        self._use_other_account).pack(pady=(10, 0))
+
+        # ── Loading / load failed ──────────────────────────────────────
+        self._load_view = tk.Frame(self._step, bg=C["surface"])
+        self._retry_btn = _RoundedButton(
+            self._load_view, "Try again", self._load_methods,
+            bg=C["accent"], fg=C["bg"], hover=C["accent_hover"], height=46)
+        self._load_other_lbl = self._step_link(
+            self._load_view, "Use a different account", self._use_other_account)
+
+    def _step_link(self, parent, text, command) -> tk.Label:
+        lbl = tk.Label(parent, text=text, fg=C["subtext"], bg=C["surface"],
+                       font=("Segoe UI", 9), cursor="hand2")
+        lbl.bind("<Button-1>", lambda _e: command())
+        lbl.bind("<Enter>", lambda _e: lbl.configure(fg=C["accent"]))
+        lbl.bind("<Leave>", lambda _e: lbl.configure(
+            fg=C["subtext"] if str(lbl.cget("cursor")) == "hand2"
+            else C["divider"]))
+        return lbl
+
+    def show_second_step(self) -> None:
+        """Swap the sign-in form for the code page and load the methods."""
+        if not hasattr(self, "_step"):
+            return
+        self._step_active = True
+        self._seg.pack_forget()
+        self._card.pack_forget()
+        self._status_frame.pack_forget()
+        self._step.pack(fill="both", expand=True)
+        self._load_methods()
+
+    def _leave_second_step(self) -> None:
+        """Back to the sign-in form (cancelled, or finished and reused)."""
+        self._step_gen += 1
+        self._cancel_resend_timer()
+        if not self._step_active:
+            return
+        self._step_active = False
+        self._verifying = False
+        self._chosen = None
+        self._code_var.set("")
+        self._step.pack_forget()
+        self._seg.pack(fill="x", pady=(2, 10))
+        self._card.pack(fill="both", expand=True)
+        self._sync_height()
+
+    def _show_view(self, view) -> None:
+        for v in (self._code_view, self._pick_view, self._load_view):
+            if v is not view:
+                v.pack_forget()
+        view.pack(fill="x")
+        self._sync_height()
+
+    def _set_step_status(self, msg: str, error: bool = True) -> None:
+        if not msg:
+            self._step_status.pack_forget()
+        else:
+            self._step_status.configure(
+                text=msg, fg=C["error"] if error else C["success"])
+            # Under the prompt, above whichever view is showing.
+            shown = [v for v in (self._code_view, self._pick_view,
+                                 self._load_view) if v.winfo_manager()]
+            opts = {"before": shown[0]} if shown else {}
+            self._step_status.pack(fill="x", pady=(0, 8), **opts)
+        self._sync_height()
+
+    def _in_background(self, work, done) -> None:
+        """Run `work()` off the Tk thread, then `done(result)` on it, unless
+        the page moved on (cancelled or finished) in the meantime."""
+        gen = self._step_gen
+
+        def _run():
+            try:
+                result = work()
+            except Exception as exc:
+                result = exc
+            try:
+                self._root.after(0, lambda: gen == self._step_gen and done(result))
+            except (tk.TclError, RuntimeError):
+                pass
+        threading.Thread(target=_run, daemon=True, name="second-step").start()
+
+    def _load_methods(self) -> None:
+        import mfa
+        self._step_prompt.configure(text="Checking your sign-in methods…")
+        self._set_step_status("")
+        self._retry_btn.pack_forget()
+        self._load_other_lbl.pack_forget()
+        self._show_view(self._load_view)
+
+        def _done(result):
+            if isinstance(result, Exception):
+                msg = str(result) if isinstance(result, mfa.MfaError) else \
+                    "Could not load your sign-in methods. Try again."
+                self._step_prompt.configure(text="")
+                self._set_step_status(msg)
+                self._retry_btn.pack(fill="x", pady=(4, 0))
+                self._load_other_lbl.pack(pady=(10, 0))
+                self._sync_height()
+                return
+            if result.get("done"):
+                self._step_done("")
+                return
+            self._step_methods = list(result.get("methods") or [])
+            self._choose(self._step_methods[0])
+
+        self._in_background(self._auth.second_step_methods, _done)
+
+    def _choose(self, method: dict) -> None:
+        import mfa
+        self._chosen = method
+        self._cancel_resend_timer()
+        self._sent_at = 0.0
+        self._set_step_status("")
+        self._code_var.set("")
+        backup = method.get("kind") == "backup"
+        self._code_label.configure(text="Backup code" if backup else "Code")
+        self._step_prompt.configure(text=mfa.prompt(method))
+        self._resend_code_lbl.pack_forget()
+        self._other_way_lbl.pack_forget()
+        if method.get("kind") in mfa.SENDS_CODE:
+            self._resend_code_lbl.pack(pady=(10, 0))
+        if len(self._step_methods) > 1:
+            self._other_way_lbl.pack(pady=(10 if not self._resend_code_lbl
+                                       .winfo_manager() else 4, 0))
+        self._show_view(self._code_view)
+        self._focus_code()
+        if method.get("kind") in mfa.SENDS_CODE:
+            self._send_code(method)
+
+    def _focus_code(self) -> None:
+        try:
+            self._root.after(40, self._code_entry.focus_set)
+        except tk.TclError:
+            pass
+
+    def _show_picker(self) -> None:
+        import mfa
+        for w in self._pick_list.winfo_children():
+            w.destroy()
+        self._step_prompt.configure(text="Choose how to get your code.")
+        self._set_step_status("")
+        for m in self._step_methods:
+            name = mfa.KIND_NAME.get(m.get("kind"), "Authenticator app")
+            dest = m.get("destination")
+            label = f"{name}\n{dest}" if dest else name
+            _RoundedButton(
+                self._pick_list, label, lambda m=m: self._choose(m),
+                bg=C["input_bg"], fg=C["text"], hover=C["divider"],
+                font=("Segoe UI", 10), height=52 if dest else 44,
+            ).pack(fill="x", pady=(0, 8))
+        self._show_view(self._pick_view)
+
+    def _send_code(self, method: dict) -> None:
+        self._resend_code_lbl.configure(text="Sending…", cursor="",
+                                        fg=C["divider"])
+
+        def _done(result):
+            ok, msg = result if isinstance(result, tuple) else (False, str(result))
+            if ok:
+                import time as _t
+                self._sent_at = _t.monotonic()
+                self._tick_resend()
+                return
+            self._set_step_status(msg or "The code did not send.")
+            self._resend_code_lbl.configure(text="Send a new code",
+                                            cursor="hand2", fg=C["subtext"])
+
+        factor_id = method.get("factorId") or ""
+        self._in_background(
+            lambda: self._auth.send_second_step_code(factor_id), _done)
+
+    def _resend_code(self) -> None:
+        if self._chosen is None or str(self._resend_code_lbl.cget("cursor")) != "hand2":
+            return
+        self._set_step_status("")
+        self._send_code(self._chosen)
+
+    def _tick_resend(self) -> None:
+        import time as _t
+        import mfa
+        self._resend_job = None
+        wait = mfa.RESEND_SECONDS - int(_t.monotonic() - self._sent_at)
+        if wait > 0:
+            self._resend_code_lbl.configure(
+                text=f"Send a new code in {wait}s", cursor="", fg=C["divider"])
+            try:
+                self._resend_job = self._root.after(1000, self._tick_resend)
+            except tk.TclError:
+                pass
+        else:
+            self._resend_code_lbl.configure(text="Send a new code",
+                                            cursor="hand2", fg=C["subtext"])
+
+    def _cancel_resend_timer(self) -> None:
+        job = getattr(self, "_resend_job", None)
+        if job is not None:
+            try:
+                self._root.after_cancel(job)
+            except Exception:
+                pass
+            self._resend_job = None
+
+    def _clean_code(self) -> None:
+        import mfa
+        if self._chosen is None:
+            return
+        raw = self._code_var.get()
+        clean = mfa.clean_code(self._chosen.get("kind"), raw)
+        if clean != raw:
+            self._code_var.set(clean)
+
+    def _verify_code(self) -> None:
+        import mfa
+        if self._verifying or self._chosen is None:
+            return
+        method = self._chosen
+        code = self._code_var.get()
+        if not mfa.code_ready(method.get("kind"), code):
+            self._set_step_status(
+                "Backup codes are eight letters and numbers, like ABCD-EFGH."
+                if method.get("kind") == "backup"
+                else "Enter the six-digit code.")
+            return
+        self._verifying = True
+        self._set_step_status("")
+        self._verify_btn.set(text="Checking…", bg=C["divider"],
+                             hover=C["divider"], cursor="")
+
+        def _done(result):
+            self._verifying = False
+            ok, msg = result if isinstance(result, tuple) else \
+                (False, "That code was not accepted. Try again.")
+            if ok:
+                self._step_done(msg)
+                return
+            self._verify_btn.set(text="Verify", bg=C["accent"],
+                                 hover=C["accent_hover"], cursor="hand2")
+            self._set_step_status(msg)
+            self._code_var.set("")
+            self._focus_code()
+
+        self._in_background(
+            lambda: self._auth.verify_second_step(method, code), _done)
+
+    def _step_done(self, note: str) -> None:
+        """Signed in: say so on the button, then hand over like a sign-in."""
+        if not self._auth.is_authenticated:
+            return
+        self._cancel_resend_timer()
+        if not self._code_view.winfo_manager():
+            self._show_view(self._code_view)
+            self._resend_code_lbl.pack_forget()
+            self._other_way_lbl.pack_forget()
+        self._verify_btn.set(text="✓  Signed in", bg=C["success"], fg=C["bg"],
+                             hover=C["success"], cursor="")
+        if note:
+            self._set_step_status(note, error=False)
+        self._root.after(2500 if note else 700, self._finish)
+
+    def _use_other_account(self) -> None:
+        self._auth.cancel_second_step()
+        self._leave_second_step()
+        self._switch("login")
+        try:
+            self._email_entry.focus_set()
+        except tk.TclError:
+            pass
 
     def _toggle_pass(self) -> None:
         self._pass_visible = not self._pass_visible
@@ -923,8 +1268,15 @@ class LoginWindow:
                 client = self._auth._get_client()
                 r = client.auth.exchange_code_for_session({"auth_code": code})
                 if r and r.user and r.session:
-                    self._auth._user = r.user
+                    import mfa
                     self._auth._save_session(r.session)
+                    if mfa.owes_second_step(r.user, r.session.access_token):
+                        # Same as a password: the code comes next.
+                        self._auth._enter_second_step(r.user)
+                        self._root.after(0, self._handle_result, True,
+                                         "Enter your two-factor code.")
+                        return
+                    self._auth._user = r.user
                     self._root.after(0, self._handle_result, True, f"Welcome, {r.user.email}")
                 else:
                     self._root.after(0, self._set_status, "Google sign-in failed, could not verify session.", True)
@@ -942,6 +1294,8 @@ class LoginWindow:
             # No _sync_height here: the dashboard owns the window now.
             self._progress.stop()
             self._progress_frame.pack_forget()
+            if getattr(self, "_step_active", False):
+                self._leave_second_step()
             self._last_h = None
 
     def _handle_close(self) -> None:

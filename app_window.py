@@ -4017,6 +4017,10 @@ class AppWindow:
         self._covered_change(_swap)
         if hasattr(self, "_login_ui"):
             self._login_ui.reset()
+            # A password sign-in (or a restored session) that still owes its
+            # two-factor code lands on the code page, not the form.
+            if getattr(self._auth, "needs_second_step", False):
+                self._login_ui.show_second_step()
 
     def _switch_to_dashboard(self) -> None:
         """Hand over from the login page or the splash to the dashboard.
@@ -4252,7 +4256,7 @@ class AppWindow:
         for anyone who would rather not wait. The form is only forced up when a
         definitive auth failure has cleared the session file (see below)."""
         self._signing_in_reveal_job = None
-        if self._auth.is_authenticated:
+        if self._auth.is_authenticated or self._needs_code():
             self._promote_restored_session()
             return
         if not self._auth.has_saved_session():
@@ -11753,7 +11757,7 @@ class AppWindow:
                 else:
                     gap = self._RESTORE_STEADY_GAP
                 time.sleep(gap)
-            if self._auth.is_authenticated:
+            if self._auth.is_authenticated or self._needs_code():
                 # An earlier attempt (or the late-landing worker) already signed
                 # us in. Promote — returning without promoting is what left the
                 # app authenticated with the login form still on screen.
@@ -11779,7 +11783,20 @@ class AppWindow:
 
     def _promote_restored_session(self) -> None:
         """Main-thread: a background retry restored the session — switch to the
-        dashboard and boot services, exactly as a startup restore would have."""
+        dashboard and boot services, exactly as a startup restore would have.
+        A restored session that still owes its two-factor code goes to the
+        code page instead, and nothing starts until the code is right."""
+        if self._needs_code():
+            try:
+                self._auth.note("restored session owes its two-factor code "
+                                "→ code page")
+            except Exception:
+                pass
+            if not getattr(self, "_login_visible", False):
+                self._switch_to_login()
+            elif not getattr(self._login_ui, "_step_active", False):
+                self._login_ui.show_second_step()
+            return
         if not self._auth.is_authenticated:
             return
         try:
@@ -11788,6 +11805,9 @@ class AppWindow:
             pass
         self._switch_to_dashboard()
         self._fire_authenticated()
+
+    def _needs_code(self) -> bool:
+        return bool(getattr(self._auth, "needs_second_step", False))
 
     def _do_sign_action(self) -> None:
         if self._auth.is_authenticated and self._auth.user_email:

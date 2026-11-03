@@ -10,6 +10,7 @@ import ctypes.wintypes
 import json
 import brand
 import data_paths
+import mfa
 import os
 import threading
 import time
@@ -220,11 +221,23 @@ def _is_definitive_auth_error(msg: str) -> bool:
 
 
 class AuthManager:
+    # Class defaults too, so a manager built without __init__ (tests) reads
+    # as "no code owed".
+    _pending_user = None
+    _pre_pending = None
+
     def __init__(self, supabase_url: str, supabase_key: str):
         self._url = supabase_url
         self._key = supabase_key
         self._client = None
         self._user = None
+        # Signed in with the password but the second step is still owed: the
+        # aal1 session is saved (a restart comes back to the code screen) but
+        # nothing counts as signed in until the code is right. `_pre_pending`
+        # is who was signed in before (the offline stand-in after a sign-out),
+        # put back if the person gives up on the code.
+        self._pending_user = None
+        self._pre_pending = None
         # Session-restore concurrency. Supabase ROTATES refresh tokens, so two
         # restores racing on the same on-disk token guarantee one of them gets
         # "Refresh Token Not Found" — see _load_saved_session.
@@ -287,7 +300,8 @@ class AuthManager:
         def _on_state_change(event, session) -> None:
             if session:
                 event_str = str(event)
-                if "TOKEN_REFRESHED" in event_str or "SIGNED_IN" in event_str:
+                if ("TOKEN_REFRESHED" in event_str or "SIGNED_IN" in event_str
+                        or "MFA_CHALLENGE_VERIFIED" in event_str):
                     self._save_session(session)
                     print(f"[Auth] Session auto-saved ({event_str})")
         try:
@@ -338,7 +352,7 @@ class AuthManager:
                 running = None
         if running is not None:
             running.join(timeout=wait_seconds)
-            return self.is_authenticated
+            return self.is_authenticated or self.needs_second_step
 
         handoff = threading.Lock()
         state = {"done": False, "ok": False, "abandoned": False}
@@ -413,6 +427,17 @@ class AuthManager:
                 raise KeyError("Missing tokens in session file")
             r = client.auth.set_session(at, rt)
             if r and r.user:
+                session_token = getattr(r.session, "access_token", None) or at
+                if mfa.owes_second_step(r.user, session_token):
+                    # Password done, code still owed (the app was closed on
+                    # the code screen). The session stays; the UI asks for
+                    # the code instead of opening the dashboard.
+                    self._enter_second_step(r.user)
+                    print(f"[Auth] Restored session for {_who(r.user)} "
+                          f"still needs its two-factor code")
+                    _restore_log(f"OK: restored session for {_who(r.user)}, "
+                                 f"two-factor code still owed")
+                    return True
                 self._user = r.user
                 # Re-save with encryption in case it was a legacy file
                 self._save_session(
@@ -441,7 +466,7 @@ class AuthManager:
             # if nothing else has already succeeded. Deleting a session that a
             # concurrent (or earlier, late-landing) attempt just refreshed is
             # what signed the user out for real.
-            if self._user is not None:
+            if self._user is not None or self._pending_user is not None:
                 print(f"[Auth] Ignoring stale auth error (already signed in): {e}")
                 _restore_log(f"IGNORED stale auth error (already signed in): "
                              f"{_short_err(e)}")
@@ -476,6 +501,8 @@ class AuthManager:
             except Exception:
                 pass
         self._user = None
+        self._pending_user = None
+        self._pre_pending = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -507,7 +534,9 @@ class AuthManager:
         callers must treat as "do not send", never as "send unauthenticated".
         """
         client = self._client
-        if not client:
+        if not client or self._pending_user is not None:
+            # A session that still owes its second step is refused by every
+            # app route; hand it to nobody.
             return ""
         try:
             session = client.auth.get_session()
@@ -517,7 +546,10 @@ class AuthManager:
             return ""
 
     def try_restore_session(self, wait_seconds: float = 15.0) -> bool:
-        """Called at startup — returns True if a valid saved session exists."""
+        """Called at startup: returns True if a valid saved session exists.
+        True also when that session still owes its two-factor code
+        (needs_second_step): the caller shows the code screen, not the
+        dashboard."""
         return self._load_saved_session(wait_seconds)
 
     @staticmethod
@@ -605,9 +637,17 @@ class AuthManager:
                     {"email": email, "password": password}
                 )
                 if result.user and result.session:
-                    self._user = result.user
                     self._save_session(result.session)
                     _write_last_email(result.user.email or email)
+                    if mfa.owes_second_step(result.user,
+                                            result.session.access_token):
+                        self._enter_second_step(result.user)
+                        _restore_log(f"MANUAL sign-in: password accepted for "
+                                     f"{_who(result.user, email)}, two-factor "
+                                     f"code owed")
+                        return True, "Enter your two-factor code."
+                    self._pending_user = None
+                    self._user = result.user
                     _restore_log(f"MANUAL sign-in succeeded for "
                                  f"{_who(result.user, email)}")
                     return True, f"Welcome back, {result.user.email}"
@@ -637,6 +677,167 @@ class AuthManager:
                     return False, "No account found with that email."
                 return False, f"Sign-in failed: {msg or 'unknown error, check your connection.'}"
         return False, f"Sign-in failed: {msg or 'unknown error, check your connection.'}"
+
+    # ------------------------------------------------------------------
+    # Two-factor second step
+    # ------------------------------------------------------------------
+
+    @property
+    def needs_second_step(self) -> bool:
+        """True while the password is done but the two-factor code is not."""
+        return self._pending_user is not None
+
+    @property
+    def pending_email(self) -> str:
+        return getattr(self._pending_user, "email", "") or ""
+
+    def _enter_second_step(self, user) -> None:
+        if self._pending_user is None:
+            self._pre_pending = self._user
+        self._pending_user = user
+        self._user = None
+
+    def _session_token(self) -> str:
+        """The live session's token, aal1 included (only for the code step)."""
+        try:
+            session = self._get_client().auth.get_session()
+            return (getattr(session, "access_token", "") or "") if session else ""
+        except Exception as exc:
+            print(f"[Auth] Session unavailable for the code step: {exc}")
+            return ""
+
+    def second_step_methods(self) -> dict:
+        """The ways this person can finish signing in, best first.
+
+        Returns {"methods": [...]}, or {"done": True} when two-factor was
+        turned off elsewhere and a fresh token no longer owes the step.
+        Raises mfa.MfaError with a message fit to show."""
+        user = self._pending_user
+        if user is None:
+            return {"done": self.is_authenticated, "methods": []}
+        try:
+            data = mfa.call("methods", self._session_token())
+        except mfa.MfaError as e:
+            # The web app is unreachable or refused: an authenticator code
+            # still works with Supabase alone, so offer that, not a dead end.
+            local = mfa.local_app_methods(user)
+            print(f"[Auth] Two-factor methods unavailable ({e}); "
+                  f"{len(local)} authenticator method(s) from the session")
+            if local:
+                return {"methods": local}
+            raise
+        listed = [m for m in (data.get("methods") or []) if isinstance(m, dict)]
+        usable = mfa.usable_methods(listed, bool(data.get("emailMayFinish")))
+        if usable:
+            return {"methods": usable}
+        # Nothing usable: two-factor may have been removed elsewhere, which a
+        # fresh token shows.
+        session = self._refresh_after_step()
+        if not mfa.owes_second_step(session.user, session.access_token):
+            self._finish_second_step(session.user)
+            return {"done": True, "methods": []}
+        if any(m.get("kind") == "email" for m in listed):
+            raise mfa.MfaError("Sign in with your password to use email "
+                               "codes, or ask your admin to reset two-factor.")
+        raise mfa.MfaError("No way to finish signing in is left. Ask your "
+                           "admin to reset two-factor.")
+
+    def send_second_step_code(self, factor_id: str) -> tuple[bool, str]:
+        try:
+            mfa.call("send", self._session_token(), {"factorId": factor_id})
+            return True, ""
+        except mfa.MfaError as e:
+            return False, str(e) or "The code did not send."
+
+    def verify_second_step(self, method: dict, code: str) -> tuple[bool, str]:
+        """Check the code for `method` and finish signing in. Returns
+        (ok, message): the error to show, or a note worth showing on success
+        (few backup codes left). Never raises."""
+        if self._pending_user is None:
+            return self.is_authenticated, ""
+        kind = method.get("kind")
+        factor_id = method.get("factorId") or ""
+        note = ""
+        try:
+            token = self._session_token()
+            if kind == "app":
+                totp = code
+            elif kind == "backup":
+                r = mfa.call("backup-use", token, {"code": code})
+                factor_id, totp = r.get("factorId") or "", r.get("totp") or ""
+                left = r.get("remaining")
+                if isinstance(left, int) and left <= 2:
+                    note = (f"{left} backup code{'' if left == 1 else 's'} "
+                            f"left. Make new ones in the web app's security "
+                            f"settings.")
+            else:
+                r = mfa.call("verify", token,
+                             {"factorId": factor_id, "code": code})
+                totp = r.get("totp") or ""
+            if not factor_id or not totp:
+                return False, "Could not finish the check. Try again."
+            self._supabase_verify(factor_id, totp)
+            session = self._refresh_after_step()
+        except mfa.MfaError as e:
+            return False, str(e)
+        if mfa.token_aal(session.access_token) != "aal2":
+            _restore_log("FAIL: code accepted but the session is still aal1")
+            return False, "Could not finish signing in. Try again."
+        self._finish_second_step(session.user)
+        return True, note
+
+    def _supabase_verify(self, factor_id: str, code: str) -> None:
+        auth_api = self._get_client().auth
+        try:
+            challenge = auth_api.mfa.challenge({"factor_id": factor_id})
+        except Exception as e:
+            raise mfa.MfaError(self._step_error(
+                e, "Could not start the check. Try again.")) from e
+        try:
+            auth_api.mfa.verify({"factor_id": factor_id,
+                                 "challenge_id": challenge.id, "code": code})
+        except Exception as e:
+            raise mfa.MfaError(self._step_error(e, mfa.NOT_ACCEPTED)) from e
+
+    def _refresh_after_step(self):
+        """A fresh session after the step. supabase-py answers its own
+        MFA_CHALLENGE_VERIFIED event by putting the anon key back on the
+        client's Authorization header, so this refresh (TOKEN_REFRESHED) is
+        what puts the aal2 token on database calls; it is also saved to disk."""
+        try:
+            r = self._get_client().auth.refresh_session()
+        except Exception as e:
+            raise mfa.MfaError(self._step_error(
+                e, "Could not finish signing in. Try again.")) from e
+        if not r or not r.session or not r.user:
+            raise mfa.MfaError("Could not finish signing in. Try again.")
+        self._save_session(r.session)
+        return r.session
+
+    @staticmethod
+    def _step_error(exc, fallback: str) -> str:
+        print(f"[Auth] Two-factor step error: {_short_err(exc)}")
+        low = str(exc).lower()
+        if any(k in low for k in _NETWORK_ERROR_MARKERS):
+            return mfa.NO_CONNECTION
+        return fallback
+
+    def _finish_second_step(self, user) -> None:
+        self._user = user
+        self._pending_user = None
+        self._pre_pending = None
+        _write_last_email(getattr(user, "email", "") or "")
+        print(f"[Auth] Two-factor step done for {_who(user)}")
+        _restore_log(f"two-factor step done for {_who(user)}")
+
+    def cancel_second_step(self) -> None:
+        """Use a different account: end the half-finished sign-in."""
+        if self._pending_user is None:
+            return
+        before = self._pre_pending
+        _restore_log("two-factor step abandoned, session ended")
+        self.sign_out()
+        self._user = before
 
     def reset_password(self, email: str) -> tuple[bool, str]:
         try:
