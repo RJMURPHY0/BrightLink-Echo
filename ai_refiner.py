@@ -17,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Callable, Optional
+from brightlink_api import call_with_auth_retry
 
 # The CRM's public origin, which hosts the relay. A source (dev) run may point
 # it at a local API server with BRIGHTLINK_APP_URL; a released (frozen) build
@@ -344,6 +345,8 @@ class AIRefiner:
         openrouter_model: str = DEFAULT_OPENROUTER_MODEL,
         token_provider: Optional[Callable[[], str]] = None,
         signed_in: Optional[Callable[[], bool]] = None,
+        auth_manager=None,
+        on_session_expired: Optional[Callable[[], None]] = None,
     ):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.openrouter_api_key = openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "")
@@ -353,6 +356,8 @@ class AIRefiner:
         # Cheap "is anyone signed in" check for is_available, which runs on the
         # dictation path: reading the token itself may refresh it over the network.
         self._signed_in = signed_in
+        self._auth_manager = auth_manager
+        self._on_session_expired = on_session_expired
         # Why this thread's last relay call failed ("" after a success). Per
         # thread: context_fix runs beside a popup refine, and one must never
         # report the other's failure.
@@ -439,13 +444,18 @@ class AIRefiner:
         body = json.dumps({"system": system, "user": user,
                            "max_tokens": int(max_tokens),
                            "temperature": float(temperature)}).encode("utf-8")
-        req = urllib.request.Request(
-            relay_url() + RELAY_PATH, data=body, method="POST",
-            headers={"Authorization": f"Bearer {token}",
-                     "Content-Type": "application/json"})
+        def _request():
+            current_token = self._relay_token()
+            req = urllib.request.Request(
+                relay_url() + RELAY_PATH, data=body, method="POST",
+                headers={"Authorization": f"Bearer {current_token}",
+                         "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=_RELAY_TIMEOUT) as response:
+                return json.loads(response.read().decode("utf-8"))
         try:
-            with urllib.request.urlopen(req, timeout=_RELAY_TIMEOUT) as r:
-                data = json.loads(r.read().decode("utf-8"))
+            data = call_with_auth_retry(
+                _request, getattr(self, "_auth_manager", None),
+                getattr(self, "_on_session_expired", None))
             text = (data.get("text") or "").strip() if isinstance(data, dict) else ""
             self.last_relay_error = "" if text else "empty"
             if not text:

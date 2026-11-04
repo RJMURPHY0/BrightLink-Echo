@@ -545,6 +545,14 @@ class AuthManager:
             print(f"[Auth] access_token unavailable (non-fatal): {exc}")
             return ""
 
+    def refresh_session(self) -> None:
+        """Ask the auth server to renew this session after an API 401."""
+        if self._client is None or self.user_id == "local":
+            raise RuntimeError("No signed-in session to refresh")
+        response = self._get_client().auth.refresh_session()
+        if not response or not response.session:
+            raise RuntimeError("Session refresh returned no session")
+
     def try_restore_session(self, wait_seconds: float = 15.0) -> bool:
         """Called at startup: returns True if a valid saved session exists.
         True also when that session still owes its two-factor code

@@ -14,6 +14,7 @@ import threading
 import datetime
 from queue import Queue, Full
 from typing import Callable, Optional
+from brightlink_api import RetryingSupabaseClient
 
 # Table name in Supabase
 _TABLE = "transcriptions"
@@ -244,6 +245,18 @@ class SupabaseLogger:
         self._sync_enabled = False
         # One delete flush at a time (a click and the periodic sync can race).
         self._flush_lock = threading.Lock()
+        self._auth_retry = None
+        self._on_session_expired = None
+
+    def set_auth_retry(self, auth, on_session_expired) -> None:
+        self._auth_retry = auth
+        self._on_session_expired = on_session_expired
+
+    def _retrying_client(self, client):
+        if self._auth_retry is None:
+            return client
+        return RetryingSupabaseClient(
+            client, self._auth_retry, self._on_session_expired)
 
     @property
     def is_enabled(self) -> bool:
@@ -304,13 +317,13 @@ class SupabaseLogger:
         now always wins."""
         client = self._client
         if client is not None:
-            return client
+            return self._retrying_client(client)
         from supabase import create_client
         fresh = create_client(self._url, self._key)
         with self._client_lock:
             if self._client is None:
                 self._client = fresh
-            return self._client
+            return self._retrying_client(self._client)
 
     def ensure_session(self) -> bool:
         """Refresh the signed-in session when its access token has expired.

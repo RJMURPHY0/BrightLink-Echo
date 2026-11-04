@@ -4022,6 +4022,13 @@ class AppWindow:
             if getattr(self._auth, "needs_second_step", False):
                 self._login_ui.show_second_step()
 
+    def show_session_ended(self) -> None:
+        """Show the existing sign-in status line after remote sign-out."""
+        if not getattr(self, "_login_visible", False):
+            self._switch_to_login()
+        self._login_ui._set_status(
+            "You were signed out. Sign in again with your password.")
+
     def _switch_to_dashboard(self) -> None:
         """Hand over from the login page or the splash to the dashboard.
 

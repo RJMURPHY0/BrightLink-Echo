@@ -252,8 +252,11 @@ class WhisperFlowApp:
             # BrightLink relay as the signed-in user, key kept on the server.
             token_provider=lambda: auth.access_token,
             signed_in=lambda: auth.is_authenticated,
+            auth_manager=auth,
+            on_session_expired=self._remote_sign_out,
         )
         self.db = SupabaseLogger(url=config.supabase_url, key=config.supabase_key)
+        self.db.set_auth_retry(auth, self._remote_sign_out)
         # Cloud Sync is opt-in per PC (off by default): the logger uploads and
         # pulls nothing of the user's until this is on.
         self.db.set_sync_enabled(bool(getattr(config, "cloud_sync", False)))
@@ -4261,6 +4264,15 @@ class WhisperFlowApp:
         if self.app_window._root:
             self.app_window._root.after(0, self.app_window._apply_auth_ui)
         print("[App] Signed out, running in offline mode.")
+
+    def _remote_sign_out(self) -> None:
+        """End a rejected session and show the existing sign-in page."""
+        if not self._auth.is_authenticated or self._auth.user_id == "local":
+            return
+        self._sign_out()
+        root = getattr(self.app_window, "_root", None)
+        if root:
+            root.after(0, self.app_window.show_session_ended)
 
     def _shutdown(self) -> None:
         print("[App] Shutting down...")
