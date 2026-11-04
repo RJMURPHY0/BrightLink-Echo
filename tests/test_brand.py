@@ -473,8 +473,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("actions/checkout", text)
         self.assertNotIn("secrets: inherit", text + self.text)
         on = avast.get("on", avast.get(True))
-        self.assertEqual({"AVAST_SFTP_HOST", "AVAST_SFTP_PORT", "AVAST_SFTP_USER", "AVAST_SFTP_PASSWORD"},
-                         set(on["workflow_call"]["secrets"]))
+        self.assertEqual({"AVAST_SFTP_USER", "AVAST_SFTP_PASSWORD"}, set(on["workflow_call"]["secrets"]))
+        self.assertEqual("whitelisting.avast.com", job["env"]["AVAST_HOST"])
         caller = self.wf["jobs"]["avast-whitelist"]
         self.assertEqual("./.github/workflows/avast-whitelist.yml", caller["uses"])
         self.assertEqual(["build-windows"], [caller["needs"]] if isinstance(caller["needs"], str) else caller["needs"])

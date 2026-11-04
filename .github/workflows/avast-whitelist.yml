@@ -12,11 +12,14 @@ name: Send a release to Avast for whitelisting
 #   - called by build-release.yml after every published release;
 #   - by hand (Run workflow, tag) to send an older release.
 #
-# The login lives ONLY as secrets of the `release` environment, whose branch
+# Server and port are Avast's public values (their guide), fixed below with
+# the host key, so they are not secrets: a secret "22" would mask every 22 in
+# the logs. The login (username, password) lives ONLY as secrets of the
+# `release` environment, whose branch
 # policy admits main, release/* and v* tags: a branch an agent pushes can
 # never read it. A called workflow sees an environment secret only when the
 # caller names it (actions/runner#1490), so build-release.yml forwards the
-# four names; the value itself comes from this job's environment.
+# two names; the value itself comes from this job's environment.
 # This job checks out nothing and runs no project code: it downloads the
 # published files, zips them and uploads the zip, with the server's host key
 # pinned below.
@@ -36,10 +39,6 @@ on:
         type: string
         default: ""
     secrets:
-      AVAST_SFTP_HOST:
-        required: false
-      AVAST_SFTP_PORT:
-        required: false
       AVAST_SFTP_USER:
         required: false
       AVAST_SFTP_PASSWORD:
@@ -64,12 +63,12 @@ jobs:
     env:
       TAG: ${{ inputs.tag }}
       CONTACT: ryan.murphy@brightlink.io
+      AVAST_HOST: whitelisting.avast.com
+      AVAST_PORT: "22"
     steps:
       - name: Check the tag and the login
         id: pre
         env:
-          H: ${{ secrets.AVAST_SFTP_HOST }}
-          P: ${{ secrets.AVAST_SFTP_PORT }}
           U: ${{ secrets.AVAST_SFTP_USER }}
           W: ${{ secrets.AVAST_SFTP_PASSWORD }}
         run: |
@@ -77,11 +76,11 @@ jobs:
             echo "::error title=Avast upload::'$TAG' is not a release tag"
             exit 1
           fi
-          if [[ -n "$H" && -n "$P" && -n "$U" && -n "$W" ]]; then
+          if [[ -n "$U" && -n "$W" ]]; then
             echo "READY=true" >> "$GITHUB_OUTPUT"
           else
             echo "READY=false" >> "$GITHUB_OUTPUT"
-            echo "::warning title=Avast upload skipped::The AVAST_SFTP_* secrets are not all set on the release environment"
+            echo "::warning title=Avast upload skipped::AVAST_SFTP_USER and AVAST_SFTP_PASSWORD are not both set on the release environment"
             echo "Avast upload skipped for $TAG: the login is not set on the release environment." >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -142,8 +141,6 @@ jobs:
         if: ${{ steps.pre.outputs.READY == 'true' }}
         continue-on-error: true
         env:
-          H: ${{ secrets.AVAST_SFTP_HOST }}
-          P: ${{ secrets.AVAST_SFTP_PORT }}
           U: ${{ secrets.AVAST_SFTP_USER }}
           # sshpass -e reads the password from SSHPASS: never on a command line.
           SSHPASS: ${{ secrets.AVAST_SFTP_PASSWORD }}
@@ -151,10 +148,6 @@ jobs:
         run: |
           set -uo pipefail
           sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq sshpass >/dev/null
-          if [[ "$H" != "whitelisting.avast.com" || "$P" != "22" ]]; then
-            echo "::error title=Avast upload::the saved server or port is not Avast's whitelisting.avast.com:22"
-            exit 1
-          fi
           # whitelisting.avast.com host keys, read with ssh-keyscan 2026-11-04 (OpenSSH_9.9).
           # SHA256 fingerprints: ED25519 hP2dCqx93v8BtjgqJyxd8WAjNehdMCJAdJIXu5whtBo,
           # ECDSA Ut4TbnhdcoF6r74bfn844qY917yrvNURu5zlxwk+sOE, RSA MsA74Z64EuYWTx9NomTt2Hy5yOS3yOWrQtT2YcDg3WA.
@@ -173,7 +166,7 @@ jobs:
             out=$(sshpass -e sftp -oBatchMode=no -oStrictHostKeyChecking=yes \
                     -oUserKnownHostsFile="$kh" -oGlobalKnownHostsFile=/dev/null \
                     -oPubkeyAuthentication=no -oPreferredAuthentications=password,keyboard-interactive \
-                    -oConnectTimeout=30 -P "$P" -b "$RUNNER_TEMP/batch" "$U@$H" 2>&1)
+                    -oConnectTimeout=30 -P "$AVAST_PORT" -b "$RUNNER_TEMP/batch" "$U@$AVAST_HOST" 2>&1)
             rc=$?
             echo "$out"
             if [[ $rc -eq 0 ]]; then

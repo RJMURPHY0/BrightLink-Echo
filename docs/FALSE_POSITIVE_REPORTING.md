@@ -58,8 +58,9 @@ that matter most for reach:
   after publishing, which zips the distinct release exes plus the installed
   `BrightLink Echo.exe`, names the zip with our contact email and uploads it into
   the server's `data` folder (Avast's guide, support.avast.com/en-ww/article/160,
-  Whitelisting tab). The login lives only as `AVAST_SFTP_HOST/PORT/USER/PASSWORD`
-  secrets on the `release` environment (main, release/*, v* tags; never a repo-wide
+  Whitelisting tab). The login lives only as `AVAST_SFTP_USER` and
+  `AVAST_SFTP_PASSWORD` secrets on the `release` environment (server and port are
+  Avast's public values, fixed in the workflow) (main, release/*, v* tags; never a repo-wide
   secret, never in the signing job); the server's host key is pinned in the
   workflow. A missing login or failed upload never blocks a release: it shows as an
   annotation and a job-summary line. To send an older release: Actions, "Send a
