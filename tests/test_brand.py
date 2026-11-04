@@ -445,16 +445,49 @@ class WorkflowTests(unittest.TestCase):
 
     def test_actions_are_pinned_to_commits_and_the_vt_key_stays_in_its_step(self):
         import re
-        for wf in ("build-release.yml", "migration-e2e.yml"):
+        for wf in ("build-release.yml", "migration-e2e.yml", "avast-whitelist.yml"):
             with open(os.path.join(ROOT, ".github", "workflows", wf), encoding="utf-8") as f:
                 text = f.read()
             for uses in re.findall(r"uses:\s*(\S+)", text):
+                if uses.startswith("./.github/workflows/"):   # this repo's own workflow, same commit
+                    continue
                 self.assertRegex(uses, r"@[0-9a-f]{40}$", msg=f"{wf}: {uses}")
         self.assertNotIn("VT_API_KEY", str(self.wf["jobs"]["build-windows"].get("env", {})))
         holders = [s.get("name") for s in self.wf["jobs"]["build-windows"]["steps"]
                    if "VT_API_KEY" in str(s.get("env", {})) + str(s.get("with", {}))]
         self.assertEqual(["Check for a VirusTotal key", "Scan with VirusTotal",
                           "Read the VirusTotal verdict"], holders)
+
+    def test_avast_upload_keeps_its_login_narrow(self):
+        # The Avast SFTP login (2026-11-04) lives only on the `release`
+        # environment, crosses into the called workflow by name only, never
+        # reaches the signing/publishing job, and goes to a pinned host.
+        import yaml
+        with open(os.path.join(ROOT, ".github", "workflows", "avast-whitelist.yml"), encoding="utf-8") as f:
+            text = f.read()
+        avast = yaml.safe_load(text)
+        job = avast["jobs"]["upload"]
+        self.assertEqual({}, avast["permissions"])
+        self.assertEqual({"contents": "read"}, job["permissions"])
+        self.assertEqual("release", job["environment"])
+        self.assertNotIn("actions/checkout", text)
+        self.assertNotIn("secrets: inherit", text + self.text)
+        on = avast.get("on", avast.get(True))
+        self.assertEqual({"AVAST_SFTP_HOST", "AVAST_SFTP_PORT", "AVAST_SFTP_USER", "AVAST_SFTP_PASSWORD"},
+                         set(on["workflow_call"]["secrets"]))
+        caller = self.wf["jobs"]["avast-whitelist"]
+        self.assertEqual("./.github/workflows/avast-whitelist.yml", caller["uses"])
+        self.assertEqual(["build-windows"], [caller["needs"]] if isinstance(caller["needs"], str) else caller["needs"])
+        self.assertEqual(set(on["workflow_call"]["secrets"]), set(caller["secrets"]))
+        self.assertNotIn("AVAST", str(self.wf["jobs"]["build-windows"]))
+        up = {s.get("name"): s for s in job["steps"]}["Upload to Avast"]
+        self.assertTrue(up["continue-on-error"])
+        self.assertIn("StrictHostKeyChecking=yes", up["run"])
+        self.assertIn("whitelisting.avast.com ssh-ed25519 ", up["run"])
+        self.assertIn("sshpass -e", up["run"])
+        self.assertNotIn("sshpass -p", text)
+        self.assertEqual(["Check the tag and the login", "Upload to Avast"],
+                         [s.get("name") for s in job["steps"] if "secrets." in str(s.get("env", {}))])
 
     def test_partial_or_required_signing_config_fails(self):
         run = self.steps["Decide whether to sign"]["run"]

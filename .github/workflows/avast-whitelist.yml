@@ -1,0 +1,213 @@
+name: Send a release to Avast for whitelisting
+
+# Avast, AVG, Norton and Avira (Gen Digital) whitelist the files a member of
+# their Whitelisting Program uploads to its SFTP server (BrightLink accepted
+# 2026-10-28, account ftp_brightlinkio). Avast's guide
+# (support.avast.com/en-ww/article/160, Whitelisting tab, read 2026-11-04):
+# zip the files, put a contact email in the zip's name, upload it into the
+# data folder; Threat Labs are notified automatically and normally process it
+# within 24 hours. Docs: docs/FALSE_POSITIVE_REPORTING.md.
+#
+# Runs two ways:
+#   - called by build-release.yml after every published release;
+#   - by hand (Run workflow, tag) to send an older release.
+#
+# The login lives ONLY as secrets of the `release` environment, whose branch
+# policy admits main, release/* and v* tags: a branch an agent pushes can
+# never read it. A called workflow sees an environment secret only when the
+# caller names it (actions/runner#1490), so build-release.yml forwards the
+# four names; the value itself comes from this job's environment.
+# This job checks out nothing and runs no project code: it downloads the
+# published files, zips them and uploads the zip, with the server's host key
+# pinned below.
+#
+# It never fails the release: a missing login is a warning, a failed upload
+# an error annotation and a job summary line, and the run stays green.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      installed_artifact:
+        description: "Name of this run's artifact holding the installed-layout exe"
+        required: false
+        type: string
+        default: ""
+    secrets:
+      AVAST_SFTP_HOST:
+        required: false
+      AVAST_SFTP_PORT:
+        required: false
+      AVAST_SFTP_USER:
+        required: false
+      AVAST_SFTP_PASSWORD:
+        required: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to send, e.g. v1.8.29"
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    environment: release
+    # Reads the public release files; nothing else.
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    env:
+      TAG: ${{ inputs.tag }}
+      CONTACT: ryan.murphy@brightlink.io
+    steps:
+      - name: Check the tag and the login
+        id: pre
+        env:
+          H: ${{ secrets.AVAST_SFTP_HOST }}
+          P: ${{ secrets.AVAST_SFTP_PORT }}
+          U: ${{ secrets.AVAST_SFTP_USER }}
+          W: ${{ secrets.AVAST_SFTP_PASSWORD }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error title=Avast upload::'$TAG' is not a release tag"
+            exit 1
+          fi
+          if [[ -n "$H" && -n "$P" && -n "$U" && -n "$W" ]]; then
+            echo "READY=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "READY=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Avast upload skipped::The AVAST_SFTP_* secrets are not all set on the release environment"
+            echo "Avast upload skipped for $TAG: the login is not set on the release environment." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Download the release files
+        if: ${{ steps.pre.outputs.READY == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p in
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.exe' --dir in
+          ls -l in
+
+      # Only a call from build-release.yml has it: the exe the installer lays
+      # down is not a release asset. A by-hand run sends the release files only.
+      - name: Download the installed exe
+        if: ${{ steps.pre.outputs.READY == 'true' && inputs.installed_artifact }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.installed_artifact }}
+          path: installed
+
+      # The installer ships under three names with identical bytes: one copy each.
+      - name: Zip the files
+        id: pack
+        if: ${{ steps.pre.outputs.READY == 'true' }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p pack
+          declare -A seen
+          echo "| File | Bytes | SHA-256 |" > files.md
+          echo "|---|---|---|" >> files.md
+          for f in in/*.exe installed/*.exe; do
+            h=$(sha256sum "$f" | cut -d' ' -f1)
+            [[ -n "${seen[$h]:-}" ]] && continue
+            seen[$h]=1
+            name=$(basename "$f")
+            [[ -e "pack/$name" ]] && name="installed-$name"
+            cp "$f" "pack/$name"
+            echo "| $name | $(stat -c%s "$f") | $h |" >> files.md
+          done
+          if [[ ${#seen[@]} -eq 0 ]]; then echo "::error title=Avast upload::no exe found for $TAG"; exit 1; fi
+          {
+            echo "BrightLink Echo $TAG, Windows dictation app."
+            echo "Publisher: BRIGHTLINK (OS) LTD (UK company 17459281)."
+            echo "Every exe is Authenticode-signed with that subject through Microsoft Azure Artifact Signing."
+            echo "Release page: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
+            echo "Contact: $CONTACT"
+          } > pack/README.txt
+          zip_name="BrightLink-Echo-${TAG}-run${GITHUB_RUN_ID}-${CONTACT}.zip"
+          (cd pack && zip -q -X -r "../$zip_name" .)
+          echo "ZIP=$zip_name" >> "$GITHUB_OUTPUT"
+          cat files.md
+
+      - name: Upload to Avast
+        id: up
+        if: ${{ steps.pre.outputs.READY == 'true' }}
+        continue-on-error: true
+        env:
+          H: ${{ secrets.AVAST_SFTP_HOST }}
+          P: ${{ secrets.AVAST_SFTP_PORT }}
+          U: ${{ secrets.AVAST_SFTP_USER }}
+          # sshpass -e reads the password from SSHPASS: never on a command line.
+          SSHPASS: ${{ secrets.AVAST_SFTP_PASSWORD }}
+          ZIP: ${{ steps.pack.outputs.ZIP }}
+        run: |
+          set -uo pipefail
+          sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq sshpass >/dev/null
+          if [[ "$H" != "whitelisting.avast.com" || "$P" != "22" ]]; then
+            echo "::error title=Avast upload::the saved server or port is not Avast's whitelisting.avast.com:22"
+            exit 1
+          fi
+          # whitelisting.avast.com host keys, read with ssh-keyscan 2026-11-04 (OpenSSH_9.9).
+          # SHA256 fingerprints: ED25519 hP2dCqx93v8BtjgqJyxd8WAjNehdMCJAdJIXu5whtBo,
+          # ECDSA Ut4TbnhdcoF6r74bfn844qY917yrvNURu5zlxwk+sOE, RSA MsA74Z64EuYWTx9NomTt2Hy5yOS3yOWrQtT2YcDg3WA.
+          # A changed key refuses the upload: re-read it and check with Avast before updating these.
+          kh="$RUNNER_TEMP/avast_known_hosts"
+          cat > "$kh" <<'KEYS'
+          whitelisting.avast.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDCZV8IQoy56zwJAowPG7v79vwmWPGI269MYLV1ipyxn
+          whitelisting.avast.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBJ40OBHpnuq02CSbiJZxIyfSSc7pHVdOrLsdLI2x/PJ9TcKcg8CAPjJO3dibx3f5BXdFI0gmYbRGj8L2/fymH18=
+          whitelisting.avast.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDq4rdT00tp589y/crwxmN3lQj51B4lIaScwmUTbH6Qh2OCDds4/1em9aFBXS6pzmUCw1igLJP6bH8n4v2IM9C7jzKMgrQkJnOgy93T3/LMON4/IQFwX9OqatFNH1G2pM5q1rmQGfmfThbNMqV3/XsRFoWQdufx/SCUV6CDgp+7twFeKFF8A6JhSQKW0nHvB0hn3xnp01D/LPh0xKzrdYY6pD1aDkB26WvWj7f6TsV/YqsJewBfHq8WgQaXJN76OfZdjMIOu+MltSV5jsScCLOl1WrJkcjTtSQHFrRftQOVefLud9i2LRcU0qblNxdOo9TlmJGQ1MCkHyjtLmvUks7EsAC9yr0FSC1nFef9Uiv9CkJN90ehjX5JSSK2A2E/W+nKx4VjV1gw3BPX7GNh6Nitct/X/quO8DEgQSs56W6u/bDj4JfmTmc8NE5viKB3BhU3dcrCwKjvpCu90g72q3B3JYmUTAv7aoQapKyGd1ly0tH86HOIh3T1d1/S8rRNPJU=
+          KEYS
+          sed -i 's/^ *//' "$kh"
+          size=$(stat -c%s "$ZIP")
+          # '-ls' : a drop-box folder may refuse listing; that must not undo a good put.
+          printf 'cd data\nput "%s"\n-ls -l "%s"\n' "$ZIP" "$ZIP" > "$RUNNER_TEMP/batch"
+          for i in 1 2 3; do
+            out=$(sshpass -e sftp -oBatchMode=no -oStrictHostKeyChecking=yes \
+                    -oUserKnownHostsFile="$kh" -oGlobalKnownHostsFile=/dev/null \
+                    -oPubkeyAuthentication=no -oPreferredAuthentications=password,keyboard-interactive \
+                    -oConnectTimeout=30 -P "$P" -b "$RUNNER_TEMP/batch" "$U@$H" 2>&1)
+            rc=$?
+            echo "$out"
+            if [[ $rc -eq 0 ]]; then
+              remote=$(echo "$out" | awk -v z="$ZIP" '$NF==z {print $5}' | tail -1)
+              if [[ "$remote" == "$size" ]]; then
+                echo "VERIFIED=size matches ($size bytes)" >> "$GITHUB_OUTPUT"; exit 0
+              elif [[ -z "$remote" ]]; then
+                echo "VERIFIED=uploaded; the server does not list its folder" >> "$GITHUB_OUTPUT"; exit 0
+              fi
+              echo "attempt $i: server holds $remote bytes, expected $size"
+            else
+              case $rc in
+                5) echo "attempt $i: Avast refused the username or password"; exit 1 ;;
+                6) echo "attempt $i: Avast's host key is not the pinned one"; exit 1 ;;
+                *) echo "attempt $i failed (exit $rc)" ;;
+              esac
+            fi
+            sleep $((i * 20))
+          done
+          exit 1
+
+      - name: Report
+        if: ${{ always() && steps.pre.outputs.READY == 'true' }}
+        env:
+          OUTCOME: ${{ steps.up.outcome }}
+          VERIFIED: ${{ steps.up.outputs.VERIFIED }}
+          ZIP: ${{ steps.pack.outputs.ZIP }}
+        run: |
+          if [[ "$OUTCOME" == "success" ]]; then
+            echo "### Sent $TAG to Avast for whitelisting" >> "$GITHUB_STEP_SUMMARY"
+            echo "$ZIP: $VERIFIED. Avast, AVG, Norton and Avira normally process it within 24 hours." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error title=Avast upload failed::$TAG was NOT sent to Avast. See the Upload to Avast step; rerun this workflow with tag $TAG once fixed."
+            echo "### Avast upload FAILED for $TAG" >> "$GITHUB_STEP_SUMMARY"
+            echo "Rerun 'Send a release to Avast for whitelisting' with tag $TAG once fixed." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          [[ -f files.md ]] && cat files.md >> "$GITHUB_STEP_SUMMARY" || true

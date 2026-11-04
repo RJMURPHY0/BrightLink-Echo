@@ -96,6 +96,8 @@ jobs:
     permissions:
       contents: write
       id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
 
     # VT_API_KEY is NOT job-wide: every step and action here would see it. A
     # step `if` cannot read `secrets`, so "Check for a VirusTotal key" exposes
@@ -531,3 +533,34 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "could not label $name" }
             Write-Host "$name  ->  $label"
           }
+
+      # The exe the installer lays down is not a release asset, so the Avast
+      # job below gets it from this run. One day is enough: that job runs next.
+      - name: Keep the installed exe for Avast
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: avast-installed-exe
+          path: dist/${{ steps.version.outputs.DIST_DIR }}/${{ steps.version.outputs.DIST_EXE }}
+          if-no-files-found: error
+          retention-days: 1
+
+  # Sends every published release to Avast's Whitelisting Program (Avast, AVG,
+  # Norton, Avira): avast-whitelist.yml. Runs after publishing, so it can never
+  # hold a release back. The four secrets are forwarded by NAME only: this job
+  # has no environment, so they are empty here; the called job's `release`
+  # environment supplies the values (actions/runner#1490).
+  avast-whitelist:
+    needs: build-windows
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/avast-whitelist.yml
+    with:
+      tag: v${{ needs.build-windows.outputs.version }}
+      installed_artifact: avast-installed-exe
+    secrets:
+      AVAST_SFTP_HOST: ${{ secrets.AVAST_SFTP_HOST }}
+      AVAST_SFTP_PORT: ${{ secrets.AVAST_SFTP_PORT }}
+      AVAST_SFTP_USER: ${{ secrets.AVAST_SFTP_USER }}
+      AVAST_SFTP_PASSWORD: ${{ secrets.AVAST_SFTP_PASSWORD }}

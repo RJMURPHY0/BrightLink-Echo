@@ -52,6 +52,22 @@ that matter most for reach:
   hitting reputation (CyberCapture on a rare new file) or the Behaviour Shield
   (global hotkey + mic + simulated paste), both before Echo can report anything.
   Whitelisting fixes both; a static false-positive report does not.
+  **Status (2026-11-04):** accepted 2026-10-28 (SFTP account `ftp_brightlinkio`,
+  emailed to ryan.murphy@brightlink.io). Every published release now goes to Avast
+  automatically: `build-release.yml` calls `.github/workflows/avast-whitelist.yml`
+  after publishing, which zips the distinct release exes plus the installed
+  `BrightLink Echo.exe`, names the zip with our contact email and uploads it into
+  the server's `data` folder (Avast's guide, support.avast.com/en-ww/article/160,
+  Whitelisting tab). The login lives only as `AVAST_SFTP_HOST/PORT/USER/PASSWORD`
+  secrets on the `release` environment (main, release/*, v* tags; never a repo-wide
+  secret, never in the signing job); the server's host key is pinned in the
+  workflow. A missing login or failed upload never blocks a release: it shows as an
+  annotation and a job-summary line. To send an older release: Actions, "Send a
+  release to Avast for whitelisting", Run workflow, tag `vX.Y.Z` (release files
+  only; the installed exe comes only from the release run). New password from
+  Avast: Key Drop, Replace on `AVAST_SFTP_PASSWORD`, then set the `release`
+  environment secret again. Avast sends no confirmation; to check, update Avast's
+  definitions and scan the release files.
 - **Any other AV that flagged it** — each has its own false-positive form:
   - Avast/AVG single file (only if not whitelisted yet): <https://www.avast.com/false-positive-file-form.php>
   - Bitdefender: <https://www.bitdefender.com/consumer/support/answer/29358/>
