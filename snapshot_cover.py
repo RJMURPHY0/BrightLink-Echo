@@ -36,7 +36,6 @@ _SW_SHOWNOACTIVATE = 4
 _PW_CLIENTONLY = 0x1
 _PW_RENDERFULLCONTENT = 0x2
 _ULW_ALPHA = 0x2
-_ULW_OPAQUE = 0x4
 _SRCCOPY = 0x00CC0020
 
 _api = None
@@ -64,6 +63,14 @@ class _Blend(ctypes.Structure):
     _fields_ = [("BlendOp", ctypes.c_ubyte), ("BlendFlags", ctypes.c_ubyte),
                 ("SourceConstantAlpha", ctypes.c_ubyte),
                 ("AlphaFormat", ctypes.c_ubyte)]
+
+
+def _opaque_blend() -> "_Blend":
+    """AC_SRC_OVER at constant alpha 255 with NO per-pixel alpha
+    (AlphaFormat 0): the picture replaces what is under it, whatever its
+    alpha bytes hold. Every UpdateLayeredWindow on the cover uses this one
+    mode (see SnapshotCover._refresh for the bug a second mode caused)."""
+    return _Blend(0, 0, 255, 0)
 
 
 def _load():
@@ -198,7 +205,7 @@ def _push(hwnd: int, shot) -> bool:
         if not bmp or not bits.value:
             return False
         ctypes.memmove(bits.value, bytes(pixels), len(pixels))
-        blend = _Blend(0, 0, 255, 1)              # AC_SRC_OVER, AC_SRC_ALPHA
+        blend = _opaque_blend()       # the same mode refresh() shows in
         return bool(u32.UpdateLayeredWindow(
             hwnd, screen_dc, ctypes.byref(W.POINT(x, y)),
             ctypes.byref(W.SIZE(w, h)), mem_dc,
@@ -334,16 +341,27 @@ class SnapshotCover:
             u32.ReleaseDC(top_hwnd, win_dc)
         # Only the copied part goes to DWM (prcDirty); the rest of the
         # cover keeps the pixels it already has.
+        # Shown with a CONSTANT alpha of 255 and no per-pixel alpha, never
+        # ULW_OPAQUE: the cover was created per-pixel (_push) and DWM kept
+        # that mode, so ULW_OPAQUE was ignored and the BitBlt copy's alpha
+        # bytes (0) made the cover ADD its pixels onto the page under it:
+        # orange turned yellow, greys lightened, every row showed twice
+        # while scrolling (Ryan, 2026-11-04; measured (243,146,0) on the
+        # screen before refresh, (255,255,0) after). _opaque_blend() ignores
+        # the alpha bytes whatever mode the window was in.
         dirty = W.RECT(x, y, x + cw, y + ch)
+        blend = _opaque_blend()
         info = _ULWInfo(ctypes.sizeof(_ULWInfo), None, ctypes.pointer(origin),
                         ctypes.pointer(W.SIZE(w, h)), mem_dc,
-                        ctypes.pointer(W.POINT(0, 0)), 0, None, _ULW_OPAQUE,
-                        ctypes.pointer(dirty))
+                        ctypes.pointer(W.POINT(0, 0)), 0,
+                        ctypes.cast(ctypes.pointer(blend), ctypes.c_void_p),
+                        _ULW_ALPHA, ctypes.pointer(dirty))
         if u32.UpdateLayeredWindowIndirect(self._hwnd, ctypes.byref(info)):
             return True
         return bool(u32.UpdateLayeredWindow(
             self._hwnd, None, ctypes.byref(origin), ctypes.byref(W.SIZE(w, h)),
-            mem_dc, ctypes.byref(W.POINT(0, 0)), 0, None, _ULW_OPAQUE))
+            mem_dc, ctypes.byref(W.POINT(0, 0)), 0, ctypes.byref(blend),
+            _ULW_ALPHA))
 
     def picture(self):
         """(w, h, BGRA bytes) of what the cover shows since its last

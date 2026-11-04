@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.join(REPO, "tools"))
 os.chdir(REPO)
 
 SCREEN = "--screen" in sys.argv
+_ONLY = [a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--only=")]
 SURFACE = "--surface" in sys.argv
 _ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
 OUT = os.path.abspath(_ARGS[0]) if _ARGS else tempfile.mkdtemp(
@@ -56,8 +57,36 @@ import page_change_check as pcc  # noqa: E402  (its throwaway window runs first)
 import brand  # noqa: E402
 import config as config_mod  # noqa: E402
 import app_window as aw  # noqa: E402
-# Pages that scroll a ScrollPane of real widgets (History is one canvas).
-PAGES = ("settings", "hotkey", "learning")
+# Every page that scrolls a ScrollPane of real widgets (History is one
+# double-buffered canvas and never uses the cover). The library pages get
+# seeded rows (below) so they are long enough to scroll.
+PAGES = ("settings", "hotkey", "learning", "vocabulary", "snippets", "phrases")
+LIBRARY_PAGES = ("vocabulary", "snippets", "phrases")
+# --only=snippets,phrases re-checks some pages (e.g. after another Echo test
+# window was over this one: a --screen run sees whatever is on top).
+if _ONLY:
+    PAGES = tuple(p for p in PAGES if p in _ONLY[0].split(","))
+
+
+def _seed_rows(kind):
+    """Fake entries for a library page: enough rows to scroll well past
+    one screen, with real-looking text so a doubled row shows."""
+    rows = []
+    for i in range(40):
+        if kind == "vocabulary":
+            rows.append({"id": f"v{i}", "term": f"BrightLink term {i}",
+                         "sounds_like": [f"bright link {i}", f"brite link {i}"],
+                         "updated_at": f"2026-11-04T10:{i:02d}:00Z"})
+        elif kind == "snippets":
+            rows.append({"id": f"s{i}", "name": f"Sign-off {i}",
+                         "trigger": f"sign off {i}",
+                         "body": f"Kind regards, snippet body number {i} "
+                                 "with enough words to wrap onto two lines.",
+                         "updated_at": f"2026-11-04T10:{i:02d}:00Z"})
+        else:
+            rows.append({"phrase": f"a phrase you say often number {i}",
+                         "count": 40 - i})
+    return rows
 # A pixel differs if its grey level is off by more than this (anti-aliased
 # edges at a fractional offset stay well inside it)...
 _PIXEL_TOL = 24
@@ -83,6 +112,8 @@ def main() -> int:
     cfg.save_async = lambda *a, **k: None
     auth = pcc._FakeAuth()
     aw._input_idle_ms = lambda: 10 ** 6
+    aw.AppWindow._lib_entries = lambda self, kind: _seed_rows(kind)
+    aw.AppWindow._phrase_rows = lambda self: _seed_rows("phrases")
     orig_step = aw.AppWindow._scroll_step
     current = {"page": None}
 
@@ -142,6 +173,8 @@ def main() -> int:
         return box.get("v")
 
     def pane_of(page):
+        if page in LIBRARY_PAGES:
+            return win._lib_state(page)["pane"]
         return {"settings": win._settings_cv, "hotkey": win._hk_cv,
                 "learning": win._learning_cv}[page]
 
