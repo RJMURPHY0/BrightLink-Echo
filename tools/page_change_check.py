@@ -16,7 +16,9 @@ taskbar button, spoils the recording):
     venv\\Scripts\\python.exe tools\\page_change_check.py [out_dir]
 
 Exit 0 = every change was one frame. Exit 1 = a glitch (the report names the
-action and keeps the frames in out_dir). Exit 2 = the run itself failed.
+action and keeps the frames in out_dir). Exit 2 = the run itself failed, or
+was spoiled: another program's window covered the test window, or it was
+minimised (tools/_screen_guard.py), so the frames are not Echo's to judge.
 """
 
 import os
@@ -41,6 +43,8 @@ _d.destroy()
 import brand  # noqa: E402
 import config as config_mod  # noqa: E402
 import app_window as aw  # noqa: E402
+sys.path.insert(0, os.path.join(REPO, "tools"))
+import _screen_guard  # noqa: E402
 
 OUT = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else tempfile.mkdtemp(
     prefix="echo_page_check_", dir=os.path.join(REPO, os.pardir))
@@ -109,6 +113,7 @@ def main() -> int:
         [sys.executable, os.path.join(REPO, "tools", "_frame_capture.py"),
          OUT, brand.WINDOW_TITLE])
     failed = []
+    guard, spoiled = [], []
 
     def act(name, fn):
         def run():
@@ -127,6 +132,16 @@ def main() -> int:
             auth.sign_in_now()
             win._ui_after(0, win._login_ui._on_success, auth)
             time.sleep(1.5)
+            got = {}
+            ready = threading.Event()
+            win._ui_after(0, lambda: (got.update(h=win._top_hwnd()),
+                                      ready.set()))
+            if not ready.wait(10) or not got.get("h"):
+                failed.append("no window handle")
+                return
+            with open(os.path.join(OUT, "hwnd.txt"), "w") as fh:
+                fh.write(str(got["h"]))
+            guard.append(_screen_guard.ScreenGuard(got["h"]).start())
             open(os.path.join(OUT, "go.txt"), "w").close()
             # Long enough for every page to warm (one at a time).
             time.sleep(9.0)
@@ -143,6 +158,8 @@ def main() -> int:
             act("breakdown close", win._close_impact_detail)
             act("sign out", win._switch_to_login)
         finally:
+            if guard:
+                spoiled.extend(guard[0].stop())
             open(os.path.join(OUT, "stop.txt"), "w").close()
             win._ui_after(300, win._root.quit)
 
@@ -155,6 +172,12 @@ def main() -> int:
         failed.append("recorder did not finish")
     if failed:
         print("RUN FAILED:", "; ".join(failed))
+        return 2
+    if spoiled:
+        # The recording filmed another program, not Echo: no verdict.
+        print("RUN SPOILED:", _screen_guard.report(spoiled, actions[0][1]
+                                                    if actions else 0.0))
+        print("  Nothing judged. Re-run with nobody using the PC.")
         return 2
     return _report(win)
 

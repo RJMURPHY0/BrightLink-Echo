@@ -26,10 +26,18 @@ from ctypes import wintypes as W
 
 out, title = os.path.abspath(sys.argv[1]), sys.argv[2]
 pane = os.path.join(out, "pane.txt")
-if not os.path.exists(pane):
+if os.path.exists(pane):
+    with open(pane) as fh:
+        pane_hwnd, hwnd, on_screen = (int(v) for v in fh.read().split(","))
+else:
+    pane_hwnd, on_screen = 0, 1
+if on_screen:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)   # physical pixels
-# A pane is read in the same (unaware) pixels Echo's Tk draws in, so its
-# frames line up one to one with Tk's scroll offsets.
+# A pane read from the window's own surface is in the same (unaware) pixels
+# Echo's Tk draws in, so its frames line up one to one with Tk's scroll
+# offsets. A pane read from the SCREEN is read in physical pixels (the screen
+# holds Echo stretched by the display scale: reading the logical box there
+# took the wrong place at 150%, 4 Nov 2026) and scaled back to Tk's pixels.
 u32 = ctypes.WinDLL("user32")
 g32 = ctypes.WinDLL("gdi32")
 u32.FindWindowW.restype = W.HWND
@@ -64,9 +72,13 @@ while not os.path.exists(go):
     if time.time() > deadline:
         sys.exit(2)
     time.sleep(0.01)
-if os.path.exists(pane):
-    with open(pane) as fh:
-        pane_hwnd, hwnd, on_screen = (int(v) for v in fh.read().split(","))
+if pane_hwnd:
+    pass
+elif os.path.exists(os.path.join(out, "hwnd.txt")):
+    # page_change_check names its window: the installed Echo has the same
+    # title, and FindWindow may return that one instead.
+    with open(os.path.join(out, "hwnd.txt")) as fh:
+        hwnd = int(fh.read().strip())
 else:
     hwnd = u32.FindWindowW(None, title)
 if not hwnd:
@@ -76,11 +88,32 @@ rc = W.RECT()
 u32.GetClientRect(hwnd, ctypes.byref(rc))
 origin = W.POINT(0, 0)
 u32.ClientToScreen(hwnd, ctypes.byref(origin))
-if os.path.exists(pane):
+logical = None      # (w, h) to scale a screen read back to Tk's pixels
+if pane_hwnd:
     u32.GetWindowRect.argtypes = [W.HWND, ctypes.POINTER(W.RECT)]
     pr = W.RECT()
     u32.GetWindowRect(pane_hwnd, ctypes.byref(pr))
     w, h = pr.right - pr.left, pr.bottom - pr.top
+    if on_screen:
+        # Physical rect (we are DPI aware); the pane's own size in Tk's
+        # pixels comes from the window's DPI context.
+        u32.GetWindowDpiAwarenessContext.restype = ctypes.c_void_p
+        u32.GetWindowDpiAwarenessContext.argtypes = [W.HWND]
+        u32.GetAwarenessFromDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        ctx = u32.GetWindowDpiAwarenessContext(W.HWND(hwnd))
+        dpi = u32.GetAwarenessFromDpiAwarenessContext(ctx)
+        scale = 1.0
+        if dpi == 0:        # DPI_AWARENESS_UNAWARE: drawn at 96, stretched
+            u32.MonitorFromWindow.restype = W.HMONITOR
+            mon = u32.MonitorFromWindow(W.HWND(hwnd), 2)
+            mx, my = ctypes.c_uint(), ctypes.c_uint()
+            ctypes.windll.shcore.GetDpiForMonitor(mon, 0, ctypes.byref(mx),
+                                                  ctypes.byref(my))
+            scale = mx.value / 96.0
+        if abs(scale - 1.0) > 0.01:
+            logical = (round(w / scale), round(h / scale))
+            with open(os.path.join(out, "scaled.txt"), "w") as fh:
+                fh.write(f"{scale:.4f}")
     if on_screen:
         x0, y0 = pr.left, pr.top
         sdc = u32.GetDC(None)
@@ -116,6 +149,9 @@ while not os.path.exists(stop) and time.time() < deadline + 120:
 from PIL import Image  # noqa: E402  (after the hot loop on purpose)
 for i, (t, raw) in enumerate(frames):
     im = Image.frombuffer("RGBA", (w, h), raw, "raw", "BGRA", 0, 1).convert("L")
-    (im if full else im.resize((w // 2, h // 2))).save(
-        os.path.join(out, f"f{i:05d}_{t:.4f}.png"))
+    if logical:
+        im = im.resize(logical, Image.BOX)
+    elif not full:
+        im = im.resize((w // 2, h // 2))
+    im.save(os.path.join(out, f"f{i:05d}_{t:.4f}.png"))
 print(f"[capture] {len(frames)} distinct frames", flush=True)

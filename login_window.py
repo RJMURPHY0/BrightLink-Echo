@@ -725,7 +725,10 @@ class LoginWindow:
 
     def _submit(self) -> None:
         if getattr(self, "_step_active", False):
-            self._verify_code()
+            if self._approve_view.winfo_manager():
+                self._verify_inline()
+            else:
+                self._verify_code()
             return
         if self._submitting:
             return
@@ -838,6 +841,7 @@ class LoginWindow:
 
     def _build_second_step(self, holder) -> None:
         self._step_active = False
+        self._step_finishing = False
         self._step_gen = 0
         self._step_methods: list = []
         self._chosen: Optional[dict] = None
@@ -894,23 +898,77 @@ class LoginWindow:
         self._approval_gen = 0
         self._approval_deadline = 0.0
         self._approval_job = None
+        # The authenticator app is the same Supabase factor in every
+        # BrightLink app, so its code box sits right here beside the number:
+        # whichever the person does first signs them in.
         self._approve_view = tk.Frame(self._step, bg=C["surface"])
+        tile_bg = C["bg"]
+        self._approve_tile = tk.Canvas(
+            self._approve_view, height=124, bg=C["surface"],
+            highlightthickness=0, bd=0)
+        tile_inner = tk.Frame(self._approve_tile, bg=tile_bg)
         self._approve_number = tk.Label(
-            self._approve_view, text="", fg=C["accent"], bg=C["surface"],
-            font=("Segoe UI", 44, "bold"))
-        self._approve_number.pack(pady=(0, 2))
+            tile_inner, text="", fg=C["accent"], bg=tile_bg,
+            font=("Segoe UI", 40, "bold"))
+        self._approve_number.pack(pady=(0, 0))
+        self._approve_caption = tk.Label(
+            tile_inner, text=f"Pick this number in {brand.CRM_NAME}",
+            fg=C["subtext"], bg=tile_bg, font=("Segoe UI", 9))
+        self._approve_caption.pack(pady=(0, 2))
+        tile_win = self._approve_tile.create_window(0, 0, window=tile_inner)
+
+        def _draw_tile(_e=None):
+            t = self._approve_tile
+            w, h = t.winfo_width(), t.winfo_height()
+            if w <= 1 or h <= 1:
+                return
+            t.delete("bg")
+            _round_rect(t, 1, 1, w - 1, h - 1, 14, fill=tile_bg,
+                        outline=C["card_border"], width=1, tags="bg")
+            t.tag_lower("bg")
+            t.coords(tile_win, w // 2, h // 2)
+        self._approve_tile.bind("<Configure>", _draw_tile)
+        self._approve_tile.pack(fill="x")
         self._approve_wait = tk.Label(
             self._approve_view, text="", fg=C["subtext"], bg=C["surface"],
             font=("Segoe UI", 9))
-        self._approve_wait.pack(pady=(0, 12))
+        self._approve_wait.pack(pady=(6, 12))
+        self._approve_open_btn = _RoundedButton(
+            self._approve_view, f"Open {brand.CRM_NAME}  ↗", self._open_crm,
+            bg=C["accent"], fg=C["bg"], hover=C["accent_hover"], height=46)
+        self._approve_open_btn.pack(fill="x")
         self._approve_again_btn = _RoundedButton(
             self._approve_view, "Ask again", self._start_approval,
             bg=C["accent"], fg=C["bg"], hover=C["accent_hover"], height=46)
+
+        # ── "or" + the authenticator code, shown when the account has one ──
+        self._approve_app = tk.Frame(self._approve_view, bg=C["surface"])
+        or_row = tk.Frame(self._approve_app, bg=C["surface"])
+        or_row.pack(fill="x", pady=(16, 12))
+        or_row.columnconfigure(0, weight=1)
+        or_row.columnconfigure(2, weight=1)
+        tk.Frame(or_row, bg=C["divider"], height=1).grid(
+            row=0, column=0, sticky="ew")
+        tk.Label(or_row, text="or", fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 9), padx=10).grid(row=0, column=1)
+        tk.Frame(or_row, bg=C["divider"], height=1).grid(
+            row=0, column=2, sticky="ew")
+        self._inline_label = self._field_label(
+            self._approve_app, "Code from your authenticator app")
+        self._inline_var = tk.StringVar()
+        inline_wrap, self._inline_entry, _ = self._rounded_field(
+            self._approve_app, self._inline_var)
+        inline_wrap.pack(fill="x", pady=(4, 0))
+        self._inline_var.trace_add("write", lambda *_a: self._clean_inline())
+
         self._approve_code_lbl = self._step_link(
             self._approve_view, "Type a code instead", self._approval_to_code)
-        self._approve_code_lbl.pack(pady=(0, 0))
-        self._step_link(self._approve_view, "Use a different account",
-                        self._use_other_account).pack(pady=(8, 0))
+        self._approve_other_lbl = self._step_link(
+            self._approve_view, "Use another way", self._show_picker)
+        self._approve_account_lbl = self._step_link(
+            self._approve_view, "Use a different account",
+            self._use_other_account)
+        self._approve_account_lbl.pack(pady=(8, 0))
 
         # ── Loading / load failed ──────────────────────────────────────
         self._load_view = tk.Frame(self._step, bg=C["surface"])
@@ -935,6 +993,7 @@ class LoginWindow:
         if not hasattr(self, "_step"):
             return
         self._step_active = True
+        self._step_finishing = False
         self._seg.pack_forget()
         self._card.pack_forget()
         self._status_frame.pack_forget()
@@ -1187,6 +1246,8 @@ class LoginWindow:
         self._approve_number.configure(text=" ", fg=C["accent"])
         self._approve_wait.configure(text=" ", fg=C["subtext"])
         self._approve_again_btn.pack_forget()
+        self._approve_open_btn.pack(fill="x", after=self._approve_wait)
+        self._layout_approve_options()
         self._show_view(self._approve_view)
 
         def _done(result):
@@ -1211,20 +1272,121 @@ class LoginWindow:
             self._approval_deadline = (_t.monotonic()
                                        + int(result["expiresInSeconds"]))
             self._step_prompt.configure(
-                text=f"Open {brand.CRM_NAME} and pick this number to "
-                     f"approve the sign-in.")
+                text=(f"Approve in {brand.CRM_NAME}, or type the code from "
+                      f"your authenticator app.")
+                if self._app_method() else
+                f"Open {brand.CRM_NAME} and pick this number to approve "
+                f"the sign-in.")
             self._approve_number.configure(text=str(result["number"]))
             self._show_approval_wait()
             self._sync_height()
+            if self._app_method():
+                self._focus_inline()
             self._schedule_approval_poll(gen)
 
         self._in_background(self._auth.request_approval, _done)
+
+    def _app_method(self) -> Optional[dict]:
+        """The account's authenticator app, if it has one."""
+        for m in getattr(self, "_step_methods", None) or []:
+            if m.get("kind") == "app":
+                return m
+        return None
+
+    def _layout_approve_options(self) -> None:
+        """Code box when there is an authenticator app, else a link to the
+        typed-code page; "Use another way" when anything else is left."""
+        app = self._app_method()
+        self._inline_var.set("")
+        self._inline_label.configure(text="Code from your authenticator app",
+                                     fg=C["subtext"])
+        for w in (self._approve_app, self._approve_code_lbl,
+                  self._approve_other_lbl):
+            w.pack_forget()
+        if app:
+            self._approve_app.pack(fill="x", before=self._approve_account_lbl)
+            if any(m is not app for m in self._step_methods):
+                self._approve_other_lbl.pack(
+                    pady=(12, 0), before=self._approve_account_lbl)
+        elif self._step_methods:
+            self._approve_code_lbl.pack(
+                pady=(12, 0), before=self._approve_account_lbl)
+            if len(self._step_methods) > 1:
+                self._approve_other_lbl.pack(
+                    pady=(4, 0), before=self._approve_account_lbl)
+        self._approve_account_lbl.pack_configure(
+            pady=(4 if self._approve_other_lbl.winfo_manager()
+                  or self._approve_code_lbl.winfo_manager() else 12, 0))
+
+    def _open_crm(self) -> None:
+        """Open BrightLink in the browser: any signed-in page shows the
+        request card."""
+        import webbrowser
+        try:
+            webbrowser.open(brand.CRM_URL)
+        except Exception as exc:
+            print(f"[Login] could not open {brand.CRM_URL}: {exc}")
+            self._set_step_status(f"Could not open {brand.CRM_NAME}. "
+                                  f"Go to {brand.CRM_URL}")
+
+    def _focus_inline(self) -> None:
+        try:
+            self._root.after(40, self._inline_entry.focus_set)
+        except tk.TclError:
+            pass
+
+    def _clean_inline(self) -> None:
+        import mfa
+        raw = self._inline_var.get()
+        clean = mfa.clean_code("app", raw)
+        if clean != raw:
+            # Tk does not re-run a trace from inside itself, so carry on.
+            self._inline_var.set(clean)
+        # Six digits is the whole code: check it straight away.
+        if mfa.code_ready("app", clean) and not self._verifying:
+            self._verify_inline()
+
+    def _verify_inline(self) -> None:
+        """Check the authenticator code typed beside the number. The request
+        keeps waiting meanwhile, so approving in BrightLink still works."""
+        import mfa
+        method = self._app_method()
+        if self._verifying or method is None:
+            return
+        code = self._inline_var.get()
+        if not mfa.code_ready("app", code):
+            self._set_step_status("Enter the six-digit code.")
+            return
+        self._verifying = True
+        self._set_step_status("")
+        self._inline_label.configure(text="Checking…", fg=C["subtext"])
+
+        def _done(result):
+            self._verifying = False
+            ok, msg = result if isinstance(result, tuple) else \
+                (False, mfa.NOT_ACCEPTED)
+            if ok:
+                self._stop_approval()
+                self._approve_wait.configure(text="✓  Signed in",
+                                             fg=C["success"])
+                self._inline_label.configure(text="Code accepted",
+                                             fg=C["success"])
+                self._step_done(msg, quiet=True)
+                return
+            self._inline_label.configure(
+                text="Code from your authenticator app", fg=C["subtext"])
+            self._set_step_status(msg or mfa.NOT_ACCEPTED)
+            self._inline_var.set("")
+            self._focus_inline()
+
+        self._in_background(
+            lambda: self._auth.verify_second_step(method, code), _done)
 
     def _show_approval_wait(self) -> None:
         import time as _t
         left = max(0, int(self._approval_deadline - _t.monotonic()))
         self._approve_wait.configure(
-            text=f"Waiting for approval, {left // 60}:{left % 60:02d} left",
+            text=f"Waiting for approval · {left // 60}:{left % 60:02d} left",
             fg=C["subtext"])
 
     def _schedule_approval_poll(self, gen: int) -> None:
@@ -1289,8 +1451,8 @@ class LoginWindow:
         self._approve_number.configure(fg=C["divider"])
         self._approve_wait.configure(text=" ")
         self._set_step_status(msg)
-        self._approve_again_btn.pack(fill="x", pady=(0, 10),
-                                     before=self._approve_code_lbl)
+        self._approve_open_btn.pack_forget()
+        self._approve_again_btn.pack(fill="x", after=self._approve_wait)
         self._sync_height()
 
     def _stop_approval(self) -> None:
@@ -1309,11 +1471,20 @@ class LoginWindow:
         if self._step_methods:
             self._choose(self._step_methods[0])
 
-    def _step_done(self, note: str, via_approval: bool = False) -> None:
-        """Signed in: say so on the button, then hand over like a sign-in."""
-        if not self._auth.is_authenticated:
+    def _step_done(self, note: str, via_approval: bool = False,
+                   quiet: bool = False) -> None:
+        """Signed in: say so on the button, then hand over like a sign-in.
+        `quiet`: the caller already said so on the page it is showing."""
+        if not self._auth.is_authenticated or self._step_finishing:
             return
+        # The approval and the code beside it can both land: hand over once.
+        self._step_finishing = True
         self._cancel_resend_timer()
+        if quiet:
+            if note:
+                self._set_step_status(note, error=False)
+            self._root.after(2500 if note else 700, self._finish)
+            return
         if via_approval:
             self._approve_number.configure(fg=C["success"])
             self._approve_wait.configure(text="✓  Approved, signing you in",

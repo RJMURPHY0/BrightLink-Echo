@@ -93,6 +93,12 @@ _PIXEL_TOL = 24
 # ...and a frame is a glitch when more than this share of pixels differ from
 # the best-matching slice of its page (a blinking caret is ~0.005%).
 _FRAME_TOL = 0.002
+# A screen at a display scale above 100% holds Echo (DPI-unaware) stretched;
+# the recorder scales it back (scaled.txt in the page folder) and that
+# resampling alone leaves ~2.5% of pixels past _PIXEL_TOL on text edges.
+# Both sides then get this box blur first: clean frames measure <=0.07%,
+# a 20px tear still ~9% and the 1.8.29 add-blend ~80% (4 Nov 2026).
+_SOFT_RADIUS = 1
 
 log = []          # (page, phase, perf_counter, detail)
 refs = {}         # page -> [(top, grey array)] read from the settled window
@@ -215,7 +221,8 @@ def main() -> int:
             return
         sub = os.path.join(OUT, page)
         os.makedirs(sub, exist_ok=True)
-        cap = None
+        cap = guard = None
+        t_go = time.perf_counter()
         if SCREEN or SURFACE:
             with open(os.path.join(sub, "pane.txt"), "w") as fh:
                 fh.write(f"{pane_hwnd},{hwnd},{int(SCREEN)}")
@@ -223,6 +230,8 @@ def main() -> int:
                 [sys.executable, os.path.join(REPO, "tools", "_frame_capture.py"),
                  sub, brand.WINDOW_TITLE])
             time.sleep(0.3)
+            if SCREEN:      # the screen is filmed: nothing else may be on it
+                guard = pcc._screen_guard.ScreenGuard(hwnd, pane_hwnd).start()
             open(os.path.join(sub, "go.txt"), "w").close()
             time.sleep(0.5)
         # 1. Reference: slow stops a third of a viewport apart.
@@ -262,6 +271,12 @@ def main() -> int:
             time.sleep(0.016)
         time.sleep(0.5)
         mark(page, "end")
+        if guard is not None:
+            spoiled = guard.stop()
+            if spoiled:
+                failed.append(f"{page}: run spoiled, nothing judged ("
+                              + pcc._screen_guard.report(spoiled, t_go)
+                              + "); re-run with nobody using the PC")
         if cap is not None:
             open(os.path.join(sub, "stop.txt"), "w").close()
             try:
@@ -324,17 +339,31 @@ def _frames(sub):
     return out
 
 
-def _match(ref, prof, a):
+def _soft(a):
+    import numpy as np
+    from PIL import Image, ImageFilter
+    return np.asarray(Image.fromarray(a.clip(0, 255).astype(np.uint8))
+                      .filter(ImageFilter.BoxBlur(_SOFT_RADIUS)), dtype=np.int16)
+
+
+def _match(ref, prof, a, soft=False):
     """(share of pixels off, offset) of the slice of `ref` that `a` matches
-    best. Row averages pick the candidates, full pixels decide."""
+    best. Row averages pick the candidates, full pixels decide. `soft`
+    compares both through _soft (a screen read scaled back)."""
     import numpy as np
     h = a.shape[0]
+    if soft:
+        # Library pages repeat near-identical rows ("Sign-off 6", "Sign-off
+        # 10"): resampled row averages can rank a look-alike slice above
+        # the true one, so more candidates go to the full-pixel check.
+        a = _soft(a)
     fp = a.mean(axis=1)
     ssd = np.array([np.square(prof[y:y + h] - fp).sum()
                     for y in range(len(prof) - h + 1)])
     best, best_y = 1.0, 0
-    for y in np.argsort(ssd)[:8]:
-        frac = float((np.abs(ref[y:y + h] - a) > _PIXEL_TOL).mean())
+    for y in np.argsort(ssd)[:48 if soft else 8]:
+        r = _soft(ref[y:y + h]) if soft else ref[y:y + h]
+        frac = float((np.abs(r - a) > _PIXEL_TOL).mean())
         if frac < best:
             best, best_y = frac, int(y)
     return best, best_y
@@ -354,7 +383,7 @@ def _shown_frames(page):
     return out
 
 
-def _judge(page, label, frames, ref, prof, phases, sub) -> int:
+def _judge(page, label, frames, ref, prof, phases, sub, soft=False) -> int:
     """Print one line per phase; returns how many phases showed a glitch."""
     import numpy as np
     from PIL import Image
@@ -364,7 +393,7 @@ def _judge(page, label, frames, ref, prof, phases, sub) -> int:
         inside = [(tt, f, a) for tt, f, a in frames if t0 <= tt < t1]
         glitches = []
         for _tt, f, a in inside:
-            frac, y = _match(ref, prof, a)
+            frac, y = _match(ref, prof, a, soft)
             if frac > _FRAME_TOL:
                 glitches.append((frac, f, y, a))
         worst = max((g[0] for g in glitches), default=0.0)
@@ -414,7 +443,13 @@ def _report(result) -> int:
         prof = ref.mean(axis=1)
         phases = [(ph, t) for p, ph, t, _d in log if p == page]
         if SCREEN:      # the screen itself is the verdict
-            bad += _judge(page, "screen", _frames(sub), ref, prof, phases, sub)
+            soft = os.path.exists(os.path.join(sub, "scaled.txt"))
+            if soft:
+                prof = _soft(ref).mean(axis=1)
+                print(f"  {page:9s} screen read at a display scale, scaled "
+                      f"back and compared through a {_SOFT_RADIUS}px blur")
+            bad += _judge(page, "screen", _frames(sub), ref, prof, phases,
+                          sub, soft)
         else:
             # What the screen showed: the cover's pictures...
             bad += _judge(page, "shown", _shown_frames(page), ref, prof,

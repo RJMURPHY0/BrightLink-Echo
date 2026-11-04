@@ -569,6 +569,66 @@ class CodePageTests(unittest.TestCase):
         a.request_approval.assert_called_once()
         self.assertEqual("pack", lw._approve_view.winfo_manager())
         self.assertEqual("47", lw._approve_number.cget("text"))
+        self.assertIn("Pick this number", lw._approve_caption.cget("text"))
+        self.assertIn("authenticator app", lw._step_prompt.cget("text"))
+        # The authenticator code box sits beside the number.
+        self.assertEqual("pack", lw._approve_app.winfo_manager())
+        self.assertEqual("", lw._approve_code_lbl.winfo_manager())
+        self.assertEqual("pack", lw._approve_open_btn.winfo_manager())
+
+    def test_authenticator_code_beside_the_number_signs_in(self):
+        a = self._approving()
+        lw, done = self._page(a)
+        lw.show_second_step()
+
+        def ok(method, code):
+            self.assertEqual("f-app", method["factorId"])
+            self.assertEqual("123456", code)
+            a.is_authenticated = True
+            a.needs_second_step = False
+            return True, ""
+        a.verify_second_step.side_effect = ok
+        lw._inline_var.set("123 456")          # six digits checks at once
+        a.verify_second_step.assert_called_once()
+        self.assertEqual([a], done)
+        self.assertIsNone(lw._approval)        # stopped asking
+
+    def test_a_wrong_authenticator_code_keeps_the_request_waiting(self):
+        a = self._approving()
+        lw, done = self._page(a)
+        lw.show_second_step()
+        a.verify_second_step.return_value = (False, mfa.NOT_ACCEPTED)
+        lw._inline_var.set("000000")
+        self.assertEqual(mfa.NOT_ACCEPTED, lw._step_status.cget("text"))
+        self.assertEqual("", lw._inline_var.get())
+        self.assertIsNotNone(lw._approval)     # approving still works
+        self.assertEqual([], done)
+
+    def test_approval_and_code_landing_together_hand_over_once(self):
+        a = self._approving()
+        lw, done = self._page(a)
+        lw.show_second_step()
+        a.is_authenticated = True
+        lw._step_done("", via_approval=True)
+        lw._step_done("", quiet=True)
+        self.assertEqual([a], done)
+
+    def test_open_brightlink_opens_the_web_app(self):
+        import brand
+        a = self._approving()
+        lw, _ = self._page(a)
+        lw.show_second_step()
+        with mock.patch("webbrowser.open") as wb:
+            lw._open_crm()
+        wb.assert_called_once_with(brand.CRM_URL)
+
+    def test_no_authenticator_app_offers_type_a_code_link(self):
+        a = self._approving([{"factorId": "f-sms", "kind": "sms",
+                              "destination": "+44 ••• 123"}])
+        lw, _ = self._page(a)
+        lw.show_second_step()
+        self.assertEqual("", lw._approve_app.winfo_manager())
+        self.assertEqual("pack", lw._approve_code_lbl.winfo_manager())
         self.assertIn("pick this number", lw._step_prompt.cget("text"))
 
     def test_approved_signs_in_and_hands_over(self):

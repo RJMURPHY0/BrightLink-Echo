@@ -51,3 +51,10 @@ Moved verbatim from CLAUDE.md on 2026-09-29. Add new decisions as a dated entry 
 - The approval view comes first after the password; "Type a code instead" and "Use another way" keep every typed method. The claim that collects the answer lives in memory only: never on disk, never in a log (pinned by a test).
 - Quiet fallback to typed codes when approvals cannot work for this person: `sharing_off`, `no_server_factor`, or a 400 with no reason code (a web app without the actions answers "Unknown action"). A 429 shows its text and keeps the option. A dropped connection keeps polling until the request runs out.
 - Proved live on a throwaway account with an authenticator and backup codes (deleted after): wrong number refused, turned down refused, pending before the answer, approved signs Echo in at aal2, an answer is collected once, claim not on disk, and the real code page signs in when the web app approves.
+
+## 2026-11-04: Number and authenticator code on one page
+
+- Ryan: the approval page should look better, link straight to BrightLink, and let the authenticator app code work there too. The authenticator is one Supabase TOTP factor per account, so the same code already signs in to BrightLink and Echo; it was only hidden behind "Type a code instead".
+- The approval view now shows the number in a rounded tile ("Pick this number in BrightLink"), the countdown, an orange "Open BrightLink" button (opens `brand.CRM_URL`; any signed-in page shows the request card), then "or" and the authenticator code box. Six digits check at once (Enter too), while the request keeps waiting, so whichever lands first signs in; `_step_finishing` makes sure the hand-over runs once.
+- Accounts with no authenticator keep "Type a code instead". "Use another way" shows when any other method is left. A turned-down or timed-out request swaps the Open button for "Ask again" and keeps the code box.
+- Guarded by `tests/test_two_factor.py` (inline code signs in, wrong code keeps waiting, both landing hand over once, Open BrightLink, no-app link).
