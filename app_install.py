@@ -586,7 +586,32 @@ def retarget_legacy_links(exe: str) -> list:
 
 
 def notification_icon_path() -> str:
-    return os.path.join(_install_dir(), "notification-icon.png")
+    """Named by the icon's revision, so a new icon design is rendered afresh
+    on its first launch instead of the old picture living on."""
+    import logo_cache
+
+    return os.path.join(_install_dir(), f"notification-icon-{logo_cache.ICON_REV}.png")
+
+
+def _refresh_shell_icons(current: str) -> None:
+    """After an icon change: drop older notification icons and ask Explorer to
+    reload its icon cache, so pinned and desktop shortcuts pick up the new exe
+    icon now rather than after a reboot."""
+    import glob
+
+    for old in glob.glob(os.path.join(_install_dir(), "notification-icon*.png")):
+        if os.path.normcase(old) != os.path.normcase(current):
+            try:
+                os.remove(old)
+            except OSError as e:
+                print(f"[Install] Old notification icon kept: {e}")
+    try:
+        import ctypes
+
+        shell32 = ctypes.WinDLL("shell32")
+        shell32.SHChangeNotify(0x08000000, 0x0000, None, None)  # SHCNE_ASSOCCHANGED
+    except Exception as e:
+        print(f"[Install] Icon cache refresh skipped: {e}")
 
 
 def notification_identity_values(icon_path: str) -> list:
@@ -611,6 +636,7 @@ def register_notification_identity() -> None:
             if img is not None:
                 os.makedirs(os.path.dirname(icon), exist_ok=True)
                 img.save(icon, format="PNG")
+                _refresh_shell_icons(icon)
     except Exception as e:
         print(f"[Install] Notification icon skipped: {e}")
     try:

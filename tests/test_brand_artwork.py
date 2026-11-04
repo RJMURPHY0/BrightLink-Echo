@@ -30,7 +30,7 @@ def _src(name):
 class ArtworkTests(unittest.TestCase):
     def test_every_asset_is_present_and_transparent(self):
         for name in (logo_cache.MARK, logo_cache.WORDMARK, logo_cache.ECHO,
-                     logo_cache.BADGE):
+                     logo_cache.BADGE, logo_cache.ECHO_ICON):
             img = logo_cache._asset(name)
             self.assertIsNotNone(img, name)
             self.assertEqual(img.getpixel((0, 0))[3], 0, f"{name} has a background")
@@ -39,8 +39,10 @@ class ArtworkTests(unittest.TestCase):
         img = logo_cache.lockup_image(46)
         a = np.asarray(img)[..., 3] > 128
         s1 = 46 / 250
-        # "B" of BrightLink, and the "E" of Echo (the last ~quarter of the image).
-        b_x0, b_x1 = int(367 * s1) + 1, int(453 * s1) - 1
+        # "B" of BrightLink (367..453 in the wordmark, moved by the Echo icon
+        # that replaced its chain), and the "E" of Echo (the last ~quarter).
+        shift = logo_cache._lockup_text_x(logo_cache._lockup_icon_size()[0])             - logo_cache._WORDMARK_CHAIN_W
+        b_x0, b_x1 = int((367 + shift) * s1) + 1, int((453 + shift) * s1) - 1
         b_bottom = np.where(a[:, b_x0:b_x1].any(1))[0].max()
         e_cols = np.where(a.any(0))[0]
         e_x0 = e_cols.max() - int(0.24 * (e_cols.max() - e_cols.min()))
@@ -90,17 +92,39 @@ class IconTests(unittest.TestCase):
             self.assertLessEqual(diff, 2, f"{name} is not built from the chain mark; "
                                           "regenerate with logo_cache.write_icon")
 
-    def test_echo_is_in_the_icon_where_it_can_be_read(self):
-        # Orange text sits in the lower part of the tile from TEXT_MIN_PX up;
-        # below that the frame is the chain alone.
-        def orange_rows(size):
-            a = np.asarray(logo_cache.app_icon_image(size).convert("RGB"), dtype=int)
+    def test_icon_is_echos_mark_without_text(self):
+        # Ryan, 2026-11-04: the link with sound bars and waves, no "Echo"
+        # text. Waves (orange ink right of the white link) from WAVES_MIN_PX
+        # up; the small title bar / tray frames drop them.
+        def right_orange(size, simple=False):
+            a = np.asarray(logo_cache.app_icon_image(size, simple).convert("RGB"), dtype=int)
             r, g, b = a[..., 0], a[..., 1], a[..., 2]
-            lower = (r > 180) & (b < 90) & (r - g > 60)
-            return lower[int(size * 0.62):].sum()
-        self.assertGreater(orange_rows(32), 8)
-        self.assertGreater(orange_rows(48), 20)
-        self.assertLess(orange_rows(16), orange_rows(32))
+            orange = (r > 180) & (b < 90) & (r - g > 40)
+            return orange[:, int(size * 0.8):].sum()
+        self.assertGreater(right_orange(48), 4)
+        self.assertGreater(right_orange(256), 200)
+        self.assertEqual(right_orange(256, simple=True), 0)
+        self.assertEqual(right_orange(16), 0)
+        # No text band under the art: the lower fifth of the tile is empty.
+        a = np.asarray(logo_cache.app_icon_image(256).convert("RGB"), dtype=int)
+        self.assertLess(a[int(256 * 0.8):int(256 * 0.95), 20:236].max(), 40)
+
+    def test_lockup_carries_echos_icon_not_the_chain(self):
+        img = logo_cache.lockup_image(42)
+        a = np.asarray(img.convert("RGB"), dtype=int)
+        lead = int(logo_cache._lockup_icon_size()[0] * 42 / 250)
+        r, g, b = a[..., 0], a[..., 1], a[..., 2]
+        # The bars sit in the middle of the icon: orange, between the links.
+        mid = (r[:, lead // 3:2 * lead // 3] > 180) & (b[:, lead // 3:2 * lead // 3] < 90)
+        self.assertGreater(mid.sum(), 10)
+
+    def test_lockup_icon_is_text_sized_with_a_clear_gap(self):
+        # Ryan, 2026-11-04: no taller than ~1.8 caps, and at least 0.4 cap
+        # of clear space between the waves and the "B".
+        iw, ih = logo_cache._lockup_icon_size()
+        self.assertLessEqual(ih, logo_cache._WORDMARK_CAP * 1.8)
+        self.assertGreaterEqual(logo_cache._LOCKUP_ICON_GAP,
+                                logo_cache._WORDMARK_CAP * 0.4)
 
     def test_own_app_history_icon_is_the_app_icon(self):
         got = np.asarray(Image.open(os.path.join(
@@ -118,6 +142,7 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(aw.count("get_lockup_photo(self._root, C[\"bg\"], height=42)"), 2)
         self.assertIn("get_lockup_photo(self._root, C[\"bg\"], height=42)",
                       _src("login_window.py"))
+        # The dictation pop-up keeps the chain + Echo badge (Ryan, 2026-11-04).
         self.assertIn("get_badge_photo(self.root, CP[\"bg\"], height=25)",
                       _src("popup.py"))
 

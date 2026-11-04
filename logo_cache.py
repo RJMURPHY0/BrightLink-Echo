@@ -1,6 +1,7 @@
 """
-Brand artwork for every window: the BrightLink | Echo lockup, the chain + Echo
-badge, and the window / exe icon.
+Brand artwork for every window: the BrightLink | Echo lockup (Echo's icon in
+place of the wordmark's chain), the chain + Echo badge on the dictation
+pop-up (kept as it is), and the window / exe icon (Echo's icon).
 
 The sources live in assets/brand and are the BrightLink CRM's own files (the
 chain mark is the CRM's favicon, the wordmark its sidebar mark) plus the Echo
@@ -25,6 +26,12 @@ MARK = "brightlink-mark.png"                  # the chain: CRM favicon, 512px
 WORDMARK = "brightlink-wordmark-on-dark.png"  # chain + "BrightLink", 1036x250
 ECHO = "echo-wordmark.png"                    # "Echo", orange gradient
 BADGE = "echo-badge.png"                      # chain + "Echo"
+ECHO_ICON = "echo-icon.png"                   # Echo's own mark: link, bars, waves
+
+# Where the sound waves start in echo-icon.png (first clear column after the
+# white link). Frames too small to show the waves as more than a smudge drop
+# them, so the link and bars fill the space.
+_ECHO_ICON_WAVES_X = 1305
 
 # Measured off the artwork: where the capitals sit, so the two wordmarks can
 # share a baseline and a cap height rather than being centred by their boxes
@@ -62,10 +69,11 @@ def lockup_image(height: int = 46, echo_scale: float = 1.1):
     wm, echo = _asset(WORDMARK), _asset(ECHO)
     if wm is None or echo is None:
         return None
+    wm = _wordmark_with_echo_icon(wm)
     s1 = height / _WORDMARK_SIZE[1]
     cap = _WORDMARK_CAP * s1
     baseline = _WORDMARK_BASELINE * s1
-    wm = wm.resize((round(wm.width * s1), height), Image.LANCZOS)
+    wm = wm.resize((max(1, round(wm.width * s1)), height), Image.LANCZOS)
     s2 = cap * echo_scale / _ECHO_CAP
     echo = echo.resize((max(1, round(echo.width * s2)),
                         max(1, round(echo.height * s2))), Image.LANCZOS)
@@ -83,6 +91,53 @@ def lockup_image(height: int = 46, echo_scale: float = 1.1):
                                   fill=DIVIDER)
     img.paste(echo, (x_echo, y_echo - top), echo)
     return img
+
+
+# The wordmark's chain ends at this column; "BrightLink" starts after it.
+_WORDMARK_CHAIN_W = 334
+_WORDMARK_TEXT_PAD = 31      # clear columns at the start of the text crop
+# Echo icon in the lockup, in wordmark units (cap height 100): about the
+# height of "BrightLink" with its descender, and a clear half-cap gap before
+# the "B" so the waves never crowd it (Ryan, 2026-11-04: at 0.8 and a 31
+# gap the icon looked oversized and jammed against the text).
+_LOCKUP_ICON_H = 0.7         # share of the wordmark's 250 height
+_LOCKUP_ICON_GAP = 48        # waves to "B"
+
+
+def _lockup_text_x(icon_w: int) -> int:
+    """Where the text crop (which starts _WORDMARK_TEXT_PAD clear columns
+    before the "B") goes, beside an icon `icon_w` wide."""
+    return icon_w + _LOCKUP_ICON_GAP - _WORDMARK_TEXT_PAD
+
+
+def _lockup_icon_size():
+    icon = _asset(ECHO_ICON)
+    if icon is None:
+        return None
+    ih = round(_WORDMARK_SIZE[1] * _LOCKUP_ICON_H)
+    return round(icon.width * ih / icon.height), ih
+
+
+def _wordmark_with_echo_icon(wm):
+    """The BrightLink wordmark with its chain swapped for Echo's own icon
+    (Ryan, 2026-11-04). The box keeps its height, so the baseline and cap
+    height the lockup measures still hold. The plain wordmark when the icon
+    is missing."""
+    from PIL import Image
+    size = _lockup_icon_size()
+    if size is None or wm.size != _WORDMARK_SIZE:
+        return wm
+    iw, ih = size
+    icon = _asset(ECHO_ICON).resize((iw, ih), Image.LANCZOS)
+    text = wm.crop((_WORDMARK_CHAIN_W, 0, wm.width, wm.height))
+    x_text = _lockup_text_x(iw)
+    out = Image.new("RGBA", (x_text + text.width, wm.height), (0, 0, 0, 0))
+    # Centred on the capitals (rows 73..172), not the box, so it sits level
+    # with the word rather than a touch low.
+    cap_mid = _WORDMARK_BASELINE - _WORDMARK_CAP / 2
+    out.paste(icon, (0, round(cap_mid - ih / 2)), icon)
+    out.paste(text, (x_text, 0), text)
+    return out
 
 
 # The badge's "Echo" fades from white into the brand orange, left to right
@@ -194,52 +249,42 @@ def get_logo_photo(master, bg_color: str, max_w: int = 180, max_h: int = 60):
 
 ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
 
-# The app icon: the chain over "Echo" on a dark rounded tile, so the taskbar
-# tells Echo apart from the BrightLink CRM's plain chain. Stacked, not side by
-# side as the pop-up badge is: in a square, side by side leaves "Echo" about
-# 4px tall at taskbar size (a smudge, as "whisper" was on the old FTC tile),
-# stacked gives it the full width. Below TEXT_MIN_PX there is no legible
-# "Echo" at all, so those frames (the title bar's 16px, beside a title that
-# already says Echo) carry the chain alone.
+# The app icon (exe, taskbar, title bar, Start menu, notifications, tray):
+# Echo's own mark, the link with sound bars and waves (Ryan's artwork,
+# 2026-11-04), on the dark rounded tile the taskbar has always shown. It
+# replaces the chain over "Echo" text. Below WAVES_MIN_PX the waves are a
+# smudge, so those frames (title bar, tray) carry the link and bars alone.
+# ICON_REV names the rendered notification icon: bump it with any redesign so
+# installs render the new one instead of keeping the old picture.
+ICON_REV = "2026-11-04"
 ICON_TILE = (13, 13, 13, 255)
 ICON_RADIUS = 0.2
-TEXT_MIN_PX = 24
+WAVES_MIN_PX = 32
 _ICON_SS = 8
 
 
-def app_icon_image(size: int):
-    """One square frame of the app icon, `size` px, RGBA."""
+def app_icon_image(size: int, simple: bool = False):
+    """One square frame of the app icon, `size` px, RGBA. `simple` drops the
+    sound waves at any size (the tray wants the boldest form)."""
     from PIL import Image, ImageDraw
-    mark, echo = _asset(MARK), _asset(ECHO)
-    if mark is None:
-        return None
-    mark = mark.crop(mark.getchannel("A").getbbox())
+    art = _asset(ECHO_ICON)
+    if art is None:
+        art = _asset(MARK)
+        if art is None:
+            return None
+        art = art.crop(art.getchannel("A").getbbox())
+    elif simple or size < WAVES_MIN_PX:
+        art = art.crop((0, 0, _ECHO_ICON_WAVES_X, art.height))
+        art = art.crop(art.getchannel("A").getbbox())
     big = size * _ICON_SS
     img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
     ImageDraw.Draw(img).rounded_rectangle(
         [0, 0, big - 1, big - 1], radius=int(big * ICON_RADIUS), fill=ICON_TILE)
-    ma = mark.width / mark.height
-
-    def put(src, w, h, x, y):
-        part = src.resize((max(1, int(w)), max(1, int(h))), Image.LANCZOS)
-        img.paste(part, (int(x), int(y)), part)
-
-    if size < TEXT_MIN_PX or echo is None:
-        inner = big * 0.84
-        w, h = (inner, inner / ma) if ma >= 1 else (inner * ma, inner)
-        put(mark, w, h, (big - w) / 2, (big - h) / 2)
-    else:
-        echo = echo.crop(echo.getchannel("A").getbbox())
-        inner = big * 0.84
-        gap = big * 0.04
-        ew, eh = inner, inner * echo.height / echo.width
-        ch = inner - eh - gap
-        cw = ch * ma
-        if cw > inner:
-            cw, ch = inner, inner / ma
-        top = (big - (ch + gap + eh)) / 2
-        put(mark, cw, ch, (big - cw) / 2, top)
-        put(echo, ew, eh, (big - ew) / 2, top + ch + gap)
+    inner = big * (0.9 if size < WAVES_MIN_PX else 0.84)
+    ar = art.width / art.height
+    w, h = (inner, inner / ar) if ar >= 1 else (inner * ar, inner)
+    part = art.resize((max(1, int(w)), max(1, int(h))), Image.LANCZOS)
+    img.paste(part, (int((big - w) / 2), int((big - h) / 2)), part)
     return img.resize((size, size), Image.LANCZOS)
 
 
@@ -250,7 +295,7 @@ def icon_frames():
 
 
 def write_icon(path: str) -> bool:
-    """Write the chain mark as a multi-size .ico. True on success."""
+    """Write the app icon as a multi-size .ico. True on success."""
     frames = icon_frames()
     if not frames:
         return False

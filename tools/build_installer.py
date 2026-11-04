@@ -41,23 +41,27 @@ def file_version(version: str) -> str:
 
 
 def make_artwork(out_dir: str) -> tuple:
-    """(wizard image, small image) PNGs: the chain mark on the app's
+    """(wizard image, small image) PNGs: Echo's icon on the app's
     background, sized for 200% DPI so they stay sharp."""
     from PIL import Image
     os.makedirs(out_dir, exist_ok=True)
-    mark = Image.open(os.path.join(ROOT, "assets", "brand", "brightlink-mark.png")).convert("RGBA")
+    icon = Image.open(os.path.join(ROOT, "assets", "brand", "echo-icon.png")).convert("RGBA")
     word = Image.open(os.path.join(ROOT, "assets", "brand", "echo-wordmark.png")).convert("RGBA")
 
+    def fit(img, w):
+        return img.resize((w, max(1, round(img.height * w / img.width))), Image.LANCZOS)
+
     big = Image.new("RGBA", (480, 918), BG + (255,))
-    m = mark.resize((320, 320), Image.LANCZOS)
-    big.alpha_composite(m, ((480 - 320) // 2, 250))
+    m = fit(icon, 400)
+    big.alpha_composite(m, ((480 - m.width) // 2, 410 - m.height // 2))
     w = word.resize((word.width * 2, word.height * 2), Image.LANCZOS)
     big.alpha_composite(w, ((480 - w.width) // 2, 600))
     wizard = os.path.join(out_dir, "wizard.png")
     big.convert("RGB").save(wizard)
 
     small = Image.new("RGBA", (116, 116), BG + (255,))
-    small.alpha_composite(mark.resize((100, 100), Image.LANCZOS), (8, 8))
+    s = fit(icon, 104)
+    small.alpha_composite(s, ((116 - s.width) // 2, (116 - s.height) // 2))
     small_path = os.path.join(out_dir, "wizard-small.png")
     small.convert("RGB").save(small_path)
     return wizard, small_path
