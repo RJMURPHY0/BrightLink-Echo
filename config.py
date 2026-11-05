@@ -151,6 +151,7 @@ class Config:
     sound_feedback: bool = True
     auto_start: bool = False  # Unused legacy key. Existing configs carry False here, so it must never gate anything: start_with_windows does.
     start_with_windows: bool = True  # Launch at sign-in via the logon task. Off removes the task.
+    startup_priority: int = 0  # Where a sign-in launch sits in the queue: index into startup_order.STOPS. 0 = first, what every install did before this setting.
     anthropic_api_key: str = ""  # Optional — enables AI text refinement
     openrouter_api_key: str = ""  # Optional — enables AI via OpenRouter (alternative to Anthropic direct)
     openrouter_model: str = "google/gemini-2.5-flash-lite"  # OpenRouter model for refinement/context-fix
@@ -391,6 +392,8 @@ class Config:
                 # is how the first word survives stream-open latency, so a
                 # config that disabled it via the old toggle migrates back on.
                 config.warm_mic = True
+                import startup_order
+                config.startup_priority = startup_order.clamp(config.startup_priority)
                 # Popup height must be a known preset; coerce anything else back
                 # to the default so a stray value never breaks _reposition().
                 if config.popup_height not in ("low", "medium", "high"):

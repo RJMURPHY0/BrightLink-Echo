@@ -21,6 +21,7 @@ import data_paths
 import os
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Callable, Optional
@@ -376,6 +377,7 @@ class ParakeetTranscriber:
     # Class-level default so an instance built without __init__ (tests build
     # polish()-only doubles that way) still has a valid mode.
     end_punctuation = "always"
+    last_used = 0.0  # time.monotonic() of the newest decode, real or keep-warm
 
     def __init__(self, auto_punctuate: bool = True, cpu_threads: int = 4,
                  vad_gate: bool = True,
@@ -498,6 +500,7 @@ class ParakeetTranscriber:
         acquired = self._transcribe_lock.acquire(blocking=blocking)
         if not acquired:
             return ""
+        self.last_used = time.monotonic()
         try:
             # VAD gate inside the lock so non-blocking caption ticks that bail
             # out above never pay for it.
@@ -514,6 +517,31 @@ class ParakeetTranscriber:
 
         text = self._post_process(text, hotwords_str)
         return self.polish(text) if finalize_text else text
+
+    def keep_warm(self) -> Optional[int]:
+        """Run a throwaway decode over a second of quiet noise, so the model's
+        pages are in memory when the next dictation needs them. Windows pages an
+        idle process's memory out when RAM is tight, and the next real decode
+        then pays for it: measured 4.7-5.9 s instead of 1.5 s for a 13.6 s clip.
+        Returns the milliseconds taken, or None when it did nothing (not loaded,
+        or a real decode holds the lock, which keeps the pages warm anyway).
+        The result is thrown away and never reaches the user."""
+        if self._model is None or not self._transcribe_lock.acquire(blocking=False):
+            return None
+        started = time.perf_counter()
+        try:
+            noise = np.random.default_rng(0).normal(
+                0.0, 0.01, _MODEL_SAMPLE_RATE).astype(np.float32)
+            if self._vad_gate and not self._vad_failed:
+                self._vad_clip(noise)
+            self._model.recognize(noise)
+            return int((time.perf_counter() - started) * 1000)
+        except Exception as e:
+            print(f"[ParakeetEngine] Keep-warm pass failed: {e}")
+            return None
+        finally:
+            self.last_used = time.monotonic()
+            self._transcribe_lock.release()
 
     # -- internals ----------------------------------------------------------
 

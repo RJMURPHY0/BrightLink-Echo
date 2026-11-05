@@ -78,16 +78,42 @@ def sample_memory():
         return None
 
 
+_kernel32 = _psapi = _user32 = None
+
+
+def _dlls():
+    """Private WinDLLs with real signatures. Through the shared ctypes.windll
+    GetCurrentProcess's handle comes back as a 32-bit int, the calls below fail,
+    and every memory_pressure report said own_private_mb 0 and own_gdi 0."""
+    global _kernel32, _psapi, _user32
+    if _kernel32 is None:
+        k32 = ctypes.WinDLL("kernel32")
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        k32.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 4
+        psapi = ctypes.WinDLL("psapi")
+        psapi.GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                               ctypes.c_uint32]
+        user32 = ctypes.WinDLL("user32")
+        user32.GetGuiResources.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        _kernel32, _psapi, _user32 = k32, psapi, user32
+    return _kernel32, _psapi, _user32
+
+
+def _own_counters():
+    k32, psapi, _u = _dlls()
+    counters = _PROCESS_MEMORY_COUNTERS_EX()
+    counters.cb = ctypes.sizeof(counters)
+    if not psapi.GetProcessMemoryInfo(k32.GetCurrentProcess(),
+                                      ctypes.byref(counters), counters.cb):
+        return None
+    return counters
+
+
 def own_private_mb() -> int:
     """This process's private commit in MB (0 on failure)."""
     try:
-        counters = _PROCESS_MEMORY_COUNTERS_EX()
-        counters.cb = ctypes.sizeof(counters)
-        handle = ctypes.windll.kernel32.GetCurrentProcess()
-        if not ctypes.windll.psapi.GetProcessMemoryInfo(
-                handle, ctypes.byref(counters), counters.cb):
-            return 0
-        return int(counters.PrivateUsage // _MB)
+        counters = _own_counters()
+        return int(counters.PrivateUsage // _MB) if counters else 0
     except Exception:
         return 0
 
@@ -96,10 +122,32 @@ def own_gdi_count() -> int:
     """This process's GDI handle count (0 on failure). A four-digit value
     here would point at a leak in US rather than a starved machine."""
     try:
-        handle = ctypes.windll.kernel32.GetCurrentProcess()
-        return int(ctypes.windll.user32.GetGuiResources(handle, 0))
+        k32, _p, user32 = _dlls()
+        return int(user32.GetGuiResources(k32.GetCurrentProcess(), 0))
     except Exception:
         return 0
+
+
+def own_process_stats() -> dict:
+    """What a slow dictation needs explaining with: resident and private memory,
+    page faults and CPU time so far. {} on failure. A few microseconds."""
+    try:
+        counters = _own_counters()
+        if not counters:
+            return {}
+        k32, _p, _u = _dlls()
+        times = [ctypes.c_uint64() for _ in range(4)]
+        if not k32.GetProcessTimes(k32.GetCurrentProcess(),
+                                   *[ctypes.byref(t) for t in times]):
+            return {}
+        return {
+            "ws_mb": int(counters.WorkingSetSize // _MB),
+            "private_mb": int(counters.PrivateUsage // _MB),
+            "faults": int(counters.PageFaultCount),
+            "cpu_ms": int((times[2].value + times[3].value) // 10_000),
+        }
+    except Exception:
+        return {}
 
 
 class MemoryGuard:

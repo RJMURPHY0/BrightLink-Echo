@@ -310,6 +310,61 @@ def toggle_pill(master, on: bool, w: int = 48, h: int = 28,
     return _photo(key, master, _draw, w, h)
 
 
+def stop_slider(master, w: int, h: int, xs, stop: int, default: int, before: int,
+                accent: str = "#f39200", track: str = "#2d2d2d",
+                thumb: str = "#ffffff", bg: str = "#1a1a1a"):
+    """A slider with fixed stops at x positions *xs*: thin track, a tick per
+    stop, the hollow Default dot, the Before bar and the thumb. Draws the
+    Default and Before marks only where the thumb is not."""
+    key = ("ss", w, h, tuple(xs), stop, default, before, accent, track, thumb, bg)
+
+    def _draw(d, s):
+        cy = (h * s) // 2
+        half = 3 * s
+        d.rounded_rectangle([xs[0] * s - half, cy - half, xs[-1] * s + half, cy + half],
+                            radius=half, fill=track)
+        if stop > 0:
+            d.rounded_rectangle([xs[0] * s - half, cy - half, xs[stop] * s, cy + half],
+                                radius=half, fill=accent)
+        for i, x in enumerate(xs):
+            if i in (stop, default, before):
+                continue
+            r = 2 * s
+            d.ellipse([x * s - r, cy - r, x * s + r, cy + r],
+                      fill=thumb if i < stop else "#8a8a8a")
+        if before not in (stop, default):
+            x = xs[before] * s
+            d.rounded_rectangle([x - s, cy - 8 * s, x + s, cy + 8 * s],
+                                radius=s, fill=accent)
+        if default != stop:
+            x, r = xs[default] * s, 6 * s
+            d.ellipse([x - r, cy - r, x + r, cy + r], fill=bg, outline=accent,
+                      width=2 * s)
+        x, r = xs[stop] * s, 9 * s
+        d.ellipse([x - r, cy - r, x + r, cy + r], fill=accent)
+        r = 3 * s
+        d.ellipse([x - r, cy - r, x + r, cy + r], fill=thumb)
+
+    return _photo(key, master, _draw, w, h)
+
+
+def slider_mark(master, kind: str, accent: str = "#f39200", bg: str = "#1a1a1a"):
+    """The legend's small copy of a slider mark: "default" or "before"."""
+    size = 12
+    key = ("sm", kind, accent, bg)
+
+    def _draw(d, s):
+        c = size * s // 2
+        if kind == "default":
+            r = 5 * s
+            d.ellipse([c - r, c - r, c + r, c + r], fill=bg, outline=accent,
+                      width=2 * s)
+        else:
+            d.rounded_rectangle([c - s, s, c + s, size * s - s], radius=s, fill=accent)
+
+    return _photo(key, master, _draw, size, size)
+
+
 # The impact-card glyphs are authored against a 26px design box; `u` turns
 # `size` into a true scale factor. (They used to multiply design coords by the
 # supersample factor alone, so a bigger `size` grew the canvas and left the

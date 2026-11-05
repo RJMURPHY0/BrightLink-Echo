@@ -9129,6 +9129,56 @@ class AppWindow:
         self._register_search_setting(title, subtext, key)
         return var
 
+    def _build_start_priority(self, card, enabled_var) -> None:
+        """The Start with Windows card's slider: where the app sits in the
+        sign-in queue. Hidden while Start with Windows is off, where it means nothing;
+        the toggle that brings it back is on the same card."""
+        import startup_order
+        from stop_slider import StopSlider
+        cfg = self._config
+        current = startup_order.clamp(
+            getattr(cfg, "startup_priority", startup_order.DEFAULT_STOP))
+        box = tk.Frame(card, bg=C["surface"])
+        title = "Start priority"
+        tk.Label(box, text=title, fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(anchor="w", pady=(10, 4))
+
+        def _caption_for(stop: int) -> str:
+            return startup_order.STOPS[stop].caption
+
+        def _preview(stop: int) -> None:
+            caption.configure(text=_caption_for(stop))
+
+        def _commit(stop: int) -> None:
+            if self._on_settings_change:
+                self._on_settings_change("startup_priority", stop)
+
+        slider = StopSlider(
+            box, [s.label for s in startup_order.STOPS], current,
+            startup_order.DEFAULT_STOP, C, C["surface"],
+            on_preview=_preview, on_commit=_commit)
+        slider.pack(fill="x")
+        caption = tk.Label(box, text=_caption_for(current), fg=C["subtext"],
+                           bg=C["surface"], font=("Segoe UI", 8), anchor="w",
+                           justify="left")
+        caption.pack(fill="x")
+        self._autowrap(caption)
+        self._register_search_setting(
+            title, "When the app starts at sign-in, compared with Teams and other apps.",
+            "startup_priority")
+
+        def _sync(*_a) -> None:
+            try:
+                if enabled_var.get():
+                    box.pack(fill="x")
+                else:
+                    box.pack_forget()
+            except tk.TclError:
+                pass
+
+        enabled_var.trace_add("write", _sync)
+        _sync()
+
     def _link_card(self, parent, kind: str, title: str, subtext: str,
                    icon: str) -> None:
         """A card that opens a full page. The whole row is the hit target, and
@@ -9444,9 +9494,11 @@ class AppWindow:
         self._autowrap(self._update_progress_lbl)
         self._update_progress_shown = False
 
-        _toggle_card("start_with_windows", "Start with Windows",
-                     "Opens the app when you sign in to Windows.",
-                     True, icon="zap")
+        _start_var = _toggle_card("start_with_windows", "Start with Windows",
+                                  "Opens the app when you sign in to Windows.",
+                                  True, icon="zap")
+        self._build_start_priority(
+            self._setting_pills["start_with_windows"].master.master, _start_var)
 
         # ── Microphone ────────────────────────────────────────────────────────
         _section("mic", "Microphone")

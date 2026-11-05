@@ -73,6 +73,12 @@ if getattr(sys, "frozen", False) and sys.platform == "win32":
     pyi_runtime.relaunch_if_foreign_runtime(log_path=os.path.join(
         data_paths.local_dir(), "startup-error.log"))
 
+# A sign-in launch waits its turn here, ahead of the heavy imports, when the
+# Start with Windows slider says so. Stdlib only.
+if sys.platform == "win32":
+    import startup_order
+    startup_order.wait_at_sign_in(sys.argv)
+
 import brand
 import data_paths
 import install_layout
@@ -677,6 +683,8 @@ class WhisperFlowApp:
                     and verify_model_files(version=_ver)):
                 print(f"[App] Parakeet model ({_ver}) missing or not the pinned "
                       f"build, downloading (~660 MB, one-time)…")
+                # Whisper dictates during the download: at the usual priority.
+                startup_order.restore_dictation_priority()
                 # Whisper carries dictation for as long as the download takes.
                 threading.Thread(target=self._load_whisper_fallback,
                                  daemon=True, name="whisper-fallback").start()
@@ -688,8 +696,13 @@ class WhisperFlowApp:
                 self.parakeet.load_model()
             if self.parakeet.is_loaded:
                 print("[App] Parakeet engine active, near-instant transcription enabled.")
+                self._start_keep_warm()
         except Exception as e:
             print(f"[App] Parakeet init failed ({e}), using Whisper pipeline.")
+        finally:
+            # A later Start with Windows stop loads at a lower priority; the
+            # slider never touches dictation speed.
+            startup_order.restore_dictation_priority()
 
     def _repair_parakeet_model(self, version: str) -> bool:
         """After a failed load: download the model again when its files were
@@ -1086,6 +1099,28 @@ class WhisperFlowApp:
             trims=[_trim_caches], on_pressure=_report, is_busy=_busy)
         self._memory_guard.start()
 
+    def _start_keep_warm(self) -> None:
+        """Keep the speech model in memory between dictations (model_warmth)."""
+        from memory_guard import own_process_stats, sample_memory
+        from model_warmth import ModelKeepWarm
+
+        def _busy() -> bool:
+            try:
+                return self.hotkey_manager.state != AppState.IDLE
+            except Exception:
+                return False
+
+        def _paged_in(ms: int, reason: str) -> None:
+            if self._telemetry_budget("model_paged_in"):
+                self._log_error_event("model_paged_in", {
+                    "ms": ms, "reason": reason,
+                    **(sample_memory() or {}), **own_process_stats()})
+
+        self._keep_warm = ModelKeepWarm(
+            self.parakeet, is_busy=_busy, is_active=self._use_parakeet,
+            on_paged_in=_paged_in)
+        self._keep_warm.start()
+
     def _start_auto_update(self, version: str, url: str) -> None:
         """Download + install *version* in the background, restarting only once
         the app has been idle for a while. One attempt per version per process —
@@ -1248,6 +1283,31 @@ class WhisperFlowApp:
             t.start()
         except Exception as e:
             print(f"[Press] timing report not scheduled: {e}")
+
+    # Stop timing. Numbers only. Wall time far above CPU time means the process
+    # sat waiting (page-ins, a busy disk); the two close together means it was
+    # short of CPU. Without this a slow stop could only be guessed at from the
+    # log's one-second timestamps.
+    _STOP_SLOW_MS = 3000
+
+    def _report_stop_timing(self, release_ts: float, before: dict,
+                            tail_seconds: float) -> None:
+        try:
+            from memory_guard import own_process_stats, sample_memory
+            ms = int((time.monotonic() - release_ts) * 1000)
+            after = own_process_stats()
+            used = {f"{k}_used": after[k] - before[k]
+                    for k in ("cpu_ms", "faults") if k in after and k in before}
+            print(f"[Stop] {ms} ms for {tail_seconds:.1f}s tail, {used}")
+            if ms >= self._STOP_SLOW_MS and self._telemetry_budget("stop_slow"):
+                self._log_error_event("stop_slow", {
+                    "ms": ms, "tail_s": round(tail_seconds, 1), **used,
+                    "ws_mb_before": before.get("ws_mb"),
+                    "ws_mb_after": after.get("ws_mb"),
+                    "private_mb": after.get("private_mb"),
+                    **(sample_memory() or {})})
+        except Exception as e:
+            print(f"[Stop] timing report failed: {e}")
 
     _TELEMETRY_CAP = 20     # per event type per run: a log, not a firehose
 
@@ -2317,6 +2377,11 @@ class WhisperFlowApp:
                 )
                 self._session = session
                 session.start()
+                # After a quiet spell, bring the model back into memory while
+                # they talk, so it is ready when they stop.
+                _warm = getattr(self, "_keep_warm", None)
+                if _warm is not None:
+                    _warm.note_press()
             else:
                 self._live_inject_active = False
         except Exception as e:
@@ -2329,6 +2394,8 @@ class WhisperFlowApp:
         # end of a word still being spoken at the release (Recorder.mark_release).
         release_ts = time.monotonic()
         self._last_dictation_ts = time.time()
+        from memory_guard import own_process_stats
+        _stats_at_stop = own_process_stats()
         # Which keys the stop press is holding, so the badge that follows can
         # tell them from a key pressed after the text lands (Enter). Here, not
         # on the hotkey thread: it reads every key's state (1-2 ms).
@@ -2445,6 +2512,9 @@ class WhisperFlowApp:
                 # re-pass would usually be a downgrade — skip it.
                 upgrading = self.ai_refiner.is_available and len(text.split()) >= 4
                 print(f"[App] Transcription (parakeet): {len(text)} chars")
+                self._report_stop_timing(
+                    release_ts, _stats_at_stop,
+                    (len(tail_audio) / capture_rate) if tail_audio is not None else 0.0)
             else:
                 # ── Whisper fallback path ──
                 audio = self.recorder.stop()

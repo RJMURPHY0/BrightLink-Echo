@@ -7,6 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import audio_store
 import supabase_client
 
 
@@ -108,7 +109,14 @@ class SupabaseHistoryTests(unittest.TestCase):
             mock.patch.object(
                 supabase_client, "_tombstones_path",
                 side_effect=lambda: self.tombstone_path),
+            # clear_history sweeps the recordings folder. Unpatched, every test
+            # run deleted the real recordings of whoever ran it (found 2026-11-05).
+            mock.patch.object(
+                audio_store, "audio_dir",
+                side_effect=lambda: self.audio_path),
         )
+        self.audio_path = os.path.join(self.temp.name, "audio")
+        os.makedirs(self.audio_path)
         for patcher in self.patches:
             patcher.start()
 
@@ -388,6 +396,20 @@ class SupabaseHistoryTests(unittest.TestCase):
             for snapshot in snapshots for row in snapshot
         ))
         self.assertEqual([], logger.get_cached_history())
+
+    def test_this_class_never_reaches_the_real_recordings_folder(self):
+        self.assertEqual(self.audio_path, audio_store.audio_dir())
+        self.assertTrue(self.audio_path.startswith(self.temp.name))
+        stray = os.path.join(self.audio_path, "20200101000000000000.wav")
+        with open(stray, "wb") as handle:
+            handle.write(b"x")
+        self._write_history([])
+        logger = supabase_client.SupabaseLogger("", "")
+        logger.set_user("user-a")
+        with mock.patch.object(os, "remove", wraps=os.remove) as remove:
+            logger.clear_history()
+        for call in remove.call_args_list:
+            self.assertTrue(str(call.args[0]).startswith(self.temp.name), call)
 
     def test_clear_only_removes_current_accounts_local_rows(self):
         self._write_history([
