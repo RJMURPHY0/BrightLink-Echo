@@ -83,7 +83,7 @@ import brand
 import data_paths
 import install_layout
 import system_tools
-from config import Config
+from config import Config, AI_ACCURACY_CHECK_DEFAULT
 # Recorder / Transcriber / asr_engine / StreamingSession / Injector / TrayApp
 # are deliberately NOT imported here: between them they pull in numpy,
 # sounddevice and pystray — ~3s of import time that used to run before the
@@ -1991,6 +1991,10 @@ class WhisperFlowApp:
         if report:
             report(status)
 
+    def _ai_accuracy_check_on(self) -> bool:
+        """Whether the background AI check on dictations is enabled."""
+        return bool(getattr(self.config, "ai_accuracy_check", AI_ACCURACY_CHECK_DEFAULT))
+
     def _on_voice_consent(self, enabled) -> None:
         """Push the server's answer into the Settings toggle. `enabled` is None
         when the server could not be reached, and the switch then stays in its
@@ -2517,7 +2521,9 @@ class WhisperFlowApp:
                 # Upgrade = LLM context-fix only. Parakeet already beats the
                 # local whisper models on English accuracy, so a whisper
                 # re-pass would usually be a downgrade — skip it.
-                upgrading = self.ai_refiner.is_available and len(text.split()) >= 4
+                upgrading = (self.ai_refiner.is_available
+                             and self._ai_accuracy_check_on()
+                             and len(text.split()) >= 4)
                 print(f"[App] Transcription (parakeet): {len(text)} chars")
                 self._report_stop_timing(
                     release_ts, _stats_at_stop,
@@ -3056,7 +3062,7 @@ class WhisperFlowApp:
                         self.popup.set_upgrade_result(accurate, session=_seq)
                         offered = True
                     final = accurate
-                    if self.ai_refiner.is_available:
+                    if self.ai_refiner.is_available and self._ai_accuracy_check_on():
                         try:
                             fixed = sentence_end.match_ending(
                                 self.ai_refiner.context_fix(accurate), accurate)
