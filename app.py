@@ -272,9 +272,15 @@ class WhisperFlowApp:
         # Opt-in voice training for BrightLink Notetaker. Constructed always, sends
         # nothing until the user turns it on: consent lives on the server and
         # the trainer refuses to upload while it is unknown.
+        def _set_voice_local(value, _cfg=config):
+            _cfg.voice_training_local = value
+            _cfg.save_async()
+
         self.voice_trainer = VoiceTrainer(
             token_provider=lambda: auth.access_token,
             device_label="desktop",
+            local_flag=lambda _cfg=config: getattr(_cfg, "voice_training_local", None),
+            set_local_flag=_set_voice_local,
         )
 
         # ── UI components ──────────────────────────────────────────────

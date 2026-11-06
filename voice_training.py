@@ -229,20 +229,47 @@ class VoiceTrainer:
     uploads. Failing closed is the only safe direction here.
     """
 
-    def __init__(self, token_provider, device_label: str = "desktop"):
+    def __init__(self, token_provider, device_label: str = "desktop",
+                 local_flag=None, set_local_flag=None):
         # A callable, not a token: the desktop session refreshes, and a token
         # captured at construction would be stale within the hour.
         self._token_provider = token_provider
         self._device_label = device_label
+        # This machine's own opt-in, kept in Echo's settings. Uploads need it
+        # as well as the server's consent, so a consent switched on from
+        # another place never starts sending audio from here. local_flag()
+        # returns True, False or None (never set). Only the Settings toggle
+        # (set_consent) writes it, apart from the one-time seeding below.
+        # With no accessor given the local gate is not applied.
+        self._local_flag = local_flag
+        self._set_local_flag = set_local_flag
         self._consent = None          # None = not yet known
         self._lock = threading.Lock()
         self._backfilling = False
 
     # -- consent -----------------------------------------------------------
+    def _local_ok(self) -> bool:
+        if self._local_flag is None:
+            return True
+        try:
+            return self._local_flag() is True
+        except Exception as e:
+            print(f"[VoiceTraining] could not read the local flag: {e}")
+            return False
+
+    def _store_local(self, value) -> None:
+        if self._set_local_flag is None:
+            return
+        try:
+            self._set_local_flag(value)
+        except Exception as e:
+            print(f"[VoiceTraining] could not save the local flag: {e}")
+
     @property
     def enabled(self) -> bool:
         with self._lock:
-            return self._consent is True
+            consent = self._consent is True
+        return consent and self._local_ok()
 
     @property
     def known(self) -> bool:
@@ -262,17 +289,26 @@ class VoiceTrainer:
             if value is not None:
                 with self._lock:
                     self._consent = value
+                # First run after the local flag was introduced: carry over the
+                # choice the person already has, so nobody who opted in is
+                # switched off. Seeded once, from a real server answer only.
+                if self._local_flag is not None and self._local_flag() is None:
+                    self._store_local(bool(value))
             if callback:
                 try:
-                    callback(value)
+                    # What this machine will actually do: on only when the
+                    # account consents AND the local flag is on.
+                    callback(None if value is None else (bool(value) and self._local_ok()))
                 except Exception:
                     pass
         threading.Thread(target=_work, daemon=True, name="voice-consent-fetch").start()
 
     def set_consent(self, enabled: bool, callback=None) -> None:
         """Write the user's choice, so Transcribe reflects a change made here."""
+        previous_local = self._local_flag() if self._local_flag is not None else None
         with self._lock:
             self._consent = bool(enabled)
+        self._store_local(bool(enabled))     # the one place a person's click sets it
         def _work():
             ok = push_consent(self._token(), enabled)
             if not ok:
@@ -280,6 +316,7 @@ class VoiceTrainer:
                 # than showing a state the server does not hold.
                 with self._lock:
                     self._consent = None
+                self._store_local(previous_local)
             if callback:
                 try:
                     callback(ok)

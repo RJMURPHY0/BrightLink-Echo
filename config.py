@@ -211,6 +211,10 @@ class Config:
     supabase_key: str = ""  # Publishable (anon) key
     supabase_email: str = ""  # Account email for silent background auth
     supabase_password: str = ""  # Account password for silent background auth
+    # This machine's own opt-in to voice training uploads. None = not yet set:
+    # the first consent answer from the account seeds it once. Only the voice
+    # training toggle in Settings changes it afterwards.
+    voice_training_local: Optional[bool] = None
 
     # Derived / runtime fields (not persisted)
     _config_path: str = field(default="", repr=False)
