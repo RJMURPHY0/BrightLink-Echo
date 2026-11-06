@@ -58,6 +58,20 @@ jobs:
       should_release: ${{ steps.decide.outputs.GO }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # A manual run may only publish from main or a v* tag. Dry runs (publish
+      # unticked) still work from any branch.
+      - name: Refuse to publish from another ref
+        env:
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${PUBLISH}" == "true" ]]; then
+            if [[ "${GITHUB_REF}" != "refs/heads/main" && "${GITHUB_REF}" != refs/tags/v* ]]; then
+              echo "::error::Publishing is only allowed from main or a v* tag (this run is on ${GITHUB_REF}). Untick publish for a dry run."
+              exit 1
+            fi
+          fi
       - name: Decide whether to release
         id: decide
         env:
@@ -112,6 +126,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0

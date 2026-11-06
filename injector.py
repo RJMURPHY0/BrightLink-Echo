@@ -297,6 +297,60 @@ def _write_once(snap: ClipboardSnapshot) -> int:
     return written
 
 
+# ── Keep dictation out of clipboard history and cloud sync ───────────────────
+# Windows documents three clipboard formats that tell clipboard history, cloud
+# clipboard and clipboard monitors to leave an entry alone. A paste of dictated
+# text sets them (unless Copy to Clipboard is on, which asks for the text to
+# stay available), so the text does not linger in history after the restore.
+_u32.RegisterClipboardFormatW.argtypes = [ctypes.wintypes.LPCWSTR]
+_u32.RegisterClipboardFormatW.restype = ctypes.c_uint
+
+_PRIVATE_CLIPBOARD_FORMATS = (
+    ("ExcludeClipboardContentFromMonitorProcessing", 1),
+    ("CanIncludeInClipboardHistory", 0),
+    ("CanUploadToCloudClipboard", 0),
+)
+
+
+def _set_dword_format(name: str, value: int) -> bool:
+    """Put one DWORD under a registered format name. The clipboard must be open
+    and ours. Never raises; a refusal is logged and the paste carries on."""
+    try:
+        fmt = _u32.RegisterClipboardFormatW(name)
+        if not fmt:
+            print(f"[Injector] Clipboard privacy flag {name}: could not register")
+            return False
+        data = int(value).to_bytes(4, "little")
+        h = _k32.GlobalAlloc(0x0002, len(data))
+        if not h:
+            return False
+        ptr = _k32.GlobalLock(h)
+        if not ptr:
+            _k32.GlobalFree(h)
+            return False
+        ctypes.memmove(ptr, data, len(data))
+        _k32.GlobalUnlock(h)
+        if _u32.SetClipboardData(fmt, h):
+            return True
+        _k32.GlobalFree(h)
+        print(f"[Injector] Clipboard privacy flag {name}: write refused")
+        return False
+    except Exception as e:
+        print(f"[Injector] Clipboard privacy flag {name} failed: {e}")
+        return False
+
+
+def _mark_clipboard_private() -> None:
+    for name, value in _PRIVATE_CLIPBOARD_FORMATS:
+        _set_dword_format(name, value)
+
+
+def _wants_private_clipboard(bump: bool, keep_clipboard: bool) -> bool:
+    """Only a paste write (bump) is marked, and never when the user asked for
+    dictations to stay on the clipboard. A restore writes the user's own data."""
+    return bool(bump) and not keep_clipboard
+
+
 def _clipboard_write_snapshot(snap: ClipboardSnapshot) -> bool:
     """Put a snapshot back on the clipboard. True when every format landed,
     or at least one did when some format was refused outright. Never raises."""
@@ -1269,6 +1323,8 @@ class Injector:
                     if not _u32.SetClipboardData(CF_UNICODETEXT, h):
                         _k32.GlobalFree(h)
                         continue
+                    if _wants_private_clipboard(bump, Injector.keep_clipboard):
+                        _mark_clipboard_private()
                 except Exception:
                     continue
                 finally:
