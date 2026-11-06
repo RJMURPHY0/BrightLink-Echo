@@ -28,9 +28,11 @@ two settings that quietly disagree.
 """
 
 import os
+import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import wave
@@ -55,8 +57,28 @@ BACKFILL_LIMIT = 12
 _HTTP_TIMEOUT = 30.0
 
 
+# Plain http is allowed only for a dev server on this machine.
+_LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
 def base_url() -> str:
-    return (os.environ.get("FTC_TRANSCRIBE_URL") or DEFAULT_BASE_URL).rstrip("/")
+    """Notetaker's origin. Shipped builds ignore FTC_TRANSCRIBE_URL; a source
+    run accepts it only as https (or http on this machine)."""
+    override = (os.environ.get("FTC_TRANSCRIBE_URL") or "").strip()
+    if not override or getattr(sys, "frozen", False):
+        return DEFAULT_BASE_URL
+    try:
+        parts = urllib.parse.urlsplit(override)
+        ok = bool(parts.hostname) and (
+            parts.scheme == "https"
+            or (parts.scheme == "http" and parts.hostname in _LOOPBACK_HOSTS))
+    except ValueError:
+        ok = False
+    if not ok:
+        print(f"[VoiceTraining] Ignoring FTC_TRANSCRIBE_URL={override!r}: it must "
+              f"be https (or http on this machine). Using {DEFAULT_BASE_URL}.")
+        return DEFAULT_BASE_URL
+    return override.rstrip("/")
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────

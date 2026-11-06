@@ -6,8 +6,36 @@ Never raises; a failed send is printed (to the app log in frozen builds).
 
 import json
 import os
+import sys
 import threading
+import urllib.parse
 import urllib.request
+
+# Plain http is allowed only for a dev server on this machine.
+_LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+def _safe_api_url(url: str) -> str:
+    """The configured API origin, or "" (meaning the built-in one) when this is
+    a shipped build or the value is not https (http on this machine is fine
+    from source). A shipped build never sends reports to a config-set host."""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    if getattr(sys, "frozen", False):
+        print("[ErrorReporter] Ignoring ftc_contacts_api_url in a shipped build.")
+        return ""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        ok = bool(parts.hostname) and (
+            parts.scheme == "https"
+            or (parts.scheme == "http" and parts.hostname in _LOOPBACK_HOSTS))
+    except ValueError:
+        ok = False
+    if not ok:
+        print(f"[ErrorReporter] Ignoring ftc_contacts_api_url={url!r}: it must be https.")
+        return ""
+    return url
 
 
 def _load_contacts_config() -> tuple[str, str]:
@@ -46,6 +74,7 @@ def report_error(
     """
     def _send() -> None:
         api_url, secret = _load_contacts_config()
+        api_url = _safe_api_url(api_url)
         if not (api_url and secret) and not token:
             return
         if not api_url:
