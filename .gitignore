@@ -39,6 +39,9 @@ build-*.log
 memory-backup-dream-*/
 backup-dream-*/
 
+# Local agent tooling state: never tracked (was committed by mistake)
+.claude-flow/
+
 # Headless audit run logs — 800+ regenerating prompt/result dumps, not source
 .claude-flow/logs/headless/
 

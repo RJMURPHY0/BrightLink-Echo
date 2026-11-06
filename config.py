@@ -474,6 +474,17 @@ class Config:
             except Exception as e:
                 print(f"[Config] Backend migration save failed (non-fatal): {e}")
 
+        # Hardening: nothing reads a stored account password any more (sign-in
+        # keeps an encrypted session instead), so a leftover one is deleted
+        # from config.json whatever the project URL.
+        if config.supabase_password:
+            config.supabase_password = ""
+            try:
+                config.save()
+                print("[Config] Removed a legacy stored account password.")
+            except Exception as e:
+                print(f"[Config] Could not remove the legacy stored password: {e}")
+
         # One-time migration: the hold/toggle mode UI is gone. Hands-free
         # (toggle) belongs to the main bind and hold-to-talk to the
         # push-to-talk bind, so a legacy "hold" main bind is coerced to
