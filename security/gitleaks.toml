@@ -1,0 +1,101 @@
+# gitleaks rules for the BrightLink estate: gitleaks' default rules plus the providers
+# this estate uses that the defaults miss or match loosely. Found by the 2026-10-27
+# sweep: a Supabase personal access token (sbp_) sat in a repo for 11 weeks because
+# no default rule matched it.
+#
+# Used by .github/workflows/security.yml (PR gate) and secret-sweep.yml (nightly,
+# every repo, full history). Values are never printed: both run with --redact.
+
+title = "BrightLink estate secrets"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "supabase-personal-access-token"
+description = "Supabase personal access token (full management access to every project)"
+regex = '''\bsbp_[a-f0-9]{40}\b'''
+keywords = ["sbp_"]
+
+[[rules]]
+id = "supabase-secret-key"
+description = "Supabase secret API key (bypasses RLS)"
+regex = '''\bsb_secret_[A-Za-z0-9_-]{20,}\b'''
+keywords = ["sb_secret_"]
+
+[[rules]]
+id = "supabase-service-role-jwt"
+description = "Supabase legacy service_role JWT (bypasses RLS)"
+# The payload segment of a JWT whose JSON contains "role":"service_role".
+regex = '''\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]*(?:c2VydmljZV9yb2xl|NlcnZpY2Vfcm9sZ|zZXJ2aWNlX3JvbG)[A-Za-z0-9_-]*\.[A-Za-z0-9_-]{20,}'''
+keywords = ["eyj"]
+
+[[rules]]
+id = "openrouter-api-key"
+description = "OpenRouter API key"
+regex = '''\bsk-or-v1-[a-f0-9]{64}\b'''
+keywords = ["sk-or-v1-"]
+
+[[rules]]
+id = "vercel-token"
+description = "Vercel access token"
+regex = '''\bvc[pkia]_[A-Za-z0-9]{24,}\b'''
+keywords = ["vcp_", "vck_", "vci_", "vca_"]
+
+[[rules]]
+id = "apify-token"
+description = "Apify API token"
+regex = '''\bapify_api_[A-Za-z0-9]{30,}\b'''
+keywords = ["apify_api_"]
+
+[[rules]]
+id = "pinecone-api-key"
+description = "Pinecone API key (can delete the index)"
+regex = '''\bpcsk_[A-Za-z0-9_]{40,}\b'''
+keywords = ["pcsk_"]
+
+[[rules]]
+id = "resend-api-key"
+description = "Resend API key"
+regex = '''\bre_[A-Za-z0-9]{8}_[A-Za-z0-9]{20,}\b'''
+keywords = ["re_"]
+
+[[rules]]
+id = "firecrawl-api-key"
+description = "Firecrawl API key"
+regex = '''\bfc-[a-f0-9]{32}\b'''
+keywords = ["fc-"]
+
+[[rules]]
+id = "groq-api-key"
+description = "Groq API key"
+regex = '''\bgsk_[A-Za-z0-9]{40,}\b'''
+keywords = ["gsk_"]
+
+[[rules]]
+id = "stripe-webhook-secret"
+description = "Stripe webhook signing secret"
+regex = '''\bwhsec_[A-Za-z0-9]{24,}\b'''
+keywords = ["whsec_"]
+
+[[rules]]
+id = "env-assignment-secret"
+description = "A KEY/SECRET/TOKEN/PASSWORD variable assigned a long literal in a dotenv-style line"
+regex = '''(?m)^[ \t]*(?:export[ \t]+)?[A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASS|PAT)[ \t]*=[ \t]*["']?([A-Za-z0-9_\-./+=]{20,})["']?[ \t]*$'''
+secretGroup = 1
+entropy = 3.5
+keywords = ["key", "secret", "token", "pass", "pat"]
+  [[rules.allowlists]]
+  regexes = ['''(?i)^(sb_publishable_|your|example|placeholder|changeme|xxx)''']
+
+[[allowlists]]
+description = "Public-by-design values and fixtures"
+regexes = [
+  '''sb_publishable_[A-Za-z0-9_-]+''',
+]
+paths = [
+  '''(^|/)node_modules/''',
+  '''(^|/)graphify-out/''',
+  '''\.lock$''',
+  '''package-lock\.json$''',
+]

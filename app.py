@@ -3991,7 +3991,7 @@ class WhisperFlowApp:
     def _insert_text(self, text: str, hwnd: int, child: int = 0) -> None:
         """Manual insert — called when user clicks Insert in the popup."""
         self._restore_target_focus(hwnd, child)
-        self.injector.inject(text)
+        self.injector.inject(text, single_line=True)
         print(f"[App] Manual insert: {len(text)} chars")
 
     def _insert_refined(self, text: str, hwnd: int, child: int = 0) -> None:
@@ -4042,7 +4042,7 @@ class WhisperFlowApp:
             for _ in range(max(0, undo_count)):
                 kb.send("ctrl+z")
                 time.sleep(0.05)
-        self.injector.inject(new_text)
+        self.injector.inject(new_text, single_line=True)
         print(f"[App] Replaced with refined text: {len(new_text)} chars")
         self._record_refine_applied()
         if original_text:
@@ -4271,7 +4271,7 @@ class WhisperFlowApp:
                 time.sleep(0.25)
                 self._focus_window(_hwnd)
                 time.sleep(0.1)
-                self.injector.inject(new_text)
+                self.injector.inject(new_text, single_line=True)
                 self._record_refine_applied()
 
             self.popup.show_cursor_icon(

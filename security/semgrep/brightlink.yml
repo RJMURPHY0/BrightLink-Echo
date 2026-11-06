@@ -1,0 +1,41 @@
+# BrightLink's own rules. security.yml runs them on every pull request, so a mistake
+# found once cannot come back. Add a rule whenever a real bug is a catchable pattern,
+# with an example in examples/. The same file lives in all three repos.
+rules:
+  - id: bl-secret-compare-not-constant-time
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: Compare secrets with a constant-time helper (safeCompare or secretMatches), never === or !==.
+    patterns:
+      - pattern-either:
+          - pattern: $A === process.env.$NAME
+          - pattern: process.env.$NAME === $A
+          - pattern: $A !== process.env.$NAME
+          - pattern: process.env.$NAME !== $A
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: .*(SECRET|TOKEN|PASSWORD|API_KEY).*
+  - id: bl-service-role-in-browser-code
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: The service role key must never reach browser code. It bypasses every row security policy.
+    paths:
+      include: ["src/**", "public/**", "components/**"]
+    pattern-regex: SUPABASE_SERVICE_ROLE|SUPABASE_SECRET_KEY
+  - id: bl-secret-in-public-env-var
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: VITE_ and NEXT_PUBLIC_ values ship to every browser, so a secret cannot live in one.
+    pattern-regex: \b(VITE|NEXT_PUBLIC)_[A-Z0-9_]*(SECRET|SERVICE_ROLE|PRIVATE|PASSWORD)[A-Z0-9_]*\b
+  - id: bl-tls-verification-off
+    languages: [python]
+    severity: ERROR
+    message: Never turn off certificate checks. Behind Avast, pass the CA bundle instead.
+    pattern-either:
+      - pattern: $F(..., verify=False, ...)
+      - pattern: ssl._create_unverified_context(...)
+  - id: bl-windows-tool-by-bare-name
+    languages: [python]
+    severity: WARNING
+    message: Start Windows tools by full System32 path. A bare name also searches the exe folder and working directory.
+    pattern-regex: subprocess\.\w+\(\s*\[?\s*["'](powershell|schtasks|taskkill|cmd)(\.exe)?["']

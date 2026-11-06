@@ -23,6 +23,7 @@ import ctypes
 import ctypes.wintypes
 import brand
 import os
+import re
 import threading
 import time
 
@@ -486,6 +487,11 @@ def _is_game_class(class_name: str) -> bool:
     if class_name in GAME_CLASSES:
         return True
     return class_name.startswith(GAME_CLASS_PREFIXES)
+
+
+def _one_line(text: str) -> str:
+    """Line breaks replaced by single spaces (AI output pasted into a terminal)."""
+    return re.sub(r"\s*[\r\n]+\s*", " ", text).strip()
 
 
 def _is_terminal_class(class_name: str) -> bool:
@@ -966,6 +972,9 @@ class Injector:
         # sets these, so its focus contract is untouched.
         self._target_hwnd = 0
         self._target_child = 0
+        # True for AI-written text: a console window gets it on one line, so a
+        # line break in it can never run as a separate command.
+        self._single_line = False
         # Why the last clipboard paste did not happen ("" when it did), for the
         # fallback-to-typing log line.
         self._paste_refusal = ""
@@ -973,9 +982,12 @@ class Injector:
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def inject(self, text: str, release_mods: bool = True,
-               target_hwnd: int = 0, target_child: int = 0) -> bool:
+               target_hwnd: int = 0, target_child: int = 0,
+               single_line: bool = False) -> bool:
         """
         Inject text into the focused window. Thread-safe.
+        single_line=True (AI output): line breaks are replaced by spaces when
+        the text goes into a terminal window.
         release_mods=True: release hotkey modifiers first (use for final injection).
         release_mods=False: skip modifier release (use during streaming while key held).
         target_hwnd/target_child: the top-level window and focused control captured
@@ -995,6 +1007,7 @@ class Injector:
             self.last_method = ""
             self._target_hwnd = int(target_hwnd or 0)
             self._target_child = int(target_child or 0)
+            self._single_line = bool(single_line)
             try:
                 result = self._inject(text, release_mods=release_mods)
                 if not result and not self._partial_direct:
@@ -1035,6 +1048,7 @@ class Injector:
             finally:
                 self._target_hwnd = 0
                 self._target_child = 0
+                self._single_line = False
 
     def inject_immediate(self, text: str) -> bool:
         """
@@ -1537,6 +1551,8 @@ class Injector:
             VK_V = 0x56
             u32 = ctypes.windll.user32
 
+            if self._single_line:
+                text = _one_line(text)
             ok, original = self._clipboard_set(text)
             if not ok:
                 return False

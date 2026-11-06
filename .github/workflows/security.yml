@@ -37,7 +37,7 @@ env:
   # Per repo: the lockfiles osv-scanner reads and the Semgrep rule packs.
   OSV_ARGS: -L requirements.txt -L requirements.txt:constraints.txt
   SEMGREP_CONFIGS: --config p/default --config p/owasp-top-ten --config p/secrets --config p/python
-  SEMGREP_EXCLUDES: --exclude=tests
+  SEMGREP_EXCLUDES: --exclude=tests --exclude=security/semgrep/examples
 
 jobs:
   secrets:
@@ -104,6 +104,8 @@ jobs:
           SEMGREP_ENABLE_VERSION_CHECK: "0"
         run: |
           set +e -f   # -f: the exclude globs reach Semgrep unexpanded
+          # BrightLink's own rules, added as real bugs are found (security/semgrep).
+          [ -f security/semgrep/brightlink.yml ] && SEMGREP_CONFIGS="$SEMGREP_CONFIGS --config security/semgrep/brightlink.yml"
           if [ "$EVENT" = pull_request ]; then
             # Only findings this PR adds, and only ERROR severity, fail the check.
             semgrep scan $SEMGREP_CONFIGS $SEMGREP_EXCLUDES --metrics off --baseline-commit "$BASE" \
