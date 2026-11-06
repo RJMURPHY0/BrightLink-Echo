@@ -1,3 +1,4 @@
+from pathlib import Path
 """The background AI accuracy check is gated by the ai_accuracy_check setting,
 whose default comes from one named constant."""
 import os
@@ -30,6 +31,14 @@ class AccuracyCheckTests(unittest.TestCase):
         src = open(app_mod.__file__, encoding="utf-8").read()
         self.assertEqual(src.count("self._ai_accuracy_check_on()"), 2)
 
+
+class SwitchAndPolicy(unittest.TestCase):
+    def test_settings_has_the_switch_and_the_policy_says_so(self):
+        root = Path(__file__).resolve().parents[1]
+        self.assertIn('_toggle_card("ai_accuracy_check"', (root / "app_window.py").read_text(encoding="utf8"))
+        policy = (root / "PRIVACY.md").read_text(encoding="utf8")
+        self.assertIn("**The AI accuracy check**", policy)
+        self.assertNotIn("never leave your computer unless", policy)
 
 if __name__ == "__main__":
     unittest.main()

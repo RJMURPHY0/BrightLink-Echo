@@ -9985,6 +9985,10 @@ class AppWindow:
         _toggle_card("auto_lists", "Auto Lists",
                      "Lays spoken lists out as numbered or bulleted lines.",
                      True, icon="punct")
+        from config import AI_ACCURACY_CHECK_DEFAULT
+        _toggle_card("ai_accuracy_check", "AI Accuracy Check",
+                     "Fixes mistakes from context. Sends the text, never audio, to AI.",
+                     AI_ACCURACY_CHECK_DEFAULT, icon="punct")
         _toggle_card("homophone_fix", "Fix Sound-Alike Words",
                      "Picks won or one, there or their, from the rest of the "
                      "sentence.",

@@ -1,21 +1,24 @@
 # BrightLink Echo privacy policy
 
-Last updated: 12 October 2026
+Last updated: 6 November 2026
 
 BrightLink Echo is a Windows dictation app published by BRIGHTLINK (OS) LTD,
 registered in England and Wales, company number 17459281. This policy covers
 what the app does with your data.
 
-## Your voice and words stay on your computer
+## Your voice stays on your computer
 
 Speech recognition runs on your own computer. Your recordings, the text of
 your dictations, your vocabulary, snippets, learned phrases and settings are
 saved in your Windows user folder. Your vocabulary, snippets and learned
 phrases are also backed up to your BrightLink account when you are signed in
 (see "Your words are always backed up" below). The text of your dictations and
-your recordings never leave your computer unless you switch on one of these
-yourself:
+your recordings stay on your computer, except for these:
 
+- **The AI accuracy check**, which is on by default when you are signed in. It
+  sends the text of a dictation, never the audio, to an AI provider to fix
+  mistakes from context (see "AI features" below). You can switch it off in
+  Settings.
 - **Cloud Sync** (Settings > Account, off by default), described below.
 - **Voice training**, if you turn it on.
 - **A feedback report** from History, when you choose to send one (and its
@@ -57,7 +60,8 @@ optional: the app works offline without an account.
 
 ## AI features
 
-Refine, Fix All and the background accuracy check send the text being
+Refine, Fix All and the AI accuracy check (on by default, Settings to switch
+it off) send the text being
 worked on (never audio) to an AI provider: OpenRouter, which routes to model
 providers such as Google, or Anthropic. The text is used only to return the
 result.
