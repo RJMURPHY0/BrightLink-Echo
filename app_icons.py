@@ -416,8 +416,32 @@ def _extract_via_private(exe_path: str, size: int = 48):
         return None
 
 
+_DRIVE_REMOTE = 4
+
+
+def is_local_exe_path(exe_path) -> bool:
+    """True only for an absolute path on a local drive letter. A network
+    (UNC) path or a mapped network drive is refused before anything touches
+    it: reading an icon from one would make Windows contact that server.
+    History rows carry app_exe from other devices."""
+    try:
+        path = str(exe_path or "")
+        if len(path) < 3 or path[1] != ":" or not path[0].isalpha():
+            return False
+        if path[2] not in ("\\", "/"):
+            return False
+        if ctypes.windll.kernel32.GetDriveTypeW(path[:3]) == _DRIVE_REMOTE:
+            return False
+        return True
+    except Exception as e:
+        print(f"[AppIcons] Could not classify {exe_path!r}: {e}")
+        return False
+
+
 def _extract_exe_icon(exe_path: str):
     """exe path -> RGBA PIL image, or None."""
+    if not is_local_exe_path(exe_path):
+        return None
     # Prefer an exact 48px extraction (crispest when downscaled to the row size).
     img = _extract_via_private(exe_path, 48)
     if img is not None:
@@ -474,6 +498,8 @@ def _exe_icon_cache_key(exe_path: str) -> tuple:
 
 def _get_raw_exe_icon(exe_path: str):
     """Extract once per executable version; failed attempts are never cached."""
+    if not is_local_exe_path(exe_path):
+        return None
     key = _exe_icon_cache_key(exe_path)
     cached = _raw_icon_cache.get(key)
     if cached is not None:
@@ -487,7 +513,7 @@ def _get_raw_exe_icon(exe_path: str):
 def get_app_icon(exe_path: str, bg: str):
     """tk PhotoImage of the exe's icon composited onto bg. None on failure.
     Caller must keep a reference (tk requirement); the cache does that."""
-    if not exe_path:
+    if not exe_path or not is_local_exe_path(exe_path):
         return None
     exe_key = _exe_icon_cache_key(exe_path)
     key = (exe_key, bg)

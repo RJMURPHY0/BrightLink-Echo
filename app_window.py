@@ -25,8 +25,10 @@ import ctypes
 
 try:
     from app_icons import (get_app_icon, get_brand_icon, get_site_icon,
-                           get_monogram_icon, get_fallback_icon)
+                           get_monogram_icon, get_fallback_icon,
+                           is_local_exe_path)
 except Exception:
+    is_local_exe_path = lambda *a, **k: False  # noqa: E731
     get_app_icon = lambda *a, **k: None        # noqa: E731
     get_brand_icon = lambda *a, **k: None      # noqa: E731
     get_site_icon = lambda *a, **k: None       # noqa: E731
@@ -7547,6 +7549,8 @@ class AppWindow:
     def _history_icon(self, item: dict, bg: str):
         app_name = item.get("app_name") or ""
         app_exe = item.get("app_exe") or ""
+        if app_exe and not is_local_exe_path(app_exe):
+            app_exe = ""   # a network path is never read for an icon
         return (get_site_icon(app_name, app_exe, bg)
                 or get_brand_icon(app_name, bg)
                 or get_app_icon(app_exe, bg)

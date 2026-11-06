@@ -1393,7 +1393,7 @@ class WhisperFlowApp:
             self.db.log_error_event(
                 event_type, detail=detail,
                 app_name=_app.get("app_name", ""),
-                app_exe=_app.get("app_exe", ""),
+                app_exe=_exe_basename(_app.get("app_exe", "")),
                 window_class=window_class,
                 app_version=APP_VERSION,
                 transcription_created_at=transcription_created_at,
@@ -4406,6 +4406,13 @@ def _local_request_origin(headers) -> "str | None":
     if site and site != "none":
         return None
     return ""
+
+
+def _exe_basename(path) -> str:
+    """The file name of an app's exe, for telemetry: the folder (which can hold
+    a user name or a project) never leaves the machine."""
+    import ntpath
+    return ntpath.basename(str(path or "").replace("/", "\\"))
 
 
 def _start_local_server(app_window, version: str, is_idle=None) -> None:
