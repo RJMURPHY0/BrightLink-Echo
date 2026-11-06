@@ -82,6 +82,7 @@ if sys.platform == "win32":
 import brand
 import data_paths
 import install_layout
+import system_tools
 from config import Config
 # Recorder / Transcriber / asr_engine / StreamingSession / Injector / TrayApp
 # are deliberately NOT imported here: between them they pull in numpy,
@@ -5039,7 +5040,7 @@ def _ensure_logon_task() -> None:
     _NO_WIN = subprocess.CREATE_NO_WINDOW
     try:
         result = subprocess.run(
-            ["schtasks", "/query", "/tn", TASK_NAME, "/xml"],
+            [system_tools.system_tool("schtasks.exe"), "/query", "/tn", TASK_NAME, "/xml"],
             capture_output=True, text=True, creationflags=_NO_WIN,
         )
         # lower(), not normcase(): normcase also turns the XML's / into \.
@@ -5101,7 +5102,7 @@ def _ensure_logon_task() -> None:
             xml_path = tf.name
         try:
             result = subprocess.run(
-                ["schtasks", "/create", "/tn", TASK_NAME, "/xml", xml_path, "/f"],
+                [system_tools.system_tool("schtasks.exe"), "/create", "/tn", TASK_NAME, "/xml", xml_path, "/f"],
                 capture_output=True, text=True, creationflags=_NO_WIN,
             )
         finally:
@@ -5118,7 +5119,7 @@ def _remove_logon_task() -> None:
     import subprocess
     try:
         r = subprocess.run(
-            ["schtasks", "/delete", "/tn", TASK_NAME, "/f"],
+            [system_tools.system_tool("schtasks.exe"), "/delete", "/tn", TASK_NAME, "/f"],
             capture_output=True, text=True,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
@@ -5314,7 +5315,7 @@ def _repair_desktop_shortcut(target: str) -> None:
     )
     try:
         r = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+            [system_tools.powershell_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
             capture_output=True, text=True, timeout=20,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )

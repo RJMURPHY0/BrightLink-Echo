@@ -170,6 +170,7 @@ hiddenimports += [
     # Imported lazily on the dead-capture path and by the tray's
     # "Restart Windows audio" item.
     'audio_engine',
+    'system_tools',
     'brand',
     # Imported lazily at the top of main() (the windowed exe's echo.log).
     'runtime_log',

@@ -22,6 +22,7 @@ import ctypes
 import os
 import subprocess
 import sys
+import system_tools
 import threading
 import time
 from ctypes import wintypes
@@ -124,8 +125,7 @@ def _tool(name: str) -> str:
     """Full System32 path of a Windows tool. The elevated copy runs as admin,
     and a bare name would be searched for in Echo's own (user-writable) folder
     first, so a planted taskkill.exe there would run elevated."""
-    return os.path.join(os.environ.get("SystemRoot") or r"C:\Windows",
-                        "System32", name)
+    return system_tools.system_tool(name)
 
 
 _REAL_SUBPROCESS_RUN = subprocess.run

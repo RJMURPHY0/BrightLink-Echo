@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import system_tools
 import tempfile
 import threading
 import time
@@ -540,7 +541,7 @@ def authenticode_signer(path: str) -> tuple:
           "Write-Output ([string]$s.SignerCertificate.Subject); "
           "Write-Output ([string]$s.SignerCertificate.Issuer)")
     try:
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+        r = subprocess.run([system_tools.powershell_exe(), "-NoProfile", "-Command", ps],
                            capture_output=True, text=True, timeout=60,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         lines = [ln.strip() for ln in (r.stdout or "").strip().splitlines()]
@@ -651,7 +652,7 @@ def spawn_activation(version: str, pid: int, root: str = "",
                        install_layout.contents_dir_name(v), "activate.ps1")
     script = os.path.join(root, f"activate-{v}.ps1")
     shutil.copyfile(src, script)
-    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+    cmd = [system_tools.powershell_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass",
            "-File", script,
            "-InstallDir", root, "-Version", v, "-Mode", "Update",
            "-WaitPid", str(pid)]
@@ -957,7 +958,7 @@ Log "Done."
             f.write(script)
 
     cmd = [
-        "powershell",
+        system_tools.powershell_exe(),
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-File", ps_file,
