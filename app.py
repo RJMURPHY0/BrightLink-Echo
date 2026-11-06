@@ -4426,6 +4426,7 @@ def _start_local_server(app_window, version: str, is_idle=None) -> None:
     """
     import http.server
     import json
+    import socket
     import socketserver
 
     class _Handler(http.server.BaseHTTPRequestHandler):
@@ -4518,11 +4519,32 @@ def _start_local_server(app_window, version: str, is_idle=None) -> None:
                 self.send_response(404)
                 self.end_headers()
 
-    class _Server(socketserver.TCPServer):
-        allow_reuse_address = True
+    class _Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
+        # Windows: SO_REUSEADDR lets another process bind the same port and
+        # share the traffic, so take the port exclusively instead. Other
+        # platforms keep the usual reuse.
+        allow_reuse_address = sys.platform != "win32"
+        daemon_threads = True
+
+        def server_bind(self):
+            if sys.platform == "win32":
+                self.socket.setsockopt(
+                    socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            super().server_bind()
+
+    # A client that connects and says nothing must not hold a thread for ever.
+    _Handler.timeout = 10
 
     try:
-        server = _Server(("127.0.0.1", _LOCAL_PORT), _Handler)
+        server = None
+        for _try in range(4):
+            try:
+                server = _Server(("127.0.0.1", _LOCAL_PORT), _Handler)
+                break
+            except OSError:
+                if _try == 3:
+                    raise
+                time.sleep(0.25)   # the previous copy's port can take a moment to free
         threading.Thread(
             target=server.serve_forever, daemon=True, name="local-server"
         ).start()
