@@ -46,7 +46,15 @@ DEFAULT_MODEL_VERSION = "v2"
 # to its size and SHA-256 (from the HF API, and matching a working install
 # byte for byte on 2026-09-29). The model files in this commit are unchanged
 # since the 2025-05-06 upload; the newest commit only edited the README.
-_PINNED_REVISION = {"v2": "0bbb45a3365852604aef28b538a8f066f4ccaa85"}
+# v3: the model files have not changed since the 2025-08-16 upload; the newest
+# commit (2026-02-17) only edited the README. Sizes and SHA-256 read from the
+# HF API (revision endpoint, blobs=true) on 2026-11-06; config.json and
+# vocab.txt are not LFS files, so their hashes come from downloading them at
+# this revision.
+_PINNED_REVISION = {
+    "v2": "0bbb45a3365852604aef28b538a8f066f4ccaa85",
+    "v3": "8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce",
+}
 _PINNED_FILES = {
     "v2": {
         "encoder-model.int8.onnx": (
@@ -62,6 +70,20 @@ _PINNED_FILES = {
             97,
             "666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466"),
     },
+    "v3": {
+        "encoder-model.int8.onnx": (
+            652_183_999,
+            "6139d2fa7e1b086097b277c7149725edbab89cc7c7ae64b23c741be4055aff09"),
+        "decoder_joint-model.int8.onnx": (
+            18_202_004,
+            "eea7483ee3d1a30375daedc8ed83e3960c91b098812127a0d99d1c8977667a70"),
+        "vocab.txt": (
+            93_939,
+            "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"),
+        "config.json": (
+            97,
+            "666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466"),
+    },
 }
 _VERIFIED_MARKER = ".verified.json"
 
@@ -73,7 +95,7 @@ def _hf_base(version: str = DEFAULT_MODEL_VERSION) -> str:
 
 
 # name -> minimum sane size in bytes. A pinned version checks the exact size
-# instead; this floor only applies to an unpinned one (v3).
+# instead; this floor only applies to a version with no pin.
 _MODEL_FILES = {
     "encoder-model.int8.onnx": 600_000_000,
     "decoder_joint-model.int8.onnx": 5_000_000,
