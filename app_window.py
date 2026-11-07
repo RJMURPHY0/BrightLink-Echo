@@ -11584,11 +11584,11 @@ class AppWindow:
         pop = tk.Toplevel(root)
         pop.overrideredirect(True)
         pop.attributes("-topmost", True)
-        pop.configure(bg="")
+        pop.configure(bg=C["bg"])
         pop.attributes("-alpha", 0.0)
 
         # ── Confetti canvas (full overlay) ──────────────────────────────
-        canvas = tk.Canvas(pop, highlightthickness=0, bg="",
+        canvas = tk.Canvas(pop, highlightthickness=0, bg=C["bg"],
                            cursor="hand2")
         canvas.pack(fill="both", expand=True)
 

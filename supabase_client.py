@@ -494,6 +494,35 @@ class SupabaseLogger:
         threading.Thread(target=_insert, daemon=True,
                          name="supabase-error-log").start()
 
+    def insert_error_event_now(self, event_type: str, detail=None,
+                               app_version: str = "") -> bool:
+        """Blocking twin of log_error_event for crash reports. True only when
+        the row was stored, so crash_watch keeps the report and retries later
+        when this is False (offline, signed out, RLS refusal)."""
+        if not self._enabled:
+            return False
+        payload = {
+            "event_type": event_type,
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        if isinstance(detail, dict):
+            payload["detail"] = detail
+        elif detail:
+            payload["detail"] = {"message": str(detail)[:500]}
+        if app_version:
+            payload["app_version"] = app_version
+        if self._user_id and self._user_id != "local":
+            payload["user_id"] = self._user_id
+        try:
+            from postgrest.types import ReturnMethod
+            self._get_client().table("error_events").insert(
+                payload, returning=ReturnMethod.minimal).execute()
+            print(f"[Supabase] error_event (sync): {event_type}")
+            return True
+        except Exception as e:
+            print(f"[Supabase] error_event (sync) failed, will retry: {e}")
+            return False
+
     # ------------------------------------------------------------------
     # Feedback reports (History → flag)
     # ------------------------------------------------------------------
