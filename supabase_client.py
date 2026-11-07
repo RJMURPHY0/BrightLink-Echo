@@ -494,6 +494,30 @@ class SupabaseLogger:
         threading.Thread(target=_insert, daemon=True,
                          name="supabase-error-log").start()
 
+    def insert_error_event_now(self, event_type: str, detail: dict,
+                               app_version: str = "") -> bool:
+        """Blocking insert for reports that must not be lost. False while
+        signed out or on any failure, so the caller keeps the report."""
+        if not self._enabled or not self._user_id or self._user_id == "local":
+            return False
+        payload = {
+            "event_type": event_type,
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "detail": detail,
+            "user_id": self._user_id,
+        }
+        if app_version:
+            payload["app_version"] = app_version
+        try:
+            from postgrest.types import ReturnMethod
+            self._get_client().table("error_events").insert(
+                payload, returning=ReturnMethod.minimal).execute()
+            print(f"[Supabase] error_event: {event_type}")
+            return True
+        except Exception as e:
+            print(f"[Supabase] error_event {event_type} kept for retry: {e}")
+            return False
+
     # ------------------------------------------------------------------
     # Feedback reports (History → flag)
     # ------------------------------------------------------------------

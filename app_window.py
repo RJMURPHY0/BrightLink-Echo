@@ -2436,6 +2436,12 @@ class AppWindow:
             pass
 
         self._root = tk.Tk()
+        try:
+            import crash_watch
+            if crash_watch.get():
+                crash_watch.get().watch_tk(self._root)
+        except Exception as e:
+            print(f"[App] Window watch is off: {e}")
         self._root.withdraw()  # hide before Windows has a chance to render the default blank window
         self._root.title(brand.WINDOW_TITLE)
         # Window / taskbar icon — the BrightLink chain mark (logo.ico). Setting it at runtime is
@@ -11584,11 +11590,14 @@ class AppWindow:
         pop = tk.Toplevel(root)
         pop.overrideredirect(True)
         pop.attributes("-topmost", True)
-        pop.configure(bg="")
+        # The confetti overlay shows the desktop through this one key colour.
+        _SEE_THROUGH = "#010102"
+        pop.configure(bg=_SEE_THROUGH)
+        pop.attributes("-transparentcolor", _SEE_THROUGH)
         pop.attributes("-alpha", 0.0)
 
         # ── Confetti canvas (full overlay) ──────────────────────────────
-        canvas = tk.Canvas(pop, highlightthickness=0, bg="",
+        canvas = tk.Canvas(pop, highlightthickness=0, bg=_SEE_THROUGH,
                            cursor="hand2")
         canvas.pack(fill="both", expand=True)
 

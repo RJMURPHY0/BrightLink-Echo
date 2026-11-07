@@ -80,8 +80,10 @@ if sys.platform == "win32":
     startup_order.wait_at_sign_in(sys.argv)
 
 import brand
+import crash_watch
 import data_paths
 import install_layout
+import update_gate
 import system_tools
 from config import Config, AI_ACCURACY_CHECK_DEFAULT
 # Recorder / Transcriber / asr_engine / StreamingSession / Injector / TrayApp
@@ -264,6 +266,7 @@ class WhisperFlowApp:
         )
         self.db = SupabaseLogger(url=config.supabase_url, key=config.supabase_key)
         self.db.set_auth_retry(auth, self._remote_sign_out)
+        self._connect_crash_watch(auth)
         # Cloud Sync is opt-in per PC (off by default): the logger uploads and
         # pulls nothing of the user's until this is on.
         self.db.set_sync_enabled(bool(getattr(config, "cloud_sync", False)))
@@ -409,6 +412,7 @@ class WhisperFlowApp:
         # "now" so a just-launched app never restarts under the user's feet.
         self._last_dictation_ts = time.time()
         self._auto_update_versions: set = set()
+        self._restart_gate = update_gate.RestartGate()
         # Throttle user-facing update notifications to max once per calendar day
         # during working hours (08–21), so repeated 6-hour checks don't spam the
         # tray/banner.  The download + install still runs silently; only the
@@ -1128,6 +1132,31 @@ class WhisperFlowApp:
             on_paged_in=_paged_in)
         self._keep_warm.start()
 
+    def _connect_crash_watch(self, auth) -> None:
+        """Crash, hang and uncaught-error reports go to error_events and to the
+        BrightLink error log. Hermes reads the feed and tells Ryan on Telegram."""
+        watch = crash_watch.get()
+        if not watch:
+            return
+
+        def _report(kind: str, detail: dict) -> bool:
+            if not self.db.insert_error_event_now(kind, detail, app_version=APP_VERSION):
+                return False
+            if kind in crash_watch.LOGGED_KINDS:
+                from error_reporter import report_error
+                reason = detail.get("cause") or detail.get("exception") or ""
+                report_error(
+                    f"{brand.PRODUCT_NAME} {kind}: {reason}".strip(),
+                    context={k: v for k, v in detail.items() if k != "log_tail"},
+                    user_email=getattr(auth, "user_email", None),
+                    token=getattr(auth, "access_token", "") or None,
+                )
+            return True
+
+        watch.set_busy_check(
+            lambda: self.hotkey_manager.state != AppState.IDLE)
+        watch.set_reporter(_report)
+
     def _start_auto_update(self, version: str, url: str) -> None:
         """Download + install *version* in the background, restarting only once
         the app has been idle for a while. One attempt per version per process —
@@ -1143,6 +1172,8 @@ class WhisperFlowApp:
         self._auto_update_versions.add(version)
 
         def _log_event(stage, ok, detail):
+            if stage == "swap_started" and crash_watch.get():
+                crash_watch.get().mark_exit("update")
             try:
                 self.db.log_update_event(
                     stage, from_version=APP_VERSION, to_version=version,
@@ -1155,7 +1186,7 @@ class WhisperFlowApp:
                 run_auto_update(
                     version, url, exe_path,
                     is_idle=self._safe_to_restart,
-                    on_status=self.app_window.set_update_status,
+                    on_status=self._update_status,
                     on_event=_log_event,
                 )
                 # run_auto_update only returns on download failure — allow the
@@ -1176,9 +1207,21 @@ class WhisperFlowApp:
         """True when an update-restart won't interrupt the user: nothing is
         recording/processing and the last dictation was a while ago (which also
         keeps the post-dictation popup with its Insert/Undo buttons usable)."""
-        if self.hotkey_manager.state != AppState.IDLE:
-            return False
-        return (time.time() - self._last_dictation_ts) > 120
+        return update_gate.safe_to_restart(
+            self.hotkey_manager.state == AppState.IDLE,
+            time.time() - self._last_dictation_ts,
+            update_gate.input_idle_seconds(),
+            self._restart_gate.waiting_s(),
+        )
+
+    def _update_status(self, message: str) -> None:
+        self.app_window.set_update_status(message)
+        if message.startswith("Installing"):
+            # A restart with no word looks like a crash.
+            from app_window import show_toast
+            self.app_window._ui_after(0, lambda: show_toast(
+                self.app_window._root,
+                f"{brand.PRODUCT_NAME} is updating and will reopen by itself."))
 
     def _announce_update_if_any(self) -> None:
         """First run after an update: a confetti celebration popup, or
@@ -4359,6 +4402,8 @@ class WhisperFlowApp:
 
     def _shutdown(self) -> None:
         print("[App] Shutting down...")
+        if crash_watch.get():
+            crash_watch.get().mark_exit("quit")
         self.hotkey_manager.unregister()
         self.refine_hotkey_manager.unregister()
         if self.recorder is not None and self.recorder.is_recording:
@@ -4623,6 +4668,11 @@ def _ensure_single_instance() -> None:
 
     # We are the first instance — hold the mutex for the process lifetime.
     _SINGLETON_MUTEX = (mutex, legacy)
+    try:
+        crash_watch.start(data_paths.local_dir(), APP_VERSION,
+                          frozen=bool(getattr(sys, "frozen", False)))
+    except Exception as e:
+        print(f"[App] Crash watch is off: {e}")
 
 
 TASK_NAME = brand.TASK_NAME
@@ -5524,6 +5574,10 @@ def _thread_excepthook(args) -> None:
             f.write("\n")
     except Exception:
         pass
+    watch = crash_watch.get()
+    if watch:
+        watch.note_exception("thread_error", args.exc_type, args.exc_value,
+                             args.exc_traceback)
     # Still print so it shows in a console/source run.
     print(f"[App] Uncaught thread exception in {args.thread.name if args.thread else '?'}: {args.exc_value}")
 
@@ -5546,6 +5600,9 @@ def main() -> None:
         raise
     except BaseException as e:
         _log_startup_error(e)
+        watch = crash_watch.get()
+        if watch:
+            watch.on_fatal(e)
         raise
 
 
