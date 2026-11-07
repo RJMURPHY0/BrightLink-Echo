@@ -131,7 +131,8 @@ def scan(paths, diff: str, title: str = "", body: str = "", from_fork: bool = Fa
     for rx_sev, why, rx in SECRET_RULES:
         for field, text in (("PR title", title), ("PR text", body)):
             if text and rx.search(text):
-                add(rx_sev, why, field)
+                # PR text is not code and Dependabot pastes release notes into it: only a secret blocks there.
+                add(rx_sev if why == "looks like a secret" else "REVIEW", why, field)
     for path, n, text in added_lines(diff):
         if LOCKFILE.search(path):
             continue
