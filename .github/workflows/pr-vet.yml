@@ -1,0 +1,36 @@
+# PR vet: the required `pr-vet` check on every pull request.
+#
+# Fails only on a blocking finding: a secret, hidden characters, a package install script, a key file,
+# a download piped into a shell, a PR from a fork, or a PR too large to scan. Everything else passes with
+# the places to read listed in the job summary. A pass is not a review. Cloud Hermes reads each PR and
+# sends the verdict to Telegram. The scanner runs from the base branch, so a PR cannot change what scans it.
+# No secrets are used and the checkout keeps no credentials.
+# The same file lives in Brightlink, BrightLink-Notetaker, BrightLink-Echo, CMS-system and Roadmap.
+name: PR vet
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-vet-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-vet:
+    name: pr-vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          persist-credentials: false
+      - name: Scan the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python3 security/pr_vet.py ci "${GITHUB_REPOSITORY#*/}" "$PR_NUMBER"
