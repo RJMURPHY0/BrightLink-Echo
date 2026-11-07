@@ -24,7 +24,9 @@
 
 ## Paths to skip
 
-`assets/`, `assets/brand/`, `assets/brand_icons/`, `*.png`, `*.ico`, `refine_debug.log`, `installer/single_instance.isi`, `.claude-flow/`, `.claude/`, `docs/` (review if relevant but don't nitpick).
+`assets/`, `assets/brand/`, `assets/brand_icons/`, `*.png`, `*.ico`, `refine_debug.log`, `installer/single_instance.isi`, `docs/` (review if relevant but don't nitpick).
+
+Never skip lockfiles, `.claude/`, `.claude-flow/`, or key and secret files (`*.key`, `*.secret`, `*credentials*`, `.env*`). Read them: a key or secret file in a diff is a finding.
 
 ## Evidence rules
 
