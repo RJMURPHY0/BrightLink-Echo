@@ -270,17 +270,34 @@ def cmd_accept(a) -> int:
 MERGE_RX = re.compile(r"(?:^|[;&|(]\s*|\n\s*)(?:\S*[\\/])?gh(?:\.exe)?\s+pr\s+merge\b([^;&|\n]*)", re.I)
 API_RX = re.compile(r"(?:^|[;&|(]\s*|\n\s*)(?:\S*[\\/])?gh(?:\.exe)?\s+api\b[^;&|\n]*repos/([\w.-]+)/([\w.-]+)/pulls/(\d+)/merge\b", re.I)
 AUTO_RX = re.compile(r"(?:^|[;&|(]\s*|\n\s*)(?:\S*[\\/])?gh(?:\.exe)?\s+(?:api\b[^;&|\n]*(?:mergePullRequest|enablePullRequestAutoMerge)|pr\s+merge\b[^;&|\n]*--auto)", re.I)
-GIT_RX = re.compile(r"(?:^|[;&|(]\s*|\n\s*)git(?:\s+-C\s+\S+)?\s+(?:merge|cherry-pick)\b[^;&|\n]*?\b(?:refs/remotes/)?origin/((?:%s)[/-][^\s;&|]+)" % "|".join(UNTRUSTED_PREFIXES), re.I)
+GIT_RX = re.compile(r"(?:^|[;&|(]\s*|\n\s*)git(?:\s+-C\s+\S+)?\s+(?:merge|cherry-pick)(?=\s)[^;&|\n]*?\b(?:refs/remotes/)?origin/((?:%s)[/-][^\s;&|]+)" % "|".join(UNTRUSTED_PREFIXES), re.I)
 
 
 def repo_from_cwd(cwd: str) -> str:
     try:
-        url = subprocess.run(["git", "-C", cwd or ".", "remote", "get-url", "origin"], capture_output=True, text=True,
+        url = subprocess.run(["git", "remote", "get-url", "origin"], cwd=cwd or ".", capture_output=True, text=True,
                              timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
     m = re.search(r"[/:]([\w.-]+?)(?:\.git)?\s*$", url)
     return m.group(1) if m else ""
+
+
+def origin_branch_sha(cwd: str, branch: str) -> str:
+    """The commit origin/<branch> points at, or "" when unknown. A branch name comes out of a command someone
+    else may have written, so it is looked up in git's list and never put on git's own command line."""
+    try:
+        out = subprocess.run(["git", "for-each-ref", "--format=%(objectname) %(refname)", "refs/remotes/origin"],
+                             cwd=cwd or ".", capture_output=True, text=True, timeout=10,
+                             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    wanted = f"refs/remotes/origin/{branch}"
+    for line in out.splitlines():
+        sha, _, ref = line.partition(" ")
+        if ref == wanted:
+            return sha
+    return ""
 
 
 def gate(command: str, cwd: str = "") -> str:
@@ -316,13 +333,14 @@ def gate(command: str, cwd: str = "") -> str:
             return f"PR gate: {repo} #{number} changed since it was vetted. {how}"
     for m in GIT_RX.finditer(command):
         branch = m.group(1)
+        named = re.search(r'''\bgit\s+-C\s+("[^"]+"|'[^']+'|\S+)''', m.group(0))
+        if named:
+            cwd = named.group(1).strip("\"'")
         stamps = [json.loads(p.read_text(encoding="utf-8")) for p in STAMPS.glob("*.json")] if STAMPS.exists() else []
         ok = [s for s in stamps if s.get("branch") == branch and s.get("reason")]
         if not ok:
             return f"PR gate: branch {branch} has no vetted PR. {how}"
-        r = subprocess.run(["git", "-C", cwd or ".", "rev-parse", f"refs/remotes/origin/{branch}"], capture_output=True,
-                           text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-        if r.stdout.strip() not in {s.get("sha") for s in ok}:
+        if origin_branch_sha(cwd, branch) not in {s.get("sha") for s in ok}:
             return f"PR gate: branch {branch} changed since it was vetted. {how}"
     return ""
 
