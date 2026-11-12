@@ -15,6 +15,7 @@ import datetime
 from queue import Queue, Full
 from typing import Callable, Optional
 from brightlink_api import RetryingSupabaseClient
+import telemetry_scrub  # stdlib only: scrubs every diagnostics row
 
 # Table name in Supabase
 _TABLE = "transcriptions"
@@ -243,6 +244,10 @@ class SupabaseLogger:
         # down while it is off. Before v1.8.0 this all ran for every signed-in
         # user with no switch; it is now opt-in on each PC.
         self._sync_enabled = False
+        # Diagnostics (Settings > Account > Send Diagnostics). ON by default,
+        # as it has always been; off means no error_events row leaves this PC.
+        # Every row is scrubbed by telemetry_scrub before it is sent.
+        self._diagnostics_enabled = True
         # One delete flush at a time (a click and the periodic sync can race).
         self._flush_lock = threading.Lock()
         self._auth_retry = None
@@ -264,6 +269,15 @@ class SupabaseLogger:
 
     def set_sync_enabled(self, on: bool) -> None:
         self._sync_enabled = bool(on)
+
+    def set_diagnostics_enabled(self, on: bool) -> None:
+        """The user's Send Diagnostics choice: off stops every fault report."""
+        self._diagnostics_enabled = bool(on)
+        print(f"[Supabase] Diagnostics {'on' if on else 'off'}.")
+
+    @property
+    def diagnostics_enabled(self) -> bool:
+        return self._diagnostics_enabled
 
     @property
     def sync_enabled(self) -> bool:
@@ -456,7 +470,7 @@ class SupabaseLogger:
         detail: dict → stored as jsonb; anything else → {"message": str}.
         transcription_created_at links the event to its transcriptions row.
         """
-        if not self._enabled:
+        if not self._enabled or not self._diagnostics_enabled:
             return
         payload = {
             "event_type": event_type,
@@ -478,6 +492,7 @@ class SupabaseLogger:
             payload["transcription_created_at"] = transcription_created_at
         if self._user_id and self._user_id != "local":
             payload["user_id"] = self._user_id
+        payload = telemetry_scrub.scrub_event(payload)
 
         def _insert():
             try:
@@ -500,6 +515,11 @@ class SupabaseLogger:
         signed out or on any failure, so the caller keeps the report."""
         if not self._enabled or not self._user_id or self._user_id == "local":
             return False
+        if not self._diagnostics_enabled:
+            # Switched off: the report is dropped on purpose, so the caller
+            # must not keep it for a retry either.
+            print(f"[Supabase] error_event {event_type} not sent: diagnostics off.")
+            return True
         payload = {
             "event_type": event_type,
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -508,6 +528,7 @@ class SupabaseLogger:
         }
         if app_version:
             payload["app_version"] = app_version
+        payload = telemetry_scrub.scrub_event(payload)
         try:
             from postgrest.types import ReturnMethod
             self._get_client().table("error_events").insert(

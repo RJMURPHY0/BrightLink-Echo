@@ -24,6 +24,7 @@ import numpy as np
 import sounddevice as sd
 from collections import deque
 from typing import Optional
+import pa_guard  # stdlib only: the one PortAudio lock
 
 _PREROLL_KEEP_SECONDS = 1.5   # ring buffer length while idle
 _PREROLL_SEED_SECONDS = 0.8   # pre-hotkey audio prepended to a recording: covers
@@ -140,6 +141,8 @@ _DEVICE_REFRESH_TICKS = 60    # full PortAudio refresh every N watchdog ticks (~
                               # the evidence probe covers a mic that stops hearing
                               # the user — so a slower cadence just means fewer
                               # teardowns that could clip a keypress's first words.
+_RESUME_GAP_SECONDS = 15.0    # a watchdog tick this much longer than its sleep
+                              # on the wall clock = the machine was asleep
 _DEVICE_REFRESH_QUIET_SECONDS = 20.0  # never run the periodic default-follow within
                               # this long of a dictation (start OR stop): the ~0.1-0.3s
                               # PortAudio re-init gap must never coincide with a press,
@@ -350,6 +353,24 @@ class Recorder:
         self.last_silence_recovery: Optional[dict] = None
         # Wall-clock seconds of the most recent recording, set by stop().
         self.last_recording_seconds: float = 0.0
+        # Why a stream went stale: when the current stream opened and when the
+        # watchdog last saw the machine wake from sleep (monotonic, 0.0 =
+        # never). Both go into every mic_press_recovered report.
+        self._stream_opened_ts: float = 0.0
+        self._last_resume_ts: float = 0.0
+
+    def _stale_context(self, heartbeat_age: float) -> dict:
+        """Facts that say why a press found the stream stale. Numbers only."""
+        now = time.monotonic()
+        ctx = {"heartbeat_age_ms": (int(heartbeat_age * 1000)
+                                    if heartbeat_age != float("inf") else -1)}
+        opened = getattr(self, "_stream_opened_ts", 0.0)
+        if opened:
+            ctx["stream_age_s"] = int(now - opened)
+        resumed = getattr(self, "_last_resume_ts", 0.0)
+        if resumed:
+            ctx["since_resume_s"] = int(now - resumed)
+        return ctx
 
     @property
     def is_recording(self) -> bool:
@@ -649,13 +670,26 @@ class Recorder:
         be called with ALL of our streams closed."""
         if self._monitor_active or self._probe_active:
             return
+        # Start/stop cues play through a PortAudio output stream (feedback's
+        # cue player). The re-init kills it, so the player is told first (it
+        # closes cleanly) and after (it reopens), all under the shared lock.
+        got = pa_guard.PORTAUDIO_LOCK.acquire(
+            timeout=pa_guard.REINIT_WAIT_SECONDS)
+        if not got:
+            print("[Recorder] The cue player still held PortAudio after "
+                  f"{pa_guard.REINIT_WAIT_SECONDS:.1f}s; refreshing anyway.")
         try:
+            pa_guard.notify_before_reinit()
             sd._terminate()
             time.sleep(0.05)
             sd._initialize()
             print("[Recorder] PortAudio device list refreshed.")
         except Exception as e:
             print(f"[Recorder] PortAudio refresh failed (continuing): {e}")
+        finally:
+            pa_guard.notify_after_reinit()
+            if got:
+                pa_guard.PORTAUDIO_LOCK.release()
         # Cached index is meaningless across a re-init.
         self._active_device_index = None
         self._active_device_name = ""
@@ -701,6 +735,11 @@ class Recorder:
                 self._close_stream_locked()
             if force_fresh and not skip_refresh:
                 self._refresh_portaudio()
+            # The cue player opens its output stream under the same lock, so
+            # the two opens never overlap. Bounded: a hung holder never
+            # blocks this open for longer than the re-init would wait.
+            pa_locked = pa_guard.PORTAUDIO_LOCK.acquire(
+                timeout=pa_guard.REINIT_WAIT_SECONDS)
             try:
                 self._last_warm_reopened = True
                 self._stream = self._open_best_input_stream()
@@ -718,6 +757,7 @@ class Recorder:
                         self._preroll_samples = 0
                 self._stream.start()
                 self._warm_stream_is_open = True
+                self._stream_opened_ts = time.monotonic()
                 where = self._active_device_name or "default input"
                 print(f"[Recorder] Warm mic stream open ({where}, {self.active_sample_rate} Hz).")
                 return True
@@ -726,6 +766,9 @@ class Recorder:
                 self._warm_stream_is_open = False
                 print(f"[Recorder] Warm stream unavailable ({e}), cold-open per recording.")
                 return False
+            finally:
+                if pa_locked:
+                    pa_guard.PORTAUDIO_LOCK.release()
 
     def _start_watchdog(self) -> None:
         """Idle-time keeper of the warm stream: recovers dead streams within
@@ -741,16 +784,29 @@ class Recorder:
 
     def _watchdog_loop(self) -> None:
         tick = 0
+        wall = time.time()
         while True:
             time.sleep(_WATCHDOG_INTERVAL)
             tick += 1
+            # A tick that took far longer on the wall clock than it slept means
+            # the machine was asleep. Streams usually die across sleep, so
+            # reopen now rather than wait for a press to find out.
+            now_wall = time.time()
+            woke = now_wall - wall > _WATCHDOG_INTERVAL + _RESUME_GAP_SECONDS
+            wall = now_wall
+            if woke:
+                self._last_resume_ts = time.monotonic()
             if not self._warm_enabled:
                 continue
             if (self.is_recording or self._monitor_active or self._aux_active
                     or self._probe_active):
                 continue
             try:
-                if not self._stream_looks_alive():
+                if woke:
+                    print("[Recorder] Watchdog: machine resumed from sleep, "
+                          "reopening the warm stream.")
+                    self._ensure_warm_stream(force_fresh=True)
+                elif not self._stream_looks_alive():
                     print("[Recorder] Watchdog: warm stream dead, recovering.")
                     self._ensure_warm_stream(force_fresh=True)
                 elif self._stream_is_silently_dead():
@@ -821,6 +877,9 @@ class Recorder:
         self.last_seed_ms = 0
         self._last_warm_reopened = False
         press_ts = time.monotonic()
+        # Read before anything reopens the stream: this is the state the
+        # press found, which is what says why it went stale.
+        stale_ctx = self._stale_context(self._heartbeat_age())
 
         # skip_refresh: if the warm stream died, reopen it directly instead of
         # burning ~0.3-0.7s in a PortAudio re-init while the user is speaking —
@@ -886,6 +945,7 @@ class Recorder:
                     # cold reopen. Reported so the fleet log shows how often
                     # the process is too busy to take audio at a press.
                     self.last_start_recovery = {
+                        **stale_ctx,
                         "mode": "warm_late",
                         "elapsed_ms": int((time.monotonic() - press_ts) * 1000),
                         "waited_ms": int(waited * 1000),
@@ -899,6 +959,7 @@ class Recorder:
                     # completed is gone. Report it so the fleet log shows how
                     # often first words were at risk.
                     self.last_start_recovery = {
+                        **stale_ctx,
                         "mode": "warm_reopen",
                         "elapsed_ms": int((time.monotonic() - press_ts) * 1000),
                         "device": self._active_device_name,
@@ -922,7 +983,9 @@ class Recorder:
                         self._last_callback_ts = time.monotonic()
                     self._stream.start()
                     self._warm_stream_is_open = True
+                    self._stream_opened_ts = time.monotonic()
                     self.last_start_recovery = {
+                        **stale_ctx,
                         "mode": "cold_recovered",
                         "elapsed_ms": int((time.monotonic() - press_ts) * 1000),
                         "device": self._active_device_name,
@@ -958,6 +1021,7 @@ class Recorder:
                 # Warm mode couldn't open its stream at all — the press paid a
                 # full cold open with no pre-roll. Worth a fleet-log entry.
                 self.last_start_recovery = {
+                    **stale_ctx,
                     "mode": "cold_open",
                     "elapsed_ms": int((time.monotonic() - press_ts) * 1000),
                     "device": self._active_device_name,

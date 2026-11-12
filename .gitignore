@@ -57,3 +57,6 @@ graphify-out/
 *.p12
 *.pfx
 prod-env.txt
+
+# Scratch test runs (never committed)
+.tmp_tests/

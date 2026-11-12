@@ -15,6 +15,15 @@ import threading
 import time
 from collections import deque
 
+# Before anything imports numpy. numpy's OpenBLAS commits a 32 MB buffer for
+# every thread it starts, one per CPU thread by default: importing numpy cost
+# 781 MB of private memory on a 24-thread laptop (measured 12 Nov 2026, 48 MB
+# with one thread). Echo's only BLAS work is whisper feature extraction, which
+# ran in 32 ms on one thread against 85 ms on 24. Speech models run on ONNX
+# Runtime and CTranslate2, which keep their own thread settings. setdefault
+# so a deliberate override still wins.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 # Fix Windows console encoding
 # Removed stdout wrapping for clear logging
 
@@ -265,6 +274,11 @@ class WhisperFlowApp:
             on_session_expired=self._remote_sign_out,
         )
         self.db = SupabaseLogger(url=config.supabase_url, key=config.supabase_key)
+        # Send Diagnostics (Settings > Account): on unless the user switched it off.
+        # Before the crash watch connects, so a report from the last run obeys it.
+        self.db.set_diagnostics_enabled(bool(getattr(config, "send_diagnostics", True)))
+        import error_reporter
+        error_reporter.set_enabled(bool(getattr(config, "send_diagnostics", True)))
         self.db.set_auth_retry(auth, self._remote_sign_out)
         self._connect_crash_watch(auth)
         # Cloud Sync is opt-in per PC (off by default): the logger uploads and
@@ -547,12 +561,19 @@ class WhisperFlowApp:
             # model preloads so the stream open isn't competing with their heavy
             # imports, and flagged synchronously so a hotkey press that races
             # the open waits on it instead of cold-opening with no pre-roll.
+            # The cue stream opens on the same thread straight after, so the
+            # two PortAudio opens never overlap (see feedback._CuePlayer).
+            def _warm_audio():
+                if getattr(config, "warm_mic", True):
+                    self.recorder.set_warm(True)
+                if self.feedback.sound_enabled:
+                    self.feedback.prewarm()
+
             if getattr(config, "warm_mic", True):
                 self.recorder.mark_warm_pending()
-                threading.Thread(
-                    target=lambda: self.recorder.set_warm(True),
-                    daemon=True, name="warm-mic",
-                ).start()
+            threading.Thread(
+                target=_warm_audio, daemon=True, name="warm-mic",
+            ).start()
 
             # ── Pre-load models in background ─────────────────────────
             # Once Parakeet is loaded it carries English dictation and the
@@ -1140,14 +1161,20 @@ class WhisperFlowApp:
             return
 
         def _report(kind: str, detail: dict) -> bool:
+            if not self.db.diagnostics_enabled:
+                # Send Diagnostics is off: the report is dropped, not kept.
+                print(f"[App] {kind} report not sent: diagnostics off.")
+                return True
             if not self.db.insert_error_event_now(kind, detail, app_version=APP_VERSION):
                 return False
             if kind in crash_watch.LOGGED_KINDS:
                 from error_reporter import report_error
-                reason = detail.get("cause") or detail.get("exception") or ""
+                from telemetry_scrub import scrub_detail
+                safe = scrub_detail(detail)
+                reason = safe.get("cause") or safe.get("exception") or ""
                 report_error(
                     f"{brand.PRODUCT_NAME} {kind}: {reason}".strip(),
-                    context={k: v for k, v in detail.items() if k != "log_tail"},
+                    context={k: v for k, v in safe.items() if k != "log_tail"},
                     user_email=getattr(auth, "user_email", None),
                     token=getattr(auth, "access_token", "") or None,
                 )
@@ -2061,6 +2088,11 @@ class WhisperFlowApp:
         self.config.save_async()
         if key == "cloud_sync":
             self.cloud_sync.set_enabled(bool(value))
+            return
+        if key == "send_diagnostics":
+            self.db.set_diagnostics_enabled(bool(value))
+            import error_reporter
+            error_reporter.set_enabled(bool(value))
             return
         if key in SYNCED_SETTINGS:
             self.cloud_sync.push_settings_soon()

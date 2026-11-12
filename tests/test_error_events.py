@@ -71,9 +71,14 @@ class LogErrorEventTests(unittest.TestCase):
         table, payload = inserts[0]
         self.assertEqual(table, "error_events")
         self.assertEqual(payload["event_type"], "inject_failed")
-        self.assertEqual(payload["detail"]["fg_exe"], "chrome.exe")
-        self.assertEqual(payload["app_name"], "Chrome")
-        self.assertEqual(payload["window_class"], "Chrome_WidgetWin_1")
+        # Scrubbed on the way out (telemetry_scrub, 12 Nov 2026): the app's
+        # name, exe and window class leave as categories, never themselves.
+        self.assertEqual(payload["detail"]["fg_app_kind"], "browser")
+        self.assertNotIn("fg_exe", payload["detail"])
+        self.assertNotIn("app_name", payload)
+        self.assertNotIn("window_class", payload)
+        self.assertEqual(payload["detail"]["app_kind"], "browser")
+        self.assertEqual(payload["detail"]["window_family"], "chromium")
         self.assertEqual(payload["app_version"], "1.6.34")
         self.assertEqual(payload["transcription_created_at"],
                          "2026-07-28T10:00:00+00:00")

@@ -10131,6 +10131,9 @@ class AppWindow:
                 fg=C["error"] if self._auth.user_email else C["accent"]))
 
         self._build_cloud_sync_card(parent)
+        _toggle_card("send_diagnostics", "Send Diagnostics",
+                     "Reports faults like a silent mic. Never what you said.",
+                     True, icon="flag")
 
         # Voice Training used to sit here, under Account. It now closes the
         # Learning tab (_build_voice_training), which is where everything the

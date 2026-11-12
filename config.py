@@ -179,6 +179,7 @@ class Config:
     email_format: bool = True  # In an email client (Outlook, Windows Mail, Thunderbird, Gmail or Outlook in a browser), put the greeting, the sign-off and the name after it on their own lines. Off during Live Typing either way
     auto_paragraphs: bool = True  # Paragraph break after a clear pause (2s+ silence following a finished sentence); Parakeet path, off during Live Typing
     parakeet_version: str = "v2"  # Parakeet model: "v2" (English; the more accurate for English, 6.05% vs 6.34% avg WER) or "v3" (multilingual); switching triggers a one-time ~660 MB download. v2 is pinned to an exact commit and SHA-256 per file
+    send_diagnostics: bool = True  # Settings > Account > Send Diagnostics. Fault reports (a silent mic, a failed insert, a crash) to the error_events log, scrubbed by telemetry_scrub (mic kinds and app categories, never names, never what was said); kept 90 days. Off = no fault report leaves this PC
     ai_accuracy_check: bool = AI_ACCURACY_CHECK_DEFAULT  # Background AI context-fix of each dictation (needs an AI account or key); off = dictated text is never sent to the AI service unless you ask for a refine
     show_popup: bool = True  # Show the cursor-icon popup (Insert/Replace/Upgrade) after each dictation; off = text is injected silently with no popup
     popup_height: str = "low"  # Vertical position of the popup: "low" (near the taskbar, default — out of the way of chatbot input boxes), "medium" (mid-screen), or "high" (near the top, above a chatbot window)
