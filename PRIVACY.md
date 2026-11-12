@@ -1,6 +1,6 @@
 # BrightLink Echo privacy policy
 
-Last updated: 6 November 2026
+Last updated: 12 November 2026
 
 BrightLink Echo is a Windows dictation app published by BRIGHTLINK (OS) LTD,
 registered in England and Wales, company number 17459281. This policy covers
@@ -68,16 +68,26 @@ result.
 
 ## Diagnostics
 
-To find and fix faults, the app reports errors such as a failed text insert
-or a silent microphone. A report can include the name of the app you were
-typing into, your microphone's name and memory figures. It never includes
-what you said unless you have Cloud Sync on, when a short excerpt may be
-attached to a transcription-quality report.
+To find and fix faults, the app reports errors such as a failed text insert,
+a silent microphone, a slow start or a crash. A report holds the app version,
+timings, memory figures, the kind of microphone (for example "built-in
+array" or "headset", never its name) and the kind of app you were typing into
+(for example "browser" or "office", never its name). A crash report also
+holds the last lines of the app's log with microphone names, your Windows
+user name and email addresses taken out. A report never includes what you
+said unless you have Cloud Sync on, when a short excerpt may be attached to a
+transcription-quality report.
+
+Reports are linked to your account so we can help you when something goes
+wrong. We send them because we have a legitimate interest in keeping the app
+working for you (UK GDPR Article 6(1)(f)). They are deleted automatically
+after 90 days. To stop them, switch off Settings > Account > Send
+Diagnostics: no report leaves your computer while it is off.
 
 ## Who processes your data
 
-Account data, usage figures, Cloud Sync data and feedback reports are stored
-with Supabase, hosted in the EU. AI requests go to OpenRouter or Anthropic as
+Account data, usage figures, Cloud Sync data, feedback reports and
+diagnostics reports are stored with Supabase, hosted in the EU. AI requests go to OpenRouter or Anthropic as
 above. Updates are downloaded from GitHub, and the speech model from Hugging
 Face. We do not sell your data or use it for advertising.
 

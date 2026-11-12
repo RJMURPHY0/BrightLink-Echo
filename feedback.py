@@ -16,8 +16,10 @@ import math
 import struct
 import sys
 import threading
+import time
 import wave
 from typing import Callable, Optional
+import pa_guard  # stdlib only: the one PortAudio lock
 # error_reporter pulls in urllib/email (~100ms) — imported on first error
 # instead of at startup (this module is on the first-paint path).
 
@@ -116,8 +118,212 @@ def _get_sound(name: str) -> bytes:
     return _SOUND_CACHE[name]
 
 
+# Cues go out through a warm shared-mode WASAPI output stream, never winsound
+# first. Measured on a Realtek array mic on 12 Nov 2026:
+#   * winsound.PlaySound runs on winmm, and opening winmm's wave output inside
+#     our process stalls our own MME and DirectSound microphone input for
+#     300-520 ms and DROPS that audio (a 2.0 s window kept 1.54-1.73 s with the
+#     cue, 1.98 s without). The start cue plays at the press, so that was the
+#     first half second of speech; the stop cue cut the release tail short.
+#     WASAPI output lost nothing (1.98 s, first block 23-62 ms).
+#   * Opening ANY playback stream on that laptop takes 300-550 ms (PlaySound
+#     itself took 485-703 ms for a 79 ms cue), so the stream is opened once and
+#     kept open; a cue then only queues samples and starts within one block.
+# The sound is unchanged: identical samples, rate and level.
+_PCM_CACHE: dict = {}
+_CUE_BLOCK = 441              # 10 ms at 44.1 kHz per output callback
+_CUE_WARM_SECONDS = 1800.0    # keep the stream open this long after a cue
+_CUE_REOPEN_DELAY = 2.0       # after a PortAudio re-init, reopen this much
+                              # later, once the recorder has its mic back
+_CUE_MAX_FAILS = 3            # opens failing in a row before winsound only
+
+
+def _get_pcm(name: str):
+    """The cue as int16 samples, the same numbers its WAV holds."""
+    if name not in _PCM_CACHE:
+        import numpy as np
+        with wave.open(io.BytesIO(_get_sound(name))) as w:
+            frames = w.readframes(w.getnframes())
+        _PCM_CACHE[name] = np.frombuffer(frames, dtype="<i2").astype(np.int16)
+    return _PCM_CACHE[name]
+
+
+def _wasapi_output_device(sd) -> Optional[int]:
+    """Index of the Windows default playback device on the WASAPI host API,
+    or None when there is no WASAPI output."""
+    for api in sd.query_hostapis():
+        if "WASAPI" in str(api.get("name", "")):
+            idx = api.get("default_output_device", -1)
+            if idx is not None and int(idx) >= 0:
+                return int(idx)
+    return None
+
+
+class _CuePlayer:
+    """One open WASAPI output stream that plays silence until a cue is queued.
+
+    Every PortAudio call (open, close) happens under pa_guard.PORTAUDIO_LOCK,
+    and the recorder's PortAudio re-init closes the stream through the
+    before-hook and schedules a reopen through the after-hook. The stream is
+    closed once no cue has played for _CUE_WARM_SECONDS."""
+
+    def __init__(self) -> None:
+        self._buf_lock = threading.Lock()   # guards _buf / _pos only
+        self._buf = None
+        self._pos = 0
+        self._stream = None
+        self._last_use = 0.0
+        self._fails = 0
+        self._hooked = False
+        self._timer = None
+
+    # -- runs on PortAudio's thread ---------------------------------------
+    def _callback(self, outdata, frames, _time_info, _status) -> None:
+        outdata.fill(0)
+        with self._buf_lock:
+            buf = self._buf
+            if buf is None:
+                return
+            n = min(frames, len(buf) - self._pos)
+            if n > 0:
+                outdata[:n, 0] = buf[self._pos:self._pos + n]
+                self._pos += n
+            if self._pos >= len(buf):
+                self._buf = None
+                self._pos = 0
+
+    # -- stream lifecycle (callers hold PORTAUDIO_LOCK) --------------------
+    def _open_locked(self, sd) -> bool:
+        if self._stream is not None:
+            return True
+        if self._fails >= _CUE_MAX_FAILS:
+            return False
+        try:
+            idx = _wasapi_output_device(sd)
+            if idx is None:
+                self._fails = _CUE_MAX_FAILS
+                print("[Feedback] No WASAPI output device, cues use winsound.")
+                return False
+            stream = sd.OutputStream(
+                samplerate=_SR, channels=1, dtype="int16", device=idx,
+                blocksize=_CUE_BLOCK, latency="low", callback=self._callback,
+                extra_settings=sd.WasapiSettings(auto_convert=True))
+            stream.start()
+            self._stream = stream
+            self._fails = 0
+            return True
+        except Exception as e:
+            self._fails += 1
+            print(f"[Feedback] Cue stream open failed ({self._fails}/"
+                  f"{_CUE_MAX_FAILS}), using winsound: {e}")
+            return False
+
+    def _close_locked(self) -> None:
+        stream, self._stream = self._stream, None
+        with self._buf_lock:
+            self._buf = None
+            self._pos = 0
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception as e:
+                print(f"[Feedback] Cue stream close failed: {e}")
+
+    def _ensure_hooks(self) -> None:
+        if self._hooked:
+            return
+        pa_guard.on_reinit(before=self._before_reinit,
+                           after=self._after_reinit)
+        self._hooked = True
+
+    def _before_reinit(self) -> None:
+        # Re-initialising thread, lock already held. Let a cue that is still
+        # sounding finish (under 0.1 s) so it is never cut mid-tap.
+        deadline = time.monotonic() + 0.25
+        while time.monotonic() < deadline:
+            with self._buf_lock:
+                if self._buf is None:
+                    break
+            time.sleep(0.01)
+        self._close_locked()
+
+    def _after_reinit(self) -> None:
+        if time.monotonic() - self._last_use > _CUE_WARM_SECONDS:
+            return
+        t = threading.Timer(_CUE_REOPEN_DELAY, self.warm)
+        t.daemon = True
+        t.start()
+
+    def _arm_idle_close(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+        t = threading.Timer(_CUE_WARM_SECONDS + 1.0, self._idle_close)
+        t.daemon = True
+        t.start()
+        self._timer = t
+
+    def _idle_close(self) -> None:
+        if time.monotonic() - self._last_use < _CUE_WARM_SECONDS:
+            return
+        with pa_guard.PORTAUDIO_LOCK:
+            if time.monotonic() - self._last_use >= _CUE_WARM_SECONDS:
+                self._close_locked()
+
+    # -- public ------------------------------------------------------------
+    def warm(self) -> bool:
+        """Open the stream ahead of the first cue. Never raises."""
+        try:
+            import sounddevice as sd
+            self._ensure_hooks()
+            if not self._last_use:
+                self._last_use = time.monotonic()
+            with pa_guard.PORTAUDIO_LOCK:
+                ok = self._open_locked(sd)
+            if ok:
+                self._arm_idle_close()
+            return ok
+        except Exception as e:
+            print(f"[Feedback] Cue warm-up failed: {e}")
+            return False
+
+    def play(self, name: str) -> bool:
+        """Queue a cue. True when the stream took it; False means use
+        winsound. A new cue replaces one still sounding, as PlaySound does."""
+        try:
+            import sounddevice as sd
+            self._ensure_hooks()
+            pcm = _get_pcm(name)
+            self._last_use = time.monotonic()
+            with pa_guard.PORTAUDIO_LOCK:
+                if not self._open_locked(sd):
+                    return False
+                with self._buf_lock:
+                    self._buf = pcm
+                    self._pos = 0
+            self._arm_idle_close()
+            return True
+        except Exception as e:
+            print(f"[Feedback] Cue play failed, using winsound: {e}")
+            return False
+
+    def is_open(self) -> bool:
+        return self._stream is not None
+
+
+_CUE_PLAYER = _CuePlayer()
+
+
+def warm_cues() -> None:
+    """Open the cue stream in the background so the first press is instant."""
+    threading.Thread(target=_CUE_PLAYER.warm, daemon=True,
+                     name="cue-warm").start()
+
+
 def _play_sound(name: str) -> None:
-    """Play a named blip (Windows only, never raises).
+    """Play a named blip (Windows only, never raises). The warm WASAPI cue
+    stream first (see _CuePlayer: winsound drops our own microphone audio),
+    winsound only when that stream cannot be opened.
 
     Plays SYNCHRONOUSLY from memory. This is deliberate and required: winsound
     CANNOT play SND_MEMORY asynchronously — `SND_MEMORY | SND_ASYNC` raises
@@ -128,6 +334,11 @@ def _play_sound(name: str) -> None:
     runs this on its own daemon thread, so a ~100 ms synchronous play blocks
     nothing that matters."""
     try:
+        if _CUE_PLAYER.play(name):
+            return
+    except Exception as e:
+        print(f"[Feedback] WASAPI cue error, using winsound: {e}")
+    try:
         import winsound
         # NB: start/stop used to call MessageBeep(MB_OK) — the Windows "ding".
         # It is loud and unmistakable, but it is also the sound of an error in
@@ -137,8 +348,8 @@ def _play_sound(name: str) -> None:
     except Exception:
         # Never fall back to winsound.Beep here — a raw square-wave beep is the
         # exact harsh sound these tones replace. Silent-fail instead; the visual
-        # popup still signals state.
-        pass
+        # popup still signals state. Logged so a silent machine is explainable.
+        print(f"[Feedback] Cue '{name}' could not play.")
 
 
 class Feedback:
@@ -172,6 +383,11 @@ class Feedback:
         self.sound_enabled = sound_enabled
         self.on_icon_change = on_icon_change
         self.on_error_notify = on_error_notify
+
+    def prewarm(self) -> None:
+        """Open the cue stream now (blocking) so the first press is instant."""
+        if self.sound_enabled:
+            _CUE_PLAYER.warm()
 
     def recording_started(self) -> None:
         """Called when recording begins. The cue goes first: it is what the

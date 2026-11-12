@@ -10,6 +10,17 @@ import sys
 import threading
 import urllib.parse
 import urllib.request
+import telemetry_scrub  # stdlib only: the same scrubbing as error_events
+
+# Settings > Account > Send Diagnostics. On by default, as it always was;
+# app.py sets it at startup and when the switch changes. Off = nothing sent.
+_ENABLED = True
+
+
+def set_enabled(on: bool) -> None:
+    global _ENABLED
+    _ENABLED = bool(on)
+
 
 # Plain http is allowed only for a dev server on this machine.
 _LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
@@ -72,6 +83,18 @@ def report_error(
     worth a row each (the intake is shared and rate limited), never for the
     routine "No speech detected" feedback.
     """
+    if not _ENABLED:
+        print("[ErrorReporter] Not sent: diagnostics are off.")
+        return
+    # Same minimisation as error_events (telemetry_scrub): mic kinds, never
+    # names; no user folders or email addresses in the message or context.
+    try:
+        message = telemetry_scrub.scrub_log_text(str(message))
+        context = telemetry_scrub.scrub_detail(dict(context or {}))
+    except Exception as e:
+        print(f"[ErrorReporter] Not sent: report could not be scrubbed ({e}).")
+        return
+
     def _send() -> None:
         api_url, secret = _load_contacts_config()
         api_url = _safe_api_url(api_url)
