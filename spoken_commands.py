@@ -7,6 +7,7 @@ Spoken symbol commands — convert dictated character names into the characters.
     "open bracket see attached close bracket" -> "(see attached)"
     "ryan dot murphy at ftc dash ss dot com"  -> "ryan.murphy@ftc-ss.com"
     "fifty four percent"                -> "54%"
+    "1.2 times speed"                   -> "1.2x speed"
 
 Deliberately conservative: a symbol NAME is only swapped for its symbol when
 that name is almost never dictated as literal prose. Plain punctuation words
@@ -207,6 +208,34 @@ _PERCENT_DIGITS = re.compile(r"(\d)[\s-]*per\s?cent\b", re.IGNORECASE)
 _CURRENCY_WORDS = re.compile(rf"([$£€])\s*({_NUM_RUN})\b", re.IGNORECASE)
 
 
+# ── Spoken multiplication: "1.2 times" -> "1.2x" ──────────────────────────────
+# "times" is an everyday word ("a couple of times", "3 times a day"), so it only
+# becomes an x where the shape leaves no other reading:
+#   number times number       "1.2 times 50"        -> "1.2 x 50"
+#   times by number           "then times by 1.2"   -> "then x 1.2"
+#   decimal times             "1.2 times speed"     -> "1.2x speed"
+#   whole number times + a comparison word
+#                             "3 times faster"      -> "3x faster"
+# "3 times a day", "a couple times", "times it by 2" (verb with an object) and
+# number words ("three times") are left exactly as spoken.
+_NUM = r"\d+(?:,\d{3})*(?:\.\d+)?"
+_TIMES_ARITH = re.compile(rf"(?<![\w.])({_NUM})[ \t]+times[ \t]+({_NUM})(?![\w.]|\.\d)",
+                          re.IGNORECASE)
+_TIMES_BY = re.compile(rf"\btimes[ \t]+by[ \t]+({_NUM})(?![\w]|\.\d)", re.IGNORECASE)
+_TIMES_DECIMAL = re.compile(r"(?<![\w.])(\d+\.\d+)[ \t]+times\b", re.IGNORECASE)
+_COMPARE = (r"faster|slower|quicker|more|less|fewer|bigger|smaller|larger|higher"
+            r"|lower|longer|shorter|cheaper|better|worse|greater|as|speed|zoom")
+_TIMES_COMPARE = re.compile(rf"(?<![\w.])(\d+)[ \t]+times(?=[ \t]+(?:{_COMPARE})\b)",
+                            re.IGNORECASE)
+
+
+def _apply_times(text: str) -> str:
+    out = _TIMES_ARITH.sub(r"\1 x \2", text)
+    out = _TIMES_BY.sub(r"x \1", out)
+    out = _TIMES_DECIMAL.sub(r"\1x", out)
+    return _TIMES_COMPARE.sub(r"\1x", out)
+
+
 def _sub_percent_words(m: "re.Match") -> str:
     phrase = m.group(1).strip().lower()
     # "a hundred percent" is prose — digitising the bare scale word gives the
@@ -304,6 +333,7 @@ def apply_spoken_commands(text: str) -> str:
     out = _PERCENT_WORDS.sub(_sub_percent_words, out)
     out = _PERCENT_DIGITS.sub(r"\1%", out)
     out = _CURRENCY_WORDS.sub(_sub_currency_words, out)
+    out = _apply_times(out)
     out = apply_tech_terms(out)
     if out != text:
         out = re.sub(r" {2,}", " ", out)

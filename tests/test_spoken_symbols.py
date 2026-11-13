@@ -115,6 +115,40 @@ class PercentTests(unittest.TestCase):
         self.assertEqual(sc("dollar sign fifty"), "$50")
 
 
+class TimesTests(unittest.TestCase):
+    """Ryan, 2026-11-13: "1.2 times" came back as the word, not an x."""
+
+    def test_the_reported_dictation(self):
+        self.assertEqual(sc("You know, like 1.2 times speed and stuff"),
+                         "You know, like 1.2x speed and stuff")
+
+    def test_decimal_multiplier_at_sentence_end(self):
+        self.assertEqual(sc("Set it to 1.5 times."), "Set it to 1.5x.")
+
+    def test_number_times_number(self):
+        self.assertEqual(sc("so 1.2 times 50 is 60"), "so 1.2 x 50 is 60")
+        self.assertEqual(sc("3 times 4"), "3 x 4")
+
+    def test_times_by(self):
+        self.assertEqual(sc("then times by 1.2"), "then x 1.2")
+
+    def test_whole_number_with_comparison(self):
+        self.assertEqual(sc("it's 3 times faster"), "it's 3x faster")
+        self.assertEqual(sc("10 times more leads"), "10x more leads")
+
+    def test_ordinary_times_stays_prose(self):
+        for s in ("a couple times I've said it",
+                  "I called 3 times a day",
+                  "three times faster",
+                  "times it by 2",
+                  "most of the time",
+                  "times are hard",
+                  "at times by the river",
+                  "I went 3 times last week",
+                  "version 1.2 is out"):
+            self.assertEqual(sc(s), s)
+
+
 class QuoteTests(unittest.TestCase):
     def test_open_and_close(self):
         self.assertEqual(sc("open quote hello close quote"), '"hello"')
@@ -169,8 +203,8 @@ class CorpusRegressionTests(unittest.TestCase):
     anything else means a rule has drifted into ordinary prose."""
 
     def _load(self):
-        path = os.path.join(os.environ.get("APPDATA", ""), "FTC Whisper",
-                            "history.json")
+        import data_paths
+        path = os.path.join(data_paths.roaming_dir(), "history.json")
         if not os.path.exists(path):
             self.skipTest("no local history.json corpus on this machine")
         with open(path, encoding="utf-8") as fh:
@@ -193,6 +227,8 @@ class CorpusRegressionTests(unittest.TestCase):
                          r"|equals? sign|plus sign|pipe symbol|vertical bar"
                          r"|exclamation|quotation|back ?tick|less ?than sign"
                          r"|greater ?than sign|at symbol)\b", text, re.I):
+                continue
+            if re.search(r"\d\s+times\b|\btimes\s+by\s+\d", text, re.I):
                 continue
             if re.search(r"\b\w+\s+(?:dot|dash|at)\s+\w+", text, re.I):
                 continue
