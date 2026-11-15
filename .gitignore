@@ -4,6 +4,7 @@ venv/
 # Claude Code session data (path-scoped rules are tracked so every machine gets them)
 .claude/*
 !.claude/rules/
+!.claude/skills/
 
 # Python cache
 __pycache__/
