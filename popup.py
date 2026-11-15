@@ -498,6 +498,10 @@ PANEL_IDLE_DISMISS_SECS = 45.0
 # How often an open popup checks whether its content changed size (its size
 # is pinned, see FloatingPopup._watch_pinned_size).
 _SIZE_WATCH_MS = 50
+# Drift guard (_check_drift): how far (real px) the popup may sit from where it
+# was placed before it is put back, and how many times per mode.
+_DRIFT_TOL = 4
+_DRIFT_MAX_FIXES = 3
 
 
 def _apply_popup_corners(hwnd: int) -> bool:
@@ -3282,7 +3286,6 @@ class FloatingPopup:
                 self.root.update_idletasks()
             self._pinned_size = (w, h)
             self._pinned_root = self.root
-            self._start_size_watch()
         else:
             self.root.geometry(f"+{x}+{y}")
             # Flush the position to the window BEFORE the caller deiconifies it, so it
@@ -3355,6 +3358,11 @@ class FloatingPopup:
         except Exception:
             pass
 
+        # Remember where the window really ended up, so the watch can put it
+        # back if anything moves it afterwards (_check_drift).
+        self._note_placed()
+        self._start_size_watch()
+
         # Moving or resizing a MAPPED overrideredirect window lets Windows blit
         # the old pixels into the new spot, which is the ghosted/half-drawn pill.
         # RDW_UPDATENOW only validates Tk's update region — Tk turns WM_PAINT into
@@ -3382,23 +3390,77 @@ class FloatingPopup:
             self._size_watch_on = False
 
     def _watch_pinned_size(self) -> None:
-        """The popup's size is pinned (see _reposition), so content that grows
-        or shrinks without a reposition (a status label changing, a result
-        arriving) would be clipped or padded. Re-place it when the content's
-        size drifts from the pinned size. Runs while the popup is up."""
+        """Runs while the popup is up. For the pill, whose size is pinned (see
+        _reposition), content that grows or shrinks without a reposition (a
+        status label changing, a result arriving) would be clipped or padded,
+        so it is re-placed when the content's size drifts from the pinned
+        size. For every popup window, _check_drift puts it back if something
+        moved it after it was placed."""
         try:
-            if (not self.root or not self._mode
-                    or getattr(self, "_pinned_root", None) is not self.root):
+            if not self.root or not self._mode:
                 self._size_watch_on = False
                 return
-            want = self._content_size()
-            if want != getattr(self, "_pinned_size", want):
-                cx, cy, near = getattr(self, "_repos_args", (0, 0, False))
-                self._reposition(cx, cy, near_cursor=near)
-            self._heal_pill_layout()
+            if getattr(self, "_pinned_root", None) is self.root:
+                want = self._content_size()
+                if want != getattr(self, "_pinned_size", want):
+                    cx, cy, near = getattr(self, "_repos_args", (0, 0, False))
+                    self._reposition(cx, cy, near_cursor=near)
+                self._heal_pill_layout()
+            self._check_drift()
             self.root.after(_SIZE_WATCH_MS, self._watch_pinned_size)
         except tk.TclError:
             self._size_watch_on = False
+
+    def _popup_root_hwnd(self) -> int:
+        try:
+            return int(ctypes.windll.user32.GetAncestor(self._popup_hwnd, 2)
+                       or self._popup_hwnd or 0)
+        except Exception:
+            return 0
+
+    def _note_placed(self) -> None:
+        """Record the real top-left the window ended on after a placement."""
+        top = self._popup_root_hwnd()
+        pr = real_window_rect(top) if top else None
+        self._placed_at = (top, (pr[0], pr[1])) if pr is not None else None
+
+    def _check_drift(self) -> None:
+        """Put the popup back if something moved it after it was placed.
+
+        Every placement goes through _reposition and is logged, yet a window
+        can still be moved afterwards from outside it (Tk re-applying an old
+        geometry from its idle loop, Windows re-reading a DPI-unaware
+        window's position). This compares where the window really is with
+        where _reposition left it and re-places it when they differ, logging
+        `drift` to the pos log. At most _DRIFT_MAX_FIXES per popup mode, so
+        it can never fight something else moving the window in a loop."""
+        placed = getattr(self, "_placed_at", None)
+        if not placed or not placed[0]:
+            return
+        top, (px, py) = placed
+        try:
+            if not self.root.winfo_ismapped():
+                return
+        except tk.TclError:
+            return
+        if self._popup_root_hwnd() != top:
+            return
+        pr = real_window_rect(top)
+        if pr is None:
+            return
+        if abs(pr[0] - px) <= _DRIFT_TOL and abs(pr[1] - py) <= _DRIFT_TOL:
+            return
+        key = (self._mode, top)
+        if getattr(self, "_drift_key", None) != key:
+            self._drift_key, self._drift_fixes = key, 0
+        if self._drift_fixes >= _DRIFT_MAX_FIXES:
+            return
+        self._drift_fixes += 1
+        pos_log(f"drift mode={self._mode} placed=({px},{py}) "
+                f"found=({pr[0]},{pr[1]}) fix={self._drift_fixes}")
+        cx, cy, near = getattr(self, "_repos_args", (0, 0, False))
+        self._last_geometry = ""
+        self._reposition(cx, cy, near_cursor=near)
 
     def _log_pos_anomaly(self, near_cursor, w, h, x, y, wa_phys, landed, delta):
         """Record only the anomalous placements — the ones the physical guard had

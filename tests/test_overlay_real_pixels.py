@@ -304,6 +304,57 @@ class LivePopupPlacementTests(_LiveBase):
                                    popup_mod.overlay_monitor(cx, cy), size)
         p._do_hide()
 
+    def _pump(self, master, secs):
+        import time as _t
+        end = _t.time() + secs
+        while _t.time() < end:
+            master.update()
+            _t.sleep(0.01)
+
+    def test_moved_after_placement_is_put_back(self):
+        # Something outside _reposition moves the pill (2026-11-15 drift
+        # guard): the watch must put it back bottom-centre and log it.
+        master = self._master()
+        p = self._popup(master)
+        l, t, r, b = _scaled_monitors()[-1]
+        cx, cy = (l + r) // 2, (t + b) // 2
+        self._show_at(master, p, cx, cy)
+        u32 = ctypes.WinDLL("user32")
+        hwnd = u32.GetAncestor(W.HWND(p._popup_hwnd), 2)
+        mon = popup_mod.overlay_monitor(cx, cy)
+        logs = []
+        with mock.patch.object(popup_mod, "pos_log", side_effect=logs.append):
+            with popup_mod._RealPixels():
+                u32.SetWindowPos(W.HWND(hwnd), None, mon.work[0] + 10,
+                                 mon.work[1] + 10, 0, 0, 0x0001 | 0x0004 | 0x0010)
+            self._pump(master, 0.6)
+        self.assertTrue(any(m.startswith("drift") for m in logs), logs)
+        self._assert_bottom_centre(popup_mod.real_window_rect(hwnd), mon,
+                                   p._content_size())
+        p._do_hide()
+
+    def test_a_normal_show_never_reads_as_drift(self):
+        master = self._master()
+        p = self._popup(master)
+        for (l, t, r, b) in _scaled_monitors():
+            cx, cy = (l + r) // 2, (t + b) // 2
+            logs = []
+            with self.subTest(monitor=(l, t, r, b)), mock.patch.object(
+                    popup_mod, "pos_log", side_effect=logs.append):
+                p.show_status("Recording", recording=True,
+                              cursor_x=cx, cursor_y=cy)
+                self._pump(master, 0.4)
+                p.show_status("Transcribing…", recording=False,
+                              cursor_x=cx, cursor_y=cy)
+                self._pump(master, 0.4)
+                p.show_cursor_icon("hello", inserted=False,
+                                   cursor_x=cx, cursor_y=cy)
+                self._pump(master, 0.4)
+                p._do_hide()
+                master.update()
+                self.assertFalse([m for m in logs if m.startswith("drift")],
+                                 logs)
+
 
 class LiveBadgePlacementTests(_LiveBase):
     """The badge and refine panel keep their old window type (Windows sizes
