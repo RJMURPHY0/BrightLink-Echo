@@ -49,8 +49,8 @@ from datetime import datetime, timezone
 # copied so the phonetic firewall, the common-word list and the sentence-casing
 # rule can only ever have one definition — a second copy that drifted is how a
 # safety gate quietly stops being a gate.
-from text_expansion import (_COMMON_WORDS, _WORD_RE, _cased, _dm,
-                            _jaro_winkler, _phonetic_match)
+from text_expansion import (_COMMON_WORDS, _FUNCTION_WORDS, _WORD_RE, _cased,
+                            _dm, _jaro_winkler, _phonetic_match)
 
 # ── Thresholds ───────────────────────────────────────────────────────────────
 
@@ -109,7 +109,44 @@ MIN_SINGLE_LEN = 6          # single learned words shorter than this are dropped
 MIN_PHRASE_CHARS = 8        # a multi-word phrase must have some substance
 
 MAX_CANDIDATES = 600        # counting table ceiling (pruned lowest-count first)
-MAX_PHRASES = 200           # promoted ceiling
+MAX_PHRASES = 200           # promoted ceiling, for phrases LEARNED from speech
+# Starter terms user_context seeds (tech words, product names) have their own
+# ceiling. They used to share MAX_PHRASES at a seeded count of 40-50, so once
+# the seed list filled the table every newly learned phrase (promoted at 4) was
+# the lowest row and was pruned the moment it was promoted, its counter already
+# gone: on Ryan's PC 183 of the 200 slots were seeds and nothing new had been
+# learned since the seed landed (26 Oct 2026).
+MAX_SEEDED = 400
+
+# ── Habits: the whole phrases a person says over and over ────────────────────
+#
+# A learned phrase (above) is a NAME-like unit: edges and insides must be
+# distinctive, so "pushed to main" can never be one ("to" is a function word).
+# But the commands someone repeats all day are exactly that shape, and the
+# engine slips on the small word inside them: Ryan says "push everything to
+# main" or "pushed to main" in most dictations, and in four days it came out
+# "to mean", "to me", "domain" and "Two main". A habit is a 3-5 word run with
+# content words at both ends and anything in between, counted from confidently
+# heard speech. It repairs ONE slipped word inside a run where every other word
+# matches exactly, so the context on both sides is what proves the repair.
+HABIT_MIN_WORDS = 3
+HABIT_MAX_WORDS = 5
+HABIT_MIN_CHARS = 10
+MAX_HABITS = 5000           # windows are cheap; the cap only has to outlast
+                            # the gap between two times a habit is said
+# Repair a word the engine was UNSURE of (< LEARN_CONF) once the habit has been
+# heard this often...
+HABIT_REPAIR_COUNT = 5
+# ...and a word it was SURE of only when the habit is said all the time and the
+# variant it heard is at most an eighth as common. Measured: "push it to me"
+# came back at 0.97, so a hedging-only gate cannot reach the commonest slip.
+# Not "never heard": a slip heard confidently before the habit reached 15 is
+# counted as a variant, and "never" would then block that repair for good.
+HABIT_STRONG_COUNT = 15
+HABIT_STRONG_RATIO = 8
+# The variant the engine wrote must be at least this many times rarer than the
+# habit, or it is something the person also says and is left alone.
+HABIT_RATIO = 4
 MAX_HOTWORDS = 40           # how many reach the whisper decoder prompt
 
 FLUSH_SECONDS = 20.0        # debounce on the disk write
@@ -274,6 +311,76 @@ def promote_at(words) -> int:
     return PROMOTE_COUNT_SINGLE if len(words) == 1 else PROMOTE_COUNT
 
 
+def is_habit(words) -> bool:
+    """True when this run of normalised words can be a habit: 3-5 words,
+    no digits, a content word at each END (a run that starts or stops on
+    "to"/"the" is a fragment of a sentence, not something anybody says), and
+    at least one word that is not ordinary English, so "make sure that"-style
+    filler never becomes a frame that rewrites other people's sentences."""
+    if not words or not (HABIT_MIN_WORDS <= len(words) <= HABIT_MAX_WORDS):
+        return False
+    if any(not w or any(ch.isdigit() for ch in w) for w in words):
+        return False
+    # A quote mark stuck to a word ("'verified") is punctuation the run picked
+    # up, not part of anything said.
+    if any(w[0] == "'" or w[-1] == "'" for w in words):
+        return False
+    if words[0] in _FUNCTION_WORDS or words[-1] in _FUNCTION_WORDS:
+        return False
+    if all(w in _COMMON_WORDS for w in words):
+        return False
+    return sum(len(w) for w in words) >= HABIT_MIN_CHARS
+
+
+def _looks_seeded(rows: dict) -> set:
+    """Norms of rows written by an old user_context seed (before rows carried
+    `seeded`). A seed writes every starter term in one go with one timestamp
+    and a count of 40 or more; a real promotion never lands twenty phrases in
+    the same second."""
+    by_at = {}
+    for norm, row in rows.items():
+        if (row.get("count") or 0) >= 40 and row.get("learned_at"):
+            by_at.setdefault(row["learned_at"], []).append(norm)
+    out = set()
+    for norms in by_at.values():
+        if len(norms) >= 20:
+            out.update(norms)
+    return out
+
+
+def _is_variant(words, index: dict) -> bool:
+    """Is this run one word away from a usable habit (see build_habit_index)?"""
+    if any(not w or any(ch.isdigit() for ch in w) for w in words):
+        return False
+    for j in range(len(words)):
+        key = tuple(words[:j]) + ("*",) + tuple(words[j + 1:])
+        for _norm, target in index.get(key, ()):
+            if target.replace(" ", "") != words[j]:
+                return True
+    return False
+
+
+def _row(row: dict, phrase: str) -> dict:
+    out = {
+        "phrase": phrase,
+        "count": int(row.get("count") or 0),
+        "learned_at": str(row.get("learned_at") or ""),
+    }
+    if row.get("seeded"):
+        out["seeded"] = True
+    return out
+
+
+def _load_counts(raw) -> dict:
+    out = {}
+    for norm, row in (raw.items() if isinstance(raw, dict) else ()):
+        try:
+            out[str(norm)] = [int(row[0]), str(row[1])]
+        except (TypeError, ValueError, IndexError):
+            continue
+    return out
+
+
 # ── The store ────────────────────────────────────────────────────────────────
 
 def _safe_name(key: str) -> str:
@@ -307,6 +414,11 @@ class PhraseStore:
         # Cloud Sync: without it, another PC still holding the phrase would
         # hand it straight back on the next merge.
         self._forgotten = {}        # norm -> iso
+        # Habit runs (see is_habit) -> [count, last_iso]. Dictated fragments,
+        # so they live on THIS PC only: never in snapshot(), never synced.
+        self._habits = {}
+        self._habit_gen = 0         # bumped when the usable set may change
+        self._habit_index = None    # (gen, build_habit_index result)
         self._dirty = False
         self._flush_at = 0.0
         self._flushing = False
@@ -342,28 +454,34 @@ class PhraseStore:
             phrase = " ".join((row.get("phrase") or "").split())
             norm = phrase.lower()
             if phrase and norm not in self._phrases:
-                self._phrases[norm] = {
-                    "phrase": phrase,
-                    "count": int(row.get("count") or 0),
-                    "learned_at": str(row.get("learned_at") or ""),
-                }
+                self._phrases[norm] = _row(row, phrase)
         forg = data.get("forgotten")
         if isinstance(forg, dict):
             self._forgotten = {str(k): str(v) for k, v in forg.items()}
+        self._habits = _load_counts(data.get("habits"))
+        self._mark_legacy_seeds()
 
-    def _snapshot(self) -> dict:
-        return {
+    def _mark_legacy_seeds(self) -> None:
+        for norm in _looks_seeded(self._phrases):
+            self._phrases[norm]["seeded"] = True
+
+    def _snapshot(self, habits: bool = True) -> dict:
+        data = {
             "version": _STORE_VERSION,
             "candidates": {k: list(v) for k, v in self._candidates.items()},
             "fumbled": dict(self._fumbled),
             "phrases": [dict(v) for v in self._phrases.values()],
             "forgotten": dict(self._forgotten),
         }
+        if habits:
+            data["habits"] = {k: list(v) for k, v in self._habits.items()}
+        return data
 
     def snapshot(self) -> dict:
-        """A copy of everything this store holds (Cloud Sync pushes it)."""
+        """A copy of what Cloud Sync may carry. Habits are left out: they are
+        runs of what was dictated, and stay on this PC whatever the switch."""
         with self._lock:
-            return self._snapshot()
+            return self._snapshot(habits=False)
 
     def replace_with(self, data: dict) -> None:
         """Adopt a merged snapshot (Cloud Sync pulled one) and save it."""
@@ -386,15 +504,13 @@ class PhraseStore:
                     continue
             for row in data.get("phrases") or []:
                 if isinstance(row, dict) and row.get("phrase"):
-                    norm = " ".join(row["phrase"].split()).lower()
-                    self._phrases[norm] = {
-                        "phrase": " ".join(row["phrase"].split()),
-                        "count": int(row.get("count") or 0),
-                        "learned_at": str(row.get("learned_at") or ""),
-                    }
+                    phrase = " ".join(row["phrase"].split())
+                    self._phrases[phrase.lower()] = _row(row, phrase)
             forg = data.get("forgotten")
             if isinstance(forg, dict):
                 self._forgotten = {str(k): str(v) for k, v in forg.items()}
+            # Habits never travel (see snapshot), so the local ones survive.
+            self._mark_legacy_seeds()
             self._prune()
         self._touch(urgent=True)
 
@@ -449,11 +565,23 @@ class PhraseStore:
             keep = sorted(self._fumbled.items(), key=lambda kv: kv[1],
                           reverse=True)[:MAX_CANDIDATES]
             self._fumbled = dict(keep)
-        if len(self._phrases) > MAX_PHRASES:
-            keep = sorted(self._phrases.items(),
-                          key=lambda kv: kv[1].get("count") or 0,
-                          reverse=True)[:MAX_PHRASES]
-            self._phrases = dict(keep)
+        # user_context writes its seed straight into _phrases and prunes, so
+        # the seed has to be recognised here, before the budgets are applied.
+        self._mark_legacy_seeds()
+        learned = {k: v for k, v in self._phrases.items() if not v.get("seeded")}
+        seeded = {k: v for k, v in self._phrases.items() if v.get("seeded")}
+        if len(learned) > MAX_PHRASES or len(seeded) > MAX_SEEDED:
+            def _top(rows, n):
+                return sorted(rows.items(),
+                              key=lambda kv: kv[1].get("count") or 0,
+                              reverse=True)[:n]
+            self._phrases = dict(_top(learned, MAX_PHRASES)
+                                 + _top(seeded, MAX_SEEDED))
+        if len(self._habits) > MAX_HABITS:
+            keep = sorted(self._habits.items(),
+                          key=lambda kv: (kv[1][0], kv[1][1]),
+                          reverse=True)[:MAX_HABITS]
+            self._habits = dict(keep)
 
     def _has_fumbled(self, word: str) -> bool:
         """Has the engine ever been unsure about something that SOUNDS like
@@ -495,6 +623,70 @@ class PhraseStore:
                 continue
             if code:
                 self._fumbled[code] = self._fumbled.get(code, 0) + 1
+
+    def _count_habits(self, run, conf) -> None:
+        """Count every habit-shaped window of one run whose words were ALL
+        heard confidently. MUST hold self._lock."""
+        n = len(run)
+        sure = []
+        for idx, _w in run:
+            c = conf[idx] if idx < len(conf) else None
+            sure.append(c is not None and c >= LEARN_CONF)
+        now = None
+        # The last index built, for spotting VARIANTS: a confidently heard run
+        # one word away from a usable habit ("pushed to me" beside "pushed to
+        # main") is counted even though it cannot be a habit itself, because
+        # that count is what tells apply_habits the person really says it.
+        index = self._habit_index[1] if self._habit_index else {}
+        for size in range(HABIT_MIN_WORDS - 1, min(HABIT_MAX_WORDS, n) + 1):
+            for start in range(0, n - size + 1):
+                if not all(sure[start:start + size]):
+                    continue
+                words = [w for _i, w in run[start:start + size]]
+                norm = " ".join(words)
+                if self._is_forgotten(norm):
+                    continue
+                if not is_habit(words):
+                    if not (index and _is_variant(words, index)):
+                        continue
+                row = self._habits.get(norm)
+                if row is None:
+                    row = [0, ""]
+                    self._habits[norm] = row
+                row[0] += 1
+                row[1] = now = now or _now()
+                if row[0] == HABIT_REPAIR_COUNT:
+                    self._habit_gen += 1    # a new habit became usable
+
+    def _is_forgotten(self, norm: str) -> bool:
+        """A run holding a phrase the user told us to forget is not learned
+        again as a habit. MUST hold self._lock."""
+        if not self._forgotten:
+            return False
+        padded = f" {norm} "
+        return any(f" {f} " in padded for f in self._forgotten)
+
+    def forgotten_norms(self) -> tuple:
+        with self._lock:
+            return tuple(self._forgotten)
+
+    def habit_counts(self) -> dict:
+        """norm -> times heard confidently. A copy, for apply_habits."""
+        with self._lock:
+            return {k: v[0] for k, v in self._habits.items()}
+
+    def habit_index(self) -> dict:
+        """build_habit_index over this store, rebuilt only when a habit first
+        becomes usable, so a dictation pays for a lookup, not a rebuild."""
+        with self._lock:
+            if self._habit_index is not None and self._habit_index[0] == self._habit_gen:
+                return self._habit_index[1]
+            gen = self._habit_gen
+            counts = {k: v[0] for k, v in self._habits.items()}
+        index = build_habit_index(counts)
+        with self._lock:
+            self._habit_index = (gen, index)
+        return index
 
     def observe(self, text: str, word_conf=None) -> list:
         """Count every learnable phrase in `text` the engine was sure about.
@@ -547,6 +739,7 @@ class PhraseStore:
                             }
                             self._candidates.pop(norm, None)
                             promoted.append(norm)
+                self._count_habits(run, conf)
             self._prune()
         self._touch(urgent=bool(promoted))
         return promoted
@@ -574,6 +767,12 @@ class PhraseStore:
             if hit:
                 self._candidates.pop(norm, None)
                 self._forgotten[norm] = _now()
+                # Forget reaches habits too, or the forgotten phrase would go
+                # on repairing other words into itself.
+                padded = f" {norm} "
+                for h in [h for h in self._habits if padded in f" {h} "]:
+                    del self._habits[h]
+                self._habit_gen += 1
         if hit:
             self._touch(urgent=True)
         return hit
@@ -586,6 +785,8 @@ class PhraseStore:
             self._candidates.clear()
             self._phrases.clear()
             self._fumbled.clear()
+            self._habits.clear()
+            self._habit_gen += 1
         self._touch(urgent=True)
 
     def stats(self) -> tuple:
@@ -756,5 +957,222 @@ def apply_learned_phrases(text: str, phrases, word_conf=None) -> str:
         out.append(text[pos:start])
         out.append(rep)
         pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+# ── Habit repair ─────────────────────────────────────────────────────────────
+
+def _sounds_close(said: str, target: str, dm, nasal: bool) -> bool:
+    """Does the word the engine wrote sound like the habit's word(s)?
+
+    Equal Double Metaphone codes ("mean"/"main", "domain"/"to main",
+    "two"/"to"). With `nasal`, also a swallowed final nasal: the habit's code
+    is the written one plus a closing N or M and both start with the same
+    letter ("me" M for "main" MN). Only a nasal: any other extra sound turned
+    "go" into "gate" in the corpus run, and an extra sound in what was WRITTEN
+    is evidence of a different word, never a slip."""
+    try:
+        cs = [c for c in dm(said) if c]
+        ct = [c for c in dm(target.replace(" ", "")) if c]
+    except Exception:
+        return False
+    if not cs or not ct:
+        return False
+    if set(cs) & set(ct):
+        return True
+    if not nasal or said[:1] != target[:1]:
+        return False
+    return any(t[:-1] == s and t[-1] in "NM" for s in cs for t in ct)
+
+
+# Endings that make one word another form of the same word. "push" for
+# "pushed" or "Claude" for "Claude's" is a different thing said, not a slip,
+# and the corpus run turned "a push to main deploys" into "a pushed to main".
+_INFLECTIONS = ("s", "es", "'s", "d", "ed", "ing", "er", "ers", "ly", "n")
+
+
+def _inflected(a: str, b: str) -> bool:
+    """Another form of the same word: a regular ending ("push"/"pushed") or a
+    one-vowel tense change ("ran"/"run", "sit"/"sat"). "mean"/"main" differ in
+    two letters and stay a candidate."""
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    if long_.startswith(short) and long_[len(short):] in _INFLECTIONS:
+        return True
+    if len(a) == len(b):
+        diff = [(x, y) for x, y in zip(a, b) if x != y]
+        if len(diff) == 1 and diff[0][0] in "aeiou" and diff[0][1] in "aeiou":
+            return True
+    return False
+
+
+def _recase(target: str, text: str, start: int) -> str:
+    """Capital only where a sentence starts. A capital the engine put on the
+    slipped word mid-sentence ("Two main", "to Maine") is part of its mistake,
+    the same finding as homophones.py ("Revenue One this quarter")."""
+    return _cased(target, text, start)
+
+
+def build_habit_index(habits: dict) -> dict:
+    """Wildcard skeletons of every usable habit, for apply_habits.
+
+    ("push", "everything", "to", "*") -> [(habit norm, slot word)]. A
+    substitution keeps the habit's length; a merge is one word short, its
+    wildcard standing for two adjacent habit words ("domain" for "to main").
+    Counts are NOT baked in: apply_habits reads them live, so the index only
+    has to be rebuilt when a habit first becomes usable."""
+    skel = {}
+    for norm, count in (habits or {}).items():
+        if count < HABIT_REPAIR_COUNT:
+            continue
+        words = norm.split()
+        if not is_habit(words):
+            continue
+        n = len(words)
+        for k in range(n):
+            key = tuple(words[:k]) + ("*",) + tuple(words[k + 1:])
+            skel.setdefault(key, []).append((norm, words[k]))
+        for k in range(n - 1):
+            key = tuple(words[:k]) + ("*",) + tuple(words[k + 2:])
+            skel.setdefault(key, []).append(
+                (norm, words[k] + " " + words[k + 1]))
+    return skel
+
+
+def apply_habits(text: str, habits: dict, word_conf=None, index=None,
+                 forgotten=()) -> str:
+    """Repair one slipped word inside a phrase this person says all the time.
+
+    `habits` is PhraseStore.habit_counts(), `index` its habit_index() (built
+    here when not given). A window of the text is repaired to habit H only
+    when every word but one matches H exactly and in order, with nothing but
+    spaces between them, and the odd word out:
+      * sounds like H's word in that place (see _sounds_close), or is one word
+        of the same length and sound standing for two of H's ("domain");
+      * in a substitution, is replaced by a word that is NOT ordinary English
+        ("main", "absolutely"), is not another form of it ("push"/"pushed"),
+        and has two anchors either side: swapping one everyday word for
+        another ("was"/"is", "like"/"look", "rule"/"real") is a different
+        sentence, not a slip, and every such swap in the corpus run was wrong;
+      * sits among anchors that are not all ordinary English;
+      * carries no digit, and neither does its replacement;
+      * belongs to a variant run heard at most 1/HABIT_RATIO as often as H;
+      * was heard UNSURELY and H has been said HABIT_REPAIR_COUNT times, or was
+        heard surely but H has been said HABIT_STRONG_COUNT times and the
+        variant never once.
+    No confidence at all for the dictation, or none for that word, means no
+    repair: an alignment that lost the thread must not guess. A repair that
+    would spell out a phrase in `forgotten` (PhraseStore.forgotten_norms) is
+    refused: Forget means the app stops producing it, by any route.
+    """
+    if not text or not habits:
+        return text
+    conf = list(word_conf or [])
+    if not any(c is not None for c in conf):
+        return text
+    dm = _dm()
+    if dm is None:
+        return text
+    skel = index if index is not None else build_habit_index(habits)
+    if not skel:
+        return text
+    lengths = sorted({len(k) for k in skel}, reverse=True)
+
+    tokens = list(_WORD_RE.finditer(text))
+    low = [normalise_word(t.group(0)) for t in tokens]
+    # Run id per token: a window may not straddle punctuation.
+    run_of, run = [], 0
+    for q, t in enumerate(tokens):
+        if q and text[tokens[q - 1].end():t.start()].strip():
+            run += 1
+        run_of.append(run)
+    codes = {}
+
+    def _close(said, target, nasal):
+        key = (said, target, nasal)
+        if key not in codes:
+            codes[key] = _sounds_close(said, target, dm, nasal)
+        return codes[key]
+
+    consumed = [False] * len(tokens)
+    replacements = []
+    for i in range(len(tokens)):
+        if consumed[i]:
+            continue
+        for size in lengths:
+            end = i + size
+            if end > len(tokens) or run_of[i] != run_of[end - 1]:
+                continue
+            if any(consumed[i:end]):
+                continue
+            window = low[i:end]
+            if not all(window):
+                continue
+            best = None
+            for j in range(size):
+                cands = skel.get(tuple(window[:j]) + ("*",) + tuple(window[j + 1:]))
+                if not cands:
+                    continue
+                anchors = window[:j] + window[j + 1:]
+                if all(w in _COMMON_WORDS for w in anchors):
+                    continue
+                said = window[j]
+                c = conf[i + j] if i + j < len(conf) else None
+                if c is None:
+                    continue
+                for norm, target in cands:
+                    count = habits.get(norm, 0)
+                    if count < HABIT_REPAIR_COUNT:
+                        continue
+                    merge = " " in target
+                    if said.replace(" ", "") == target.replace(" ", ""):
+                        continue
+                    if any(ch.isdigit() for ch in said + target):
+                        continue
+                    if merge:
+                        lr = len(said) / float(len(target.replace(" ", "")))
+                        if not (RESCUE_LEN_LO <= lr <= RESCUE_LEN_HI):
+                            continue
+                        # "asked" is not "ask it": a form of one of the two
+                        # words is that word said, not two words run together.
+                        if any(_inflected(said, w) for w in target.split()):
+                            continue
+                    elif (len(anchors) < 2 or target in _COMMON_WORDS
+                          or _inflected(said, target)):
+                        continue
+                    variant = habits.get(" ".join(window), 0)
+                    if variant * HABIT_RATIO > count:
+                        continue
+                    if c >= LEARN_CONF and not (
+                            count >= HABIT_STRONG_COUNT
+                            and variant * HABIT_STRONG_RATIO <= count):
+                        continue
+                    if not _close(said, target, not merge):
+                        continue
+                    if forgotten:
+                        lo = max(0, i - 3)
+                        near = low[lo:i + j] + [target] + low[i + j + 1:end + 3]
+                        padded = " " + " ".join(near) + " "
+                        if any(f" {f} " in padded for f in forgotten):
+                            continue
+                    if best is None or count > best[0]:
+                        best = (count, i + j, target)
+            if best is not None:
+                _count, at, target = best
+                tok = tokens[at]
+                replacements.append(
+                    (tok.start(), tok.end(), _recase(target, text, tok.start())))
+                for q in range(i, end):
+                    consumed[q] = True
+                break
+
+    if not replacements:
+        return text
+    replacements.sort()
+    out, pos = [], 0
+    for start, stop, rep in replacements:
+        out.append(text[pos:start])
+        out.append(rep)
+        pos = stop
     out.append(text[pos:])
     return "".join(out)
