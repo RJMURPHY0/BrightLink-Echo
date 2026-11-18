@@ -56,23 +56,38 @@ _NAME_PLACEHOLDER = re.compile(
     r"\[[^\]\n]*?(?:name|sender|sign[\s-]?off|signature)[^\]\n]*?\]", re.I)
 
 
-# Added to every prompt — prevents AI from adding bullet points, dashes, or markdown
+# Added to every prompt: no invented markdown or lists. It used to ban
+# "dashes, hyphens" outright, which told the model to strip the hyphen out of
+# "ftc-ss.com", "FTC-2291" and "follow-up", and "output flowing paragraphs",
+# which fought every rule that keeps the user's lines (2026-11-18 eval).
 _NO_FORMAT = (
-    " Write in plain prose only. "
-    "Do not use bullet points, numbered lists, dashes, hyphens, asterisks, headers, "
-    "or any markdown formatting. Output flowing sentences and paragraphs."
+    " Plain text only: no markdown, asterisks, headers, bullet points or "
+    "numbered lists. Keep hyphenated words, codes and email addresses exactly "
+    "as written."
 )
 
 # The modes that exist to reword (formal, casual, concise, email) may change
 # HOW something is said, never WHAT was said. Ryan's rule (2026-09-25): the
 # speaker's essence survives every refine; only a mode they chose changes the
-# wording around it.
+# wording around it. Ryan, 2026-11-18: "like telling ChatGPT make this a bit
+# more professional": their own voice and exactly what they said, only
+# restructured and polished. The explicit copy-exactly list exists because
+# the eval showed "3rd of November" -> "3 November", "half 10" -> "10:30",
+# "Hi Sarah," -> "Dear Sarah," and "Cheers," -> "Best regards," on most runs.
 _KEEP_ESSENCE = (
-    " The wording and tone may change; what the speaker said may not. Keep "
-    "every point, request, question, fact, name, number and date, with the "
-    "same meaning and the same level of certainty. Do not add information, "
-    "opinions, examples, promises or pleasantries the speaker did not say, "
-    "and do not drop or soften any point they made."
+    "\n\nWhat must not change:\n"
+    "- Every point, request, question, apology, fact and detail stays, with "
+    "the same meaning and the same level of certainty. Nothing is dropped, "
+    "softened or made firmer, and an instruction stays an instruction, never "
+    "turned into a question.\n"
+    "- Names, numbers, prices, dates, days, times, codes, phone numbers and "
+    "email addresses are copied exactly as written: a number written in "
+    "digits stays in digits, and a time or date is never reformatted (keep "
+    "'half 10' and '3rd of November' as they are).\n"
+    "- If the text has a greeting or a sign-off, keep its words and the name "
+    "exactly as the speaker said them. If it has none, do not add one.\n"
+    "- Nothing new: no information, opinions, examples, promises, "
+    "pleasantries, opening lines or closing lines the speaker did not say."
 )
 
 
@@ -132,6 +147,51 @@ def _unwrap_data(out: str) -> str:
     return cleaned.strip("\n")
 
 
+# A line where the model talks about its own answer instead of giving it:
+# "Here is the corrected text:", "Wait: ...", "The corrected version:".
+# Seen in the 2026-11-18 eval: Haiku wrote a first try, "Wait: 'like' here is
+# verbal padding ... The corrected version:", then a second try.
+_EDIT_WORD = (r"(?:correct\w*|edit\w*|revis\w*|rewrit\w*|refin\w*|polish\w*|"
+              r"improv\w*|updat\w*|version|padding|filler|remov\w*)")
+# Self-talk anywhere: "Wait: ... should be removed ... version:" or a bare
+# "The corrected version:" line. Only lines that talk about editing count,
+# so a dictated "Wait for me at the station." is never taken for one.
+_COMMENTARY_LINE = re.compile(
+    r"(?im)^[ \t]*(?:"
+    r"wait\b[^\n]*\b" + _EDIT_WORD + r"\b[^\n]*"
+    r"|(?:the )?(?:corrected|edited|revised|rewritten|refined|updated|final|"
+    r"improved|polished) (?:version|text|email|message|prompt)[ \t]*:"
+    r")[ \t]*$")
+# A preamble on the FIRST line only: "Here is the corrected text:".
+_PREAMBLE_LINE = re.compile(
+    r"(?i)^[ \t]*(?:sure|certainly|of course)?[,!. \t]*"
+    r"(?:here(?: is|'s)|below is)\b[^\n]*\b" + _EDIT_WORD + r"\b[^\n]*:[ \t]*\r?\n")
+
+
+def strip_commentary(original: str, out: str) -> str:
+    """Keep only the answer when the model wrapped it in talk about itself.
+
+    A first-line preamble ("Here is the edited text:") is dropped, and after
+    a self-correction ("Wait: ... The corrected version:") only the text after
+    the LAST such line is kept, the model's final answer. A line the speaker
+    dictated themselves is never treated as commentary, and nothing is cut
+    if no answer follows."""
+    if not out:
+        return out
+    said = (original or "").lower()
+    m = _PREAMBLE_LINE.match(out)
+    if m and m.group(0).strip().lower() not in said and out[m.end():].strip():
+        out = out[m.end():].lstrip("\r\n")
+    last = None
+    for m in _COMMENTARY_LINE.finditer(out):
+        if m.group(0).strip().lower() not in said:
+            last = m
+    if last is None:
+        return out
+    tail = out[last.end():].strip("\r\n")
+    return tail if tail.strip() else out
+
+
 def drop_new_dashes(original: str, out: str) -> str:
     """AI-written text must not carry em or en dashes the speaker never dictated.
 
@@ -157,6 +217,19 @@ def _restore_emoji(original: str, out: str) -> str:
     if not missing:
         return out
     return (out.rstrip() + " " + " ".join(missing)).strip()
+
+
+# A closing phrase at the very end of a dictation with no name after it.
+_BARE_SIGNOFF = re.compile(
+    r"(?:^|[\s.,!?])(?:many thanks|thanks again|thanks|thank you|cheers|"
+    r"(?:kind|best|warm|warmest)\s+regards|regards|best wishes|all the best|"
+    r"speak soon|yours sincerely|yours faithfully|best|ta)[\s,.!]*$", re.I)
+
+
+def ends_with_bare_signoff(text: str) -> bool:
+    """True when the dictation ends on 'Thanks,' / 'Cheers' / 'Kind regards'
+    with no name after it, the one case where the sender's name belongs."""
+    return bool(_BARE_SIGNOFF.search((text or "").strip()))
 
 
 def _looks_like_a_list(text: str) -> bool:
@@ -288,41 +361,80 @@ REFINE_PROMPTS = {
         "Return only the corrected text, nothing else." + _NO_FORMAT
     ),
     "email": (
-        "Restructure this dictated speech into a well-written email. "
-        "Keep the sender's natural tone and voice. Reorganise the content into short, "
-        "clear paragraphs the way a good email reads: one topic per paragraph with a "
-        "blank line between paragraphs. Fix all grammar, punctuation, and "
-        "capitalisation. Remove false starts, repeated words, and filler. "
-        "Keep every point the sender made. Do not invent content, pleasantries, or "
-        "placeholders. A name at the very end of the speech is the sender signing "
-        "off: keep it as the sign-off with its dictated phrase (for example "
-        "'Cheers, Ryan'), never turn it into the greeting. Add a greeting line only "
-        "if the sender addressed the recipient in the speech. "
-        "Return only the email body, nothing else." + _KEEP_ESSENCE + _NO_FORMAT
+        "Lay this dictated text out as a ready-to-send email, written the way "
+        "this sender writes. Fix grammar, punctuation and capitalisation, and "
+        "remove filler (um, er, padding 'like' and 'you know'), stutters and "
+        "false starts, keeping the version the sender settled on, and mend "
+        "run-on sentences. Layout: the greeting on its own line in the "
+        "sender's own words, only if they addressed someone; then the body "
+        "in short paragraphs, one topic each, with a blank line between "
+        "paragraphs; then, only if they signed off, their own sign-off phrase "
+        "on its own line and the name they gave on the line below it. A "
+        "name at the very end of the speech is the sender "
+        "signing off, never the greeting. Do not make it more formal than "
+        "they said it. Never add a subject line, a greeting or sign-off they "
+        "did not say, a 'hope you are well' opener, a 'let me know if you "
+        "have any questions' closer, or any placeholder. "
+        "Return only the email, nothing else." + _KEEP_ESSENCE + _NO_FORMAT
     ),
+    # The "Formal" button. Ryan's brief (2026-11-18): what ChatGPT does when
+    # told "make this a bit more professional": same person, same message,
+    # polished. "Rewrite in a formal, professional tone" gave stiff corporate
+    # letters ("Dear Sarah", "I am writing to", "do not hesitate").
     "formal": (
-        "Rewrite this transcribed speech in a formal, professional tone. "
-        "Fix grammar and punctuation. Return only the rewritten text, nothing else."
+        "Make this dictated text a bit more professional, the way a capable "
+        "colleague would tidy it before it is sent. The person pressed this "
+        "button because they want it to read better, so make a real "
+        "improvement: fix grammar and punctuation, remove filler (um, er, "
+        "padding 'like' and 'you know'), stutters and false starts, mend "
+        "run-on sentences, and turn slang, chatty or clumsy phrasing into "
+        "clear, polite, businesslike wording ('any joy with it?' becomes "
+        "'any update on it?', 'he's sat waiting' becomes 'he is waiting', "
+        "'gonna' becomes 'going to'). If the text is already "
+        "professional, change little. It must still sound like the "
+        "same person on a good day: warm and direct, not stiff, and no longer "
+        "than it needs to be. Never add 'Dear', 'I am writing to', 'I hope "
+        "this finds you well', 'please do not hesitate', 'kindly', "
+        "'furthermore' or any other corporate padding, and never spell out a "
+        "number the speaker gave in digits (3 stays 3, 100% stays 100%). "
+        "Return only the edited text, nothing else."
         + _KEEP_ESSENCE + _NO_FORMAT
     ),
     "casual": (
-        "Rewrite this transcribed speech in a friendly, conversational tone. "
-        "Keep it natural and fix any obvious transcription errors. "
-        "Return only the rewritten text, nothing else." + _KEEP_ESSENCE
+        "Make this dictated text read as a relaxed, friendly message in the "
+        "speaker's own voice, the way they would type it to someone they get "
+        "on with. Fix grammar and punctuation, remove filler (um, er, padding "
+        "'like' and 'you know'), stutters and false starts, and loosen stiff "
+        "or formal phrasing into plain everyday words ('I would be grateful "
+        "if you could' becomes 'could you'). If it already reads relaxed, "
+        "change little. Keep any casual words they already used. Do not add "
+        "slang, jokes, emoji, exclamation "
+        "marks or enthusiasm they did not use. "
+        "Return only the edited text, nothing else." + _KEEP_ESSENCE
         + _NO_FORMAT
     ),
     "concise": (
-        "Rewrite this transcribed speech using short, simple sentences. "
-        "Keep every point and every piece of information from the original. Do not remove anything useful. "
-        "Cut filler words and repetition only. Fix punctuation. "
-        "Make it easy to read and easy to understand at a glance. "
-        "Return only the rewritten text, nothing else." + _KEEP_ESSENCE
+        "Make this dictated text clearly shorter and easy to read at a "
+        "glance. Cut filler (um, er, padding 'like' and 'you know'), "
+        "stutters, false starts, repetition, throat-clearing and wordy "
+        "phrasing, and split long sentences into short, simple ones. Where "
+        "there are words to spare, aim to cut about a third; if the text is "
+        "already short and plain, change little. Every "
+        "point, request, question and piece of information must survive, in "
+        "the speaker's own words where possible: cut words, never facts. "
+        "Return only the edited text, nothing else." + _KEEP_ESSENCE
         + _NO_FORMAT
     ),
     "prompt_optimiser": (
-        "You are a prompt optimisation specialist. "
-        "Transform the text below into a clear, precise prompt ready to paste into any AI. "
-        "Preserve the intent exactly. Return only the optimised prompt text, nothing else." + _NO_FORMAT
+        "Turn this dictated request into a clear, precise prompt the speaker "
+        "can paste straight into an AI assistant. Remove filler and false "
+        "starts, state the task first, then every requirement, constraint, "
+        "detail and preference the speaker gave, in plain sentences. Keep "
+        "every one of them exactly, including names, numbers, prices, dates "
+        "and anything they said not to do. Do not add requirements, "
+        "assumptions or examples they did not give, and do not answer the "
+        "request yourself. Write it in the speaker's voice, as their request. "
+        "Return only the prompt, nothing else." + _NO_FORMAT
     ),
     "context_fix": (
         "You are a transcription corrector for dictated speech. Fix ONLY these two "
@@ -364,10 +476,21 @@ class AIRefiner:
     # Verified live on OpenRouter (July 2026). gemini-2.0-flash-001 was
     # DELISTED — requests to it fail, which silently killed the whole
     # OpenRouter path. Fallbacks are tried in-request by OpenRouter itself.
-    DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash-lite"
+    # Chosen on the 2026-11-18 refine eval (tools/refine_eval): with the same
+    # prompts Haiku 5.5 was accepted first time far more often than the
+    # llama-4-scout that had been answering, at the same median latency and
+    # about $0.00014 a refine. Brightlink's relay picks its own model
+    # (api/whisper/_ai.route.ts MODEL) and must be moved to match.
+    DEFAULT_OPENROUTER_MODEL = "anthropic/claude-haiku-5.5"
+    # Ids OpenRouter delisted. gemini-2.5-flash-lite went in 2026: every
+    # refine was then answered by llama-4-scout, the first fallback.
+    RETIRED_OPENROUTER_MODELS = frozenset({
+        "google/gemini-2.0-flash-001",
+        "google/gemini-2.5-flash-lite",
+    })
     OPENROUTER_FALLBACK_MODELS = [
+        "google/gemini-3.1-flash-lite",
         "meta-llama/llama-4-scout",
-        "anthropic/claude-haiku-4.5",
     ]
 
     def __init__(
@@ -382,7 +505,7 @@ class AIRefiner:
     ):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.openrouter_api_key = openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "")
-        self.openrouter_model = openrouter_model or self.DEFAULT_OPENROUTER_MODEL
+        self.openrouter_model = openrouter_model
         # Returns the signed-in user's Supabase access token, "" when signed out.
         self._token_provider = token_provider
         # Cheap "is anyone signed in" check for is_available, which runs on the
@@ -396,6 +519,18 @@ class AIRefiner:
         self._relay_state = threading.local()
         self._client = None
         self._openrouter_client = None
+
+    @property
+    def openrouter_model(self) -> str:
+        return self.__dict__.get("_openrouter_model") or self.DEFAULT_OPENROUTER_MODEL
+
+    @openrouter_model.setter
+    def openrouter_model(self, value: str) -> None:
+        # Saved configs keep the model id they were written with, so an id
+        # OpenRouter has since delisted would fail on every call and quietly
+        # hand every refine to the weakest fallback. Map it to today's default.
+        value = (value or "").strip()
+        self._openrouter_model = "" if value in self.RETIRED_OPENROUTER_MODELS else value
 
     def update_api_key(self, api_key: str) -> None:
         self.api_key = api_key.strip()
@@ -504,13 +639,21 @@ class AIRefiner:
             print(f"[AIRefiner] Relay call failed: {type(e).__name__}: {e}")
             return ""
 
+    # Every button that reshapes the wording and every Ask. It used to say
+    # "keep sentences short and direct" for all of them, which made Formal,
+    # Casual and Email rewrite like Short and drop the speaker's phrasing.
     _STYLE_SYSTEM_PROMPT = (
-        "You are a text refinement assistant. Write in plain prose only. "
-        "No bullet points, numbered lists, dashes at line starts, asterisks, markdown, or headers. "
-        "Use clear, simple language. Keep sentences short and direct. Use active voice. "
-        "Never use em dashes or en dashes. Avoid semicolons, filler words, and cliches. "
-        "Write as a human would: natural, direct, easy to read. "
-        "Return only the refined text, nothing else."
+        "You edit text a person dictated so they can send it as their own. "
+        "Do what the request asks properly, the way a good human editor "
+        "would, and the result must read as if this person wrote it "
+        "themselves on a good day: their voice, saying exactly what they "
+        "said. Keep their words where they already work. Never invent or "
+        "drop a fact, name, number, "
+        "date, request or promise. Use British English spelling (colour, "
+        "organise, centre). Never use em dashes or en dashes. No clichés, "
+        "corporate padding or AI phrases (delve, leverage, seamless, robust, "
+        "elevate, reach out, touch base). Plain text, no markdown. "
+        "Return only the edited text, nothing else."
     )
     # Fix All must not get the style prompt either: "keep sentences short" and
     # "avoid filler words" told the model to rewrite the very phrasing the Fix
@@ -638,7 +781,7 @@ class AIRefiner:
             prompt += _KEEP_EMOJI
 
         def _finish(out: str) -> str:
-            out = _unwrap_data(out)
+            out = _unwrap_data(strip_commentary(text, _unwrap_data(out)))
             out = self._apply_sender_name(out, mode, name)
             out = drop_new_dashes(text, out)
             out = _restore_emoji(text, out)
@@ -682,7 +825,10 @@ class AIRefiner:
         # Email sign-off: hand the model the sender's real name so a bare
         # sign-off ("Thanks,") gets a name and no placeholder is invented.
         name = (sender_name or "").strip()
-        if mode == "email" and not custom_prompt and name:
+        # Only when the dictation really ends on a bare sign-off: handed the
+        # name on every email, the model signed off messages nobody signed
+        # ("Cheers, Ryan Murphy" under a two-line Teams note, 2026-11-18 eval).
+        if mode == "email" and not custom_prompt and name and ends_with_bare_signoff(text):
             prompt += (
                 f" The sender's name is '{name}'. If the speech ends with a sign-off "
                 f"phrase that has no name after it (for example 'Thanks,' or 'Cheers,'), "
@@ -722,7 +868,7 @@ class AIRefiner:
         try:
             client = self._get_anthropic_client()
             message = client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-haiku-5-5",
                 max_tokens=self._max_tokens_for(text),
                 system=system,
                 messages=[
@@ -772,7 +918,7 @@ class AIRefiner:
         try:
             client = self._get_anthropic_client()
             msg = client.messages.create(
-                model="claude-haiku-4-5-20251001", max_tokens=max_tokens,
+                model="claude-haiku-5-5", max_tokens=max_tokens,
                 system=system, messages=[{"role": "user", "content": user}])
             return (msg.content[0].text or "").strip()
         except Exception as e:

@@ -161,7 +161,7 @@ class Config:
     startup_priority: int = 0  # Where a sign-in launch sits in the queue: index into startup_order.STOPS. 0 = first, what every install did before this setting.
     anthropic_api_key: str = ""  # Optional — enables AI text refinement
     openrouter_api_key: str = ""  # Optional — enables AI via OpenRouter (alternative to Anthropic direct)
-    openrouter_model: str = "google/gemini-2.5-flash-lite"  # OpenRouter model for refinement/context-fix
+    openrouter_model: str = "anthropic/claude-haiku-5.5"  # OpenRouter model for refinement/context-fix
     warm_mic: bool = True  # Keep mic stream open with ~1.5s pre-roll: instant start, first syllable never lost
     auto_update: bool = True  # Silently download new releases and install them when the app is idle
     use_parakeet: bool = True  # Parakeet TDT engine (near-instant, high accuracy, English) with whisper fallback
