@@ -188,7 +188,7 @@ class CrashWatch:
             k32.RegisterApplicationRestart.argtypes = [ctypes.c_wchar_p, ctypes.c_ulong]
             k32.RegisterApplicationRestart.restype = ctypes.c_long
             result = k32.RegisterApplicationRestart(
-                "--startup", restart_no_patch | restart_no_reboot)
+                "--startup --relaunch", restart_no_patch | restart_no_reboot)
             if result != 0:
                 print(f"[CrashWatch] Windows restart registration refused: {result}")
         except Exception as e:
@@ -379,7 +379,8 @@ class CrashWatch:
             return
         import pyi_runtime
         print(f"[CrashWatch] Relaunching after {why}.")
-        subprocess.Popen([sys.executable, "--startup"],
+        # --relaunch: never queued behind other apps like a sign-in (startup_order).
+        subprocess.Popen([sys.executable, "--startup", "--relaunch"],
                          close_fds=True, env=pyi_runtime.clean_launch_env(),
                          creationflags=subprocess.CREATE_NO_WINDOW)
         os._exit(1)
