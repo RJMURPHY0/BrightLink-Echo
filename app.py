@@ -3423,6 +3423,15 @@ class WhisperFlowApp:
                         print(f"[App] Learned phrases: {len(fixed)} -> {len(rescued)} chars")
                         word_conf = phrase_learning.align(rescued, conf)
                         fixed = rescued
+                    # Whole phrases said all the time ("push everything to
+                    # main"): repair the one word the engine slipped on.
+                    repaired = phrase_learning.apply_habits(
+                        fixed, store.habit_counts(), word_conf,
+                        store.habit_index(), store.forgotten_norms())
+                    if repaired != fixed:
+                        print(f"[App] Habit phrases: {len(fixed)} -> {len(repaired)} chars")
+                        word_conf = phrase_learning.align(repaired, conf)
+                        fixed = repaired
                     learned = store.observe(fixed, word_conf)
                     if learned:
                         print(f"[App] Phrases learned: {len(learned)}")

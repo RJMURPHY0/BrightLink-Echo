@@ -154,12 +154,16 @@ def merge_phrases(local: Optional[dict], remote: Optional[dict]) -> dict:
             count = int(row.get("count") or 0)
             learned = str(row.get("learned_at") or "")
             if cur is None:
-                phrases[norm] = {"phrase": " ".join(row["phrase"].split()),
-                                 "count": count, "learned_at": learned}
+                cur = phrases[norm] = {"phrase": " ".join(row["phrase"].split()),
+                                       "count": count, "learned_at": learned}
             else:
                 cur["count"] = max(cur["count"], count)
                 if learned and (not cur["learned_at"] or learned < cur["learned_at"]):
                     cur["learned_at"] = learned
+            # A starter term stays one after a merge, so it keeps its own
+            # budget and never crowds out a phrase learned from speech.
+            if row.get("seeded"):
+                cur["seeded"] = True
     for norm in list(phrases):
         gone = forgotten.get(norm)
         # A phrase learned again AFTER it was forgotten is wanted again.
