@@ -284,6 +284,34 @@ class EmailAppTests(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertFalse(is_email_app("C:\\x\\" + exe, title))
 
+    def test_every_brightlink_composer_gets_the_layout(self):
+        # Every place BrightLink lets a person write an email names the tab
+        # "New email | <brand>" while they write (Brightlink
+        # src/lib/emailComposeTitle.ts): the send window from any record,
+        # task or Home card, Scheduled emails Edit, the big message window,
+        # and a sequence, review or automation email step while focused. The
+        # inbox panel (reply, forward, new mail) reads "Inbox | <brand>".
+        said = "Hi Jason here are the meeting notes from yesterday kind regards Ryan"
+        want = ("Hi Jason,\n\nHere are the meeting notes from yesterday."
+                "\n\nKind regards,\nRyan")
+        for title in ("New email | BrightLink - Google Chrome",
+                      "New email | FTC Safety Solutions - Google Chrome",
+                      "Inbox | BrightLink - Google Chrome"):
+            with self.subTest(title=title):
+                self.assertTrue(is_email_app("C:\\x\\chrome.exe", title))
+                self.assertEqual(fmt(said, "Ryan Murphy"), want)
+        # The same pages while nobody is writing an email are not mail: the
+        # step editor only retitles the tab while its email body has focus.
+        for title in ("Sequences | BrightLink - Google Chrome",
+                      "Spring outreach | BrightLink - Google Chrome",
+                      "New sequence | BrightLink - Google Chrome",
+                      "Scheduled emails | BrightLink - Google Chrome",
+                      "Automations | BrightLink - Google Chrome",
+                      "Mailouts | BrightLink - Google Chrome",
+                      "New email | BrightLink - Google Search - Google Chrome"):
+            with self.subTest(title=title):
+                self.assertFalse(is_email_app("C:\\x\\chrome.exe", title))
+
     def test_search_and_help_pages_about_email_are_not_email(self):
         # Asked for explicitly: Google Search must never get the layout, even
         # when the query itself looks like a Gmail title.

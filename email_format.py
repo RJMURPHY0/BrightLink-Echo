@@ -105,10 +105,14 @@ def _is_webmail_title(title: str) -> bool:
 
 # BrightLink's own mail. The CRM titles its tab "<page> | <brand>", and the
 # brand half is the customer's profile name ("Inbox | BrightLink", "Inbox |
-# FTC Safety"), so only the page half can be matched. The CRM writes these two
-# page names while its mail panel or its send-email modal (Email tab) is open:
-# Brightlink src/lib/pageTitle.ts, INBOX_TITLE and NEW_EMAIL_TITLE, pinned on
-# that side by tests/page-title.test.tsx. Renaming either breaks this match.
+# FTC Safety"), so only the page half can be matched. "Inbox" while the mail
+# panel is open (reading, reply, reply all, forward, new mail); "New email"
+# while ANY email is being written: the send window, Scheduled emails Edit, the
+# big message window, and a sequence, review or automation email step while it
+# has focus. Brightlink src/lib/pageTitle.ts (INBOX_TITLE, NEW_EMAIL_TITLE) and
+# src/lib/emailComposeTitle.ts, the one hook every composer uses; pinned there
+# by tests/page-title.test.tsx and tests/email-compose-title.test.tsx.
+# Renaming either breaks this match.
 _CRM_MAIL_TITLE = re.compile(r"(?:Inbox|New email) \| (?P<rest>.+)")
 
 
