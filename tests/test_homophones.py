@@ -269,6 +269,97 @@ class OtherPairTests(Base):
         ])
 
 
+def _rec(text, unsure=(), conf=0.97, low=0.55):
+    """A confidence record for `text`: every word `conf`, words in `unsure`
+    at `low`."""
+    import phrase_learning
+    from text_expansion import _WORD_RE
+    out = []
+    for m in _WORD_RE.finditer(text):
+        w = phrase_learning.normalise_word(m.group(0))
+        out.append((w, low if w in unsure else conf))
+    return out
+
+
+class UnsureGatedTests(Base):
+    """Rules that also need the engine to have been unsure of the word
+    (2026-11-18). Fix cases pass a record marking the word unsure; the
+    must-not-fire cases are run with EVERY word unsure, so only the grammar
+    stands between them and a rewrite."""
+
+    def fix_unsure(self, src, words):
+        return homophones.fix(src, word_conf=_rec(src, unsure=words))
+
+    def keeps_when_all_unsure(self, cases):
+        for src in cases:
+            self.assertEqual(
+                homophones.fix(src, word_conf=_rec(src, conf=0.3)), src, src)
+
+    def test_reported_two_for_too(self):
+        # Ryan: "push the usage card fixes too", Parakeet "two" at 0.62.
+        for src, want in [
+            ("Push the usage card fixes two.", "Push the usage card fixes too."),
+            ("the usage card fixes two, but like it reads",
+             "the usage card fixes too, but like it reads"),
+            ("Can you check the logs two please",
+             "Can you check the logs too please"),
+        ]:
+            self.assertEqual(self.fix_unsure(src, {"two"}), want, src)
+
+    def test_two_needs_the_engine_unsure(self):
+        src = "Push the usage card fixes two."
+        self.assertEqual(homophones.fix(src), src)              # no record
+        self.assertEqual(homophones.fix(src, word_conf=_rec(src)), src)  # sure
+        self.assertEqual(homophones.fix(src, word_conf=[("push", 0.3)]), src)
+
+    def test_two_as_a_count_never_fires(self):
+        self.keeps_when_all_unsure([
+            "I want the other two.", "Take two.", "We sold two.",
+            "Give me two.", "Just the two.", "One or two.", "Maybe two.",
+            "Page two.", "Step two, then we deploy.", "We need two.",
+            "I bought two, but one broke.", "There are two.",
+            "I watched Toy Story two.", "Phase one and phase two.",
+            "Table for two.", "Between one and two.", "Count to two.",
+            "Those two.", "You two.", "Us two.", "Version two.",
+            "It was two, then three.", "About two.", "Line two.",
+            "If you want me to.", "I'd love to but I can't.",
+        ])
+
+    def test_reported_call_for_cool(self):
+        for src, want in [
+            ("thought that'd be call.", "thought that'd be cool."),
+            ("That would be call, yeah.", "That would be cool, yeah."),
+            ("It'll be pretty call.", "It'll be pretty cool."),
+            ("That's call.", "That's cool."),
+            ("Sounds call with me.", "Sounds cool with me."),
+        ]:
+            self.assertEqual(self.fix_unsure(src, {"call"}), want, src)
+
+    def test_cool_for_call(self):
+        for src, want in [
+            ("I'll cool you back later.", "I'll call you back later."),
+            ("Give me a cool tomorrow.", "Give me a call tomorrow."),
+            ("can you give him a quick cool when you're free",
+             "can you give him a quick call when you're free"),
+        ]:
+            self.assertEqual(self.fix_unsure(src, {"cool"}), want, src)
+
+    def test_call_and_cool_must_not_fire(self):
+        self.keeps_when_all_unsure([
+            "Who would you call.", "Do they really call?", "It's not like you'd call.",
+            "The next step will be call them.", "If so call me.",
+            "It's call or text, your choice.", "That's a call for the client.",
+            "Let them cool down.", "We'll cool them in the fridge.",
+            "I'll cool them overnight.", "Give it a cool drink.",
+            "Leave it to cool.", "That's so cool.", "It'd be cool to call.",
+            "Call me later.", "We should call them back.",
+        ])
+
+    def test_cool_be_needs_the_engine_unsure(self):
+        src = "That would be call."
+        self.assertEqual(homophones.fix(src, word_conf=_rec(src, conf=0.99)), src)
+
+
 class MechanicsTests(Base):
 
     def test_punctuation_is_the_speakers_boundary(self):

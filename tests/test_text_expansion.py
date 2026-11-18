@@ -243,6 +243,21 @@ class FuzzyVocabularyTests(unittest.TestCase):
         if _dm() is None:
             self.skipTest("metaphone encoder unavailable")
 
+    def test_a_term_may_not_swap_one_function_word_for_another(self):
+        # Ryan, 2026-11-18: a hand-typed entry "Push it" turned "push the usage
+        # card fixes too" into "Push it usage card…" ("the" and "it" encode
+        # alike, and each side held one function word).
+        entries = [vocab("Push it")]
+        for said in ("Push the usage card fixes too.",
+                     "Push the other ready branches as well.",
+                     "push the button"):
+            self.assertEqual(said, self.fuzzy(said, entries), said)
+        # A mishearing that holds the term's own function word still corrects.
+        self.assertEqual("Bank of Ireland",
+                         self.fuzzy("bank of irland", [vocab("Bank of Ireland")]))
+        self.assertEqual("Head of Sales",
+                         self.fuzzy("hed of sails", [vocab("Head of Sales")]))
+
     # ── must correct (close mishearings the user never listed) ────────────────
     def test_catches_close_mishearings_of_a_term(self):
         entries = [vocab("Vercel")]
