@@ -76,6 +76,12 @@ class _Rule(NamedTuple):
     # "Closed Won"). Off by default: Parakeet capitalises a mis-picked "One"
     # as if it were a name ("Revenue One"), and that capital is the mistake.
     keep_title: bool = False
+    # Fire only when the recogniser itself was UNSURE of the word: its own
+    # confidence is known and under this (see word_confidence.py). For shapes
+    # where the grammar alone is not quite enough ("fixes two." is "too" far
+    # more often than a count, but not always): a word the engine was sure of
+    # is never touched, and an unknown confidence counts as sure.
+    unsure: Optional[float] = None
 
 
 # ── Shared context ───────────────────────────────────────────────────────────
@@ -112,6 +118,33 @@ at by in on for to with from that which who is was
 """)
 
 
+# Words after which "two" is a count, never "too": determiners, quantifiers,
+# prepositions, number words, ordinal-ish nouns ("page two", "step two"), the
+# verbs that take a quantity ("take two", "need two") and the pronouns that a
+# count can follow ("you two", "us two", "them two").
+_COUNT_TAKERS = """
+the these those other another of for only just all about around roughly maybe
+perhaps last first next top bottom or and than between no any every each both
+our my your their his her its we us you them they it me him I some few
+number page step option phase version part level round chapter team section
+stage point line row column item slide question plan tier floor year week day
+plus minus times by to at from under over nearly almost exactly like versus vs
+are were is was be been am take took takes taking buy bought need needed needs
+want wanted wants get got gets have had has having make made makes give gave
+gives add added adds pick picked choose chose keep kept sell sold send sent
+order ordered book booked use used hold held see saw found find count counted
+one two three four five six seven eight nine ten eleven twelve zero
+a an per table room gate platform terminal channel series season episode
+this his was has does goes yes plus less unless thus always perhaps
+gets takes needs uses costs makes wants says buys sells holds gives keeps
+runs comes sees counts picks adds scores wins loses shows lists sends owns
+seats sleeps serves carries brings leaves pays charges requires allows
+offers includes contains supports has_got equals hits gains earns spends
+asks expects plays rolls throws deals draws books orders eats drinks
+fits splits cuts divides becomes turns makes_it ones
+"""
+
+
 def _sentence_tail(text: str, pos: int) -> str:
     m = re.search(r"[.!?\n]", text[pos:])
     return text[pos:pos + m.start()] if m else text[pos:]
@@ -141,6 +174,27 @@ def _not_question(text: str, m) -> bool:
     """ "Did we one?" reads as a pronoun more often than the verb."""
     tail = _sentence_tail(text, m.end("w"))
     return text[m.end("w") + len(tail):m.end("w") + len(tail) + 1] != "?"
+
+
+def _left_not_name(text: str, m) -> bool:
+    """ "Toy Story two", "Rocky two": a capitalised word before the number in
+    mid-sentence is a title, and the number is its sequel."""
+    left = m.group(0)[:m.start("w") - m.start()].strip()
+    if not left[:1].isupper():
+        return True
+    return _at_sentence_start(text, m.start())
+
+
+def _no_subject_before(text: str, m) -> bool:
+    """ "it fixes two", "the tool fixes two": a subject right before the
+    plural-looking word makes it a verb with a count. A noun phrase only
+    ("the usage card fixes two", "check the logs two") passes: the word before
+    it is a noun or a determiner, never a subject pronoun."""
+    head = _sentence_head(text, m.start()).rstrip()
+    prev = re.findall(r"[\w'’]+", head)
+    return not prev or prev[-1].lower() not in {
+        "he", "she", "it", "this", "that", "which", "who", "what", "there",
+        "here", "one", "each", "everyone", "someone", "nobody", "everybody"}
 
 
 def _all(*guards):
@@ -332,6 +386,65 @@ _RULES: List[_Rule] = [
             "tight hot cold heavy bad") + _E + r")"
     ), "too"),
 
+    # "push the usage card fixes two." -> "too" (Ryan, 2026-11-18: Parakeet
+    # wrote "two" at 0.62). Only after a PLURAL noun: a singular noun before a
+    # number is a label ("image two", "chunk two", "month two", "voice two"),
+    # and the prose corpus is full of them, while a plural cannot take a
+    # numeral after it. Plural-looking verbs that take a count ("it uses
+    # two", "she gets two") are listed out, a pronoun subject before the
+    # word makes it a verb, and the engine must also have been unsure.
+    # "to" is deliberately left out: a stranded "to" is everyday English
+    # ("if you want me to.", "I'd love to but…").
+    _Rule("too_also", _rx(
+        r"(?<![\w'’/@#.\\-])(?!" + _alt(_COUNT_TAKERS) + _E + r")"
+        r"[A-Za-z]+[abcdefghjklmnopqrtvwxyz]s" + _S + r"(?P<w>two)" + _E +
+        r"(?=" + _END + r"|" + _S + _alt(
+            "so but as_well though yeah please again anyway then") + _E + r")"
+    ), "too", guard=lambda t, m: _left_not_name(t, m) and _no_subject_before(t, m),
+        unsure=0.80),
+
+    # ── cool / call ──────────────────────────────────────────────────────────
+
+    # "that'd be call", "that's pretty call", "sounds call." Nothing makes
+    # "call" grammatical in these slots, but "call" is the commoner word and
+    # the engine reaches for it. The intensifier list leaves out "really" and
+    # "so" ("do they really call?", "if so call") on purpose.
+    _Rule("cool_be", _rx(
+        _B + _alt("that'd that’d it'd it’d that'll that’ll it'll it’ll would "
+                  "will gonna to") + _S + r"be" + _S +
+        r"(?:(?:" + _alt("pretty super quite very kinda kind_of") + r")" + _S +
+        r")?(?P<w>call)" + _E +
+        r"(?=" + _END + r"|" + _S + _alt("too as_well though yeah and but so") +
+        _E + r")"
+    ), "cool", unsure=0.95),
+    _Rule("cool_is", _rx(
+        _B + r"(?:that's|that’s|thats|it's|it’s|sounds|looks|seems)" + _S +
+        r"(?:(?:" + _alt("pretty super quite very kinda kind_of") + r")" + _S +
+        r")?(?P<w>call)" + _E +
+        r"(?=" + _END + r"|" + _S + _alt("too as_well though yeah and but so "
+                                          "with_me with_us") + _E + r")"
+    ), "cool", unsure=0.95),
+    # The other way round: "I'll cool you back" -> "call". Only with a time
+    # or "back" after the person, so "cool them down/off/in the fridge" and
+    # "we cool them overnight" stay. Unsure-gated too: a kitchen dictation can
+    # still say "we'll cool them later".
+    _Rule("call_you", _rx(
+        _B + r"(?:I'll|I’ll|we'll|we’ll|I" + _S + r"will|we" + _S +
+        r"will|I'd|I’d|can|could|should|gonna|please|to)" + _S +
+        r"(?P<w>cool)" + _S + r"(?=(?:you|him|her|them|me|us)" + _S + _alt(
+            "back later tomorrow tonight today now first_thing on_monday "
+            "on_tuesday on_wednesday on_thursday on_friday this_afternoon "
+            "this_evening in_a_bit") + _E + r")"
+    ), "call", unsure=0.90),
+    _Rule("give_a_call", _rx(
+        _B + r"(?:give|gave|giving|gives)" + _S +
+        r"(?:you|him|her|them|me|us)" + _S + r"a" + _S +
+        r"(?:(?:quick|ring)" + _S + r")?(?P<w>cool)" + _E +
+        r"(?=" + _END + r"|" + _S + _alt(
+            "back later tomorrow tonight today now when after about on at "
+            "first_thing this_afternoon this_evening") + _E + r")"
+    ), "call"),
+
     # ── write / right ────────────────────────────────────────────────────────
 
     # "Right an email to John" -> "Write". Never after a word that makes it
@@ -499,21 +612,35 @@ def _cased(new: str, old: str, text: str, pos: int, keep_title: bool) -> str:
     return new
 
 
-def fix(text: str, source: str = "") -> str:
+def fix(text: str, source: str = "", word_conf=None) -> str:
     """Pick the right spelling of each sound-alike word the rules recognise.
 
     Returns the text unchanged when no rule fires. Only the one word a rule
     names is ever replaced; spacing, punctuation and line breaks are kept
-    exactly."""
+    exactly.
+
+    `word_conf` is the engine's own [(word, confidence)] record for this
+    dictation (StreamingSession.confidence). Rules marked `unsure` need it:
+    without it, or where a word cannot be aligned to it, they never fire."""
     if not text:
         return text
     fired: List[str] = []
     for rule in _RULES:
         current = text
+        conf_at = None
+        if rule.unsure is not None:
+            if not word_conf or not rule.pattern.search(current):
+                continue
+            import word_confidence
+            conf_at = word_confidence.by_offset(current, word_conf)
 
-        def _sub(m, _rule=rule, _text=current):
+        def _sub(m, _rule=rule, _text=current, _conf_at=conf_at):
             if _rule.guard is not None and not _rule.guard(_text, m):
                 return m.group(0)
+            if _conf_at is not None:
+                c = _conf_at.get(m.start("w"))
+                if c is None or c >= _rule.unsure:
+                    return m.group(0)
             old = m.group("w")
             new = _cased(_rule.replacement, old, _text, m.start("w"),
                          _rule.keep_title)

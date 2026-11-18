@@ -237,6 +237,9 @@ FUZZY_MAX_WINDOW = 5        # a mishearing spans at most this many words
 # That constraint only holds while the words in the span are the name's own.
 # Function words are not, so every managed term, single or multi-word, also
 # takes the function-word rule (see _FUNCTION_WORDS).
+# With a confidence record, a managed term may only rewrite a span holding a
+# word the recogniser scored under this (see apply_vocabulary_fuzzy).
+MANAGED_SURE = 0.90
 MANAGED_MIN_TERM_LEN = 5    # single-word managed terms; shorter ones are dropped
 MANAGED_JW = 0.86           # vs FUZZY_JW 0.70 — near-identical or nothing
 MANAGED_LEN_LO = 0.7        # tighter than FUZZY_LEN_* so a short word cannot
@@ -375,11 +378,22 @@ def _dm():
 
     A missing encoder makes the fuzzy pass a clean no-op — the exact path and every
     other feature are unaffected — so this can never break a build or a dictation."""
+    global _DM_CACHED
+    if _DM_CACHED is not None:
+        return _DM_CACHED
     try:
         from metaphone import doublemetaphone
-        return doublemetaphone
     except Exception:
         return None
+    # Memoised: the same vocabulary terms and the same everyday words are
+    # encoded on every dictation, and Double Metaphone is the costly part of
+    # the fuzzy pass. A pure function of its string, so a cache is exact.
+    import functools
+    _DM_CACHED = functools.lru_cache(maxsize=8192)(doublemetaphone)
+    return _DM_CACHED
+
+
+_DM_CACHED = None
 
 
 _DIGITS_RE = re.compile(r"\d+")
@@ -477,11 +491,29 @@ def managed_variants(raw: str) -> list:
     return out
 
 
-def apply_vocabulary_fuzzy(text: str, entries) -> str:
+def _fw_contained(term_fw: list, span_fw: list) -> bool:
+    """True when every function word of the term (with repeats) is in the span."""
+    pool = list(span_fw)
+    for w in term_fw:
+        if w not in pool:
+            return False
+        pool.remove(w)
+    return True
+
+
+def apply_vocabulary_fuzzy(text: str, entries, word_conf=None) -> str:
     """Phonetic safety net: rewrite spans that SOUND like a vocabulary term but
     were not listed as an explicit mishearing. Conservative by construction (see
     the gate above). No-op without a metaphone encoder, without vocabulary, or on
-    empty text."""
+    empty text.
+
+    `word_conf`, when given, is the recogniser's confidence per `_WORD_RE` word
+    of `text` (word_confidence.aligned; None where unknown). With it, a MANAGED
+    term (company profile or CRM name) may only rewrite a span holding at least
+    one word the engine was unsure of: a name it heard clearly as ordinary
+    words was, in all likelihood, ordinary words. Unknown counts as sure.
+    Hand-typed terms are not gated: the user chose them. Without `word_conf`
+    (no record for this dictation) the pass behaves exactly as before."""
     if not text:
         return text
     dm = _dm()
@@ -526,6 +558,7 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
             # side of the rule is a managed-tier gate).
             term_words = _WORD_RE.findall(spoken)
             fw_count = sum(w in _FUNCTION_WORDS for w in term_words)
+            fw_words = sorted(w for w in term_words if w in _FUNCTION_WORDS)
             term_fw = fw_count if managed else None
             # Words Double Metaphone cannot hear at all: "H" and "W" encode to
             # nothing, so "H & W Forklift" has exactly the code of "forklift",
@@ -536,7 +569,7 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
             silent = any(not _silent_safe(dm, w) for w in term_words)
             min_span = len(term_words) if silent else 1
             terms.append((term, low, codes, strict, term_fw, fw_count, min_span,
-                          term_words, spoken.replace(" ", "")))
+                          term_words, spoken.replace(" ", ""), fw_words))
     if not terms:
         return text
 
@@ -624,9 +657,25 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
             best_jw = 0.0
             if cand_low in all_lows:         # already correct — leave casing to others
                 continue
+            span_fw_words = [w for w in word_low[i:i + size] if w in _FUNCTION_WORDS]
+            span_unsure = word_conf is None or any(
+                k < len(word_conf) and word_conf[k] is not None
+                and word_conf[k] < MANAGED_SURE for k in range(i, i + size))
             for (term, low, codes, strict, term_fw, term_fw_n, min_span,
-                 term_words, spoken_key) in _candidates(cand_codes):
+                 term_words, spoken_key, term_fw_words) in _candidates(cand_codes):
                 if size < min_span:
+                    continue
+                if term_fw is not None and not span_unsure:
+                    continue
+                # Nor may it SWAP one function word for another. The count rule
+                # below lets "push the" (one function word) become a user entry
+                # "Push it" (one function word): Double Metaphone hears "the"
+                # as 0/T and "it" as T, so they encode alike. Ryan said "push the
+                # usage card fixes too" and Echo typed "Push it usage card…",
+                # and "push the other ready branches" became "Push it other…"
+                # (2026-11-18, raw Parakeet had "push the" both times). Every
+                # function word the term carries must be one the span said.
+                if term_fw_words and not _fw_contained(term_fw_words, span_fw_words):
                     continue
                 # No term, hand-typed or managed, may put a function word into
                 # the text that the span did not already hold. Metaphone cannot

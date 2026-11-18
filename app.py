@@ -852,16 +852,32 @@ class WhisperFlowApp:
         return {"engine": engine, "model": model, "language": lang,
                 "app_version": APP_VERSION}
 
-    def _fix_homophones(self, text: str, source: str) -> str:
+    def _fix_homophones(self, text: str, source: str, conf=None) -> str:
         """homophones.fix behind its kill switch. Never raises: a failure here
-        must cost the correction, not the dictation."""
+        must cost the correction, not the dictation. `conf` is the engine's
+        (word, confidence) record; rules that need an unsure word only fire
+        with it."""
         if not text or not getattr(self.config, "homophone_fix", True):
             return text
         try:
-            return homophones.fix(text, source=source)
+            return homophones.fix(text, source=source, word_conf=conf)
         except Exception as e:
             print(f"[App] Sound-alike fix failed (non-fatal): {e}")
             return text
+
+    @staticmethod
+    def _restrict_fix(original: str, proposed: str, recorded) -> str:
+        """word_confidence.restrict_to_unsure, never raising: a failure keeps
+        the LLM's proposal as before (it is only ever an offer in the popup)."""
+        try:
+            import word_confidence
+            kept = word_confidence.restrict_to_unsure(original, proposed, recorded)
+            if kept != proposed:
+                print("[App] LLM fix limited to the words the engine was unsure of")
+            return kept
+        except Exception as e:
+            print(f"[App] Confidence gate failed (non-fatal): {e}")
+            return proposed
 
     def _fast_engine(self):
         """Engine used for immediate/injection transcription."""
@@ -2713,7 +2729,7 @@ class WhisperFlowApp:
         # commands so every later pass works on the corrected words. Skipped
         # under Live Typing for the same reason as destutter.
         if transcribed_text and not getattr(self.config, "live_inject", False):
-            _hf = self._fix_homophones(transcribed_text, "assembled")
+            _hf = self._fix_homophones(transcribed_text, "assembled", _conf)
             if _hf != transcribed_text:
                 print(f"[App] Sound-alike fix: {len(transcribed_text)} -> {len(_hf)} chars")
                 transcribed_text = _hf
@@ -3086,7 +3102,8 @@ class WhisperFlowApp:
         # N can never attach its text to dictation N+1's popup.
         if upgrading:
             if session is not None:
-                def _upgrade_llm(_text=transcribed_text, _seq=seq):
+                def _upgrade_llm(_text=transcribed_text, _seq=seq,
+                                 _rec=list(_conf)):
                     final = _text
                     try:
                         # Same ending as the inserted text: the correction
@@ -3094,6 +3111,10 @@ class WhisperFlowApp:
                         # otherwise put back a stop Sentence Endings removed.
                         fixed = sentence_end.match_ending(
                             self.ai_refiner.context_fix(_text), _text)
+                        # The LLM decides only the words the engine itself was
+                        # unsure of; every word it heard clearly keeps the
+                        # injected spelling (word_confidence.py).
+                        fixed = self._restrict_fix(_text, fixed, _rec)
                         if fixed and fixed != _text:
                             print(f"[App] LLM context-fix: {len(_text)} -> {len(fixed)} chars")
                             final = fixed
@@ -3374,7 +3395,15 @@ class WhisperFlowApp:
                 # User entries FIRST: the precompute dedups case-insensitively
                 # and keeps the first spelling it sees, so a hand-typed term
                 # always beats a managed one that collides with it.
-                fixed = apply_vocabulary_fuzzy(fixed, vocab + self._managed_entries())
+                # With the engine's confidence record, company and CRM names
+                # may only rewrite a span it was unsure of (see the docstring
+                # there). No record: exactly the old behaviour.
+                _wc = None
+                if conf:
+                    import word_confidence
+                    _wc = word_confidence.aligned(fixed, conf)
+                fixed = apply_vocabulary_fuzzy(
+                    fixed, vocab + self._managed_entries(), word_conf=_wc)
             # Phrases this user actually repeats: rescue the spans the engine
             # itself was unsure about, then learn from what is left. Learning
             # runs on the CORRECTED text and BEFORE snippets — a snippet body is
@@ -3426,8 +3455,18 @@ class WhisperFlowApp:
             return []
         try:
             from text_expansion import managed_variants
+            import vocab_profiles
             out, seen = [], set()
-            for raw in (getattr(self, "_estate_terms", None) or []):
+            # The account's company profile first (industry terms and
+            # BrightLink's product names, reviewed by hand in vocab_profiles),
+            # then the CRM's names.
+            # Its own try: no account (or no auth yet) must cost the profile,
+            # never the CRM names.
+            try:
+                _profile = vocab_profiles.terms_for(self._account_email())
+            except Exception:
+                _profile = []
+            for raw in _profile + list(getattr(self, "_estate_terms", None) or []):
                 if not isinstance(raw, str) or not raw.strip():
                     continue
                 for term in managed_variants(raw):
