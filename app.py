@@ -729,6 +729,8 @@ class WhisperFlowApp:
             if self.parakeet.is_loaded:
                 print("[App] Parakeet engine active, near-instant transcription enabled.")
                 self._start_keep_warm()
+                if getattr(self.config, "voice_isolation", True):
+                    self._start_voice_isolation()
         except Exception as e:
             print(f"[App] Parakeet init failed ({e}), using Whisper pipeline.")
         finally:
@@ -1168,6 +1170,62 @@ class WhisperFlowApp:
             self.parakeet, is_busy=_busy, is_active=self._use_parakeet,
             on_paged_in=_paged_in)
         self._keep_warm.start()
+
+    def _start_voice_isolation(self) -> None:
+        """Voice isolation (voice_filter.py): learn the user's voice in the
+        background and cut out other people talking. Never on the hot path."""
+        if getattr(self, "_voice_isolation", None) is None:
+            import audio_store
+            from voice_filter import PROFILE_FILE, VoiceIsolation
+
+            def _busy() -> bool:
+                try:
+                    return self.hotkey_manager.state != AppState.IDLE
+                except Exception:
+                    return False
+
+            def _report(event: str, details: dict) -> None:
+                if self._telemetry_budget(event):
+                    self._log_error_event(event, details)
+
+            self._voice_isolation = VoiceIsolation(
+                model_dir=os.path.join(data_paths.local_dir(), "models"),
+                profile_path=os.path.join(data_paths.local_dir(), PROFILE_FILE),
+                audio_dir=audio_store.audio_dir(),
+                is_busy=_busy, report=_report,
+                # The voiceprint belongs to the signed-in account only.
+                owner=lambda: getattr(self._auth, "user_id", None) or "")
+        self._voice_isolation.start()
+
+    def _stop_voice_isolation(self) -> None:
+        vi = getattr(self, "_voice_isolation", None)
+        if vi is not None:
+            vi.stop(forget=True)
+            self._voice_isolation = None
+        else:
+            # Never started this run: still honour "off deletes the voiceprint".
+            from voice_filter import PROFILE_FILE
+            try:
+                os.remove(os.path.join(data_paths.local_dir(), PROFILE_FILE))
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                print(f"[VoiceIsolation] could not delete voiceprint: {e}")
+
+    def _new_voice_track(self, live: bool):
+        """This dictation's voice tracker, or None: feature off, not enough
+        dictations learned yet, or Live Typing. None runs the session exactly
+        as it was before voice isolation."""
+        if live or not getattr(self.config, "voice_isolation", True):
+            return None
+        vi = getattr(self, "_voice_isolation", None)
+        if vi is None:
+            return None
+        try:
+            return vi.new_track()
+        except Exception as e:
+            print(f"[VoiceIsolation] no track for this dictation: {e}")
+            return None
 
     def _connect_crash_watch(self, auth) -> None:
         """Crash, hang and uncaught-error reports go to error_events and to the
@@ -2138,6 +2196,13 @@ class WhisperFlowApp:
             print(f"[Sync] could not update settings UI for {key}: {e}")
 
     def _apply_runtime_setting(self, key: str, value) -> None:
+        if key == "voice_isolation":
+            if value and getattr(self, "parakeet", None) is not None \
+                    and self.parakeet.is_loaded:
+                self._start_voice_isolation()
+            elif not value:
+                self._stop_voice_isolation()
+            return
         if key == "anthropic_api_key":
             self.ai_refiner.update_api_key(value)
             self.popup.set_ai_refiner(self.ai_refiner)
@@ -2476,6 +2541,7 @@ class WhisperFlowApp:
                     audio_sink=self._audio_writer,
                     auto_paragraphs=bool(getattr(self.config, "auto_paragraphs", True)),
                     trim_silence=bool(getattr(self.config, "trim_silence", True)),
+                    voice_track=self._new_voice_track(live),
                 )
                 self._session = session
                 session.start()

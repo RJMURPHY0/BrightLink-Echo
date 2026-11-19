@@ -9930,6 +9930,13 @@ class AppWindow:
         # how the first word survives stream-open latency, so it is always on
         # (config.load forces warm_mic=True for installs that disabled it).
 
+        # Voice isolation (voice_filter.py). Off = the speech path exactly as
+        # it was before the feature, and the voiceprint is deleted.
+        _toggle_card("voice_isolation", "Voice Isolation",
+                     "Learns your voice over your first few dictations, then "
+                     "ignores other people nearby. Stays on this PC; off deletes it.",
+                     True, icon="mic")
+
         # ── Feedback ──────────────────────────────────────────────────────────
         # Sounds now closes the page, after Popup — both are "what the app does
         # around a dictation", and neither is what you open Settings for.

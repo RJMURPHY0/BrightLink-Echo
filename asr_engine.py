@@ -31,6 +31,8 @@ import numpy as np
 import hallucination
 import disfluency
 import sentence_end
+import voice_filter
+
 
 _MODEL_SAMPLE_RATE = 16000
 
@@ -489,8 +491,15 @@ class ParakeetTranscriber:
         self, audio: np.ndarray, sample_rate: int = 16000, blocking: bool = True,
         context_words: str = "", hotwords_str: str = "", finalize_text: bool = True,
         conf_out: Optional[list] = None,
+        voice_spans: Optional[list] = None,
     ) -> str:
-        """conf_out, when given, is a list the engine APPENDS (word, confidence)
+        """voice_spans: sample ranges of THIS audio that voice isolation
+        already found to be someone else (voice_filter.VoiceTrack, judged
+        while the user was still talking). They are cut inside the speech gate
+        in the same single decode, so they cost nothing at stop. None or empty
+        runs exactly the path that shipped before voice isolation.
+
+        conf_out, when given, is a list the engine APPENDS (word, confidence)
         pairs to, in spoken order — the decoder's own per-token probabilities,
         used by phrase_learning to decide what it may learn from and what it
         may rewrite. Only call sites whose text is KEPT should pass one: the
@@ -524,10 +533,17 @@ class ParakeetTranscriber:
             return ""
         self.last_used = time.monotonic()
         try:
+            self.last_voice_cut_s = 0.0
             # VAD gate inside the lock so non-blocking caption ticks that bail
             # out above never pay for it.
             if self._vad_gate:
-                audio = self._vad_clip(audio)
+                if voice_spans:
+                    audio = self._vad_clip(audio, voice_spans)
+                    if self._voice_cut_applied:
+                        self.last_voice_cut_s = sum(
+                            e - s for s, e in voice_spans) / _MODEL_SAMPLE_RATE
+                else:
+                    audio = self._vad_clip(audio)
                 if audio is None:
                     return ""  # no speech anywhere in the clip
             text = self._recognize_long(audio, conf_out)
@@ -603,9 +619,16 @@ class ParakeetTranscriber:
     # noise-only recording can never reach the model through this path.
     _VAD_EDGE_KEEP = 3.0
 
-    def _vad_clip(self, audio: np.ndarray) -> Optional[np.ndarray]:
+    last_voice_cut_s = 0.0   # seconds of someone else cut from the last clip
+    _voice_cut_applied = False
+
+    def _vad_clip(self, audio: np.ndarray,
+                  others: Optional[list] = None) -> Optional[np.ndarray]:
         """Return only the speech regions of 16 kHz `audio`; None when Silero
-        found no speech at all; the input unchanged if VAD is unavailable."""
+        found no speech at all; the input unchanged if VAD is unavailable.
+        `others` are stretches voice isolation found to be someone else;
+        empty or None runs exactly the gate that shipped before it."""
+        self._voice_cut_applied = False
         if self._vad_failed:
             return audio
         try:
@@ -617,14 +640,31 @@ class ParakeetTranscriber:
             return audio
         if not chunks:
             return None
+        # Voice isolation (voice_filter.py): cut out a stretch that is
+        # confidently someone else's voice. If the cut would leave no speech,
+        # trust the user and keep everything.
+        others = list(others or [])
+        if others:
+            remaining = voice_filter.subtract(
+                chunks, others, int(0.25 * _MODEL_SAMPLE_RATE))
+            if remaining:
+                chunks = remaining
+                self._voice_cut_applied = True
+            else:
+                others = []
         # Widen the outer edges, then merge anything that now overlaps (a short
         # clip can collapse to a single region, which is the desired outcome:
-        # no splice at all, natural timing preserved).
+        # no splice at all, natural timing preserved). The widening never
+        # reaches back into a stretch voice isolation removed.
         edge = int(self._VAD_EDGE_KEEP * _MODEL_SAMPLE_RATE)
         spans: list[dict] = []
         for i, c in enumerate(chunks):
             start = int(c["start"]) - (edge if i == 0 else 0)
             end = int(c["end"]) + (edge if i == len(chunks) - 1 else 0)
+            if others and i == 0:
+                start = max([start] + [e for s, e in others if e <= int(c["start"])])
+            if others and i == len(chunks) - 1:
+                end = min([end] + [s for s, e in others if s >= int(c["end"])])
             start = max(0, start)
             end = min(len(audio), end)
             if spans and start <= spans[-1]["end"]:
@@ -633,7 +673,7 @@ class ParakeetTranscriber:
                 spans.append({"start": start, "end": end})
         chunks = spans
         kept = sum(c["end"] - c["start"] for c in chunks)
-        if kept >= 0.9 * len(audio):
+        if kept >= 0.9 * len(audio) and not others:
             return audio  # nearly all speech — keep natural timing, skip the splice
         gap = np.zeros(int(self._VAD_JOIN_GAP * _MODEL_SAMPLE_RATE), dtype=np.float32)
         parts: list = []

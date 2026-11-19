@@ -32,6 +32,7 @@ from typing import Callable, Optional
 import numpy as np
 
 import sentence_end
+from voice_filter import relative_spans
 
 _QUOTES = "\"'“‘”’()[]{}«»"
 _CLOSERS = "\"'”’)]}»"
@@ -161,8 +162,23 @@ class StreamingSession:
         audio_sink=None,
         auto_paragraphs: bool = False,
         trim_silence: bool = False,
+        voice_track=None,
     ):
         self._recorder = recorder
+        # Voice isolation (voice_filter.VoiceTrack): judges the user's voice
+        # on its own thread while they talk. None = the session exactly as
+        # before the feature. Never with Live Typing: those words are typed
+        # before a cut could be decided.
+        self._voice = voice_track if not live_inject else None
+        if voice_track is not None and self._voice is None:
+            voice_track.close()
+        self.voice_cut_s = 0.0
+        # Chunks committed before voice isolation could decide whether the
+        # dictation began with someone else (it needs the user's first
+        # window). Kept until it decides, then re-decoded on the worker with
+        # the cut, still while the user talks. Each entry: abs start sample,
+        # audio, first index in _committed_texts, entry count, _conf range.
+        self._head_pending: list[dict] = []
         self._engine = engine
         # Committed audio is dropped from the recorder ring to keep memory
         # flat, so the sink is the only place the full clip survives: each
@@ -255,6 +271,13 @@ class StreamingSession:
     def _tick(self) -> None:
         rate = max(1, self._recorder.active_sample_rate)
         audio = self._recorder.get_audio_range(self._committed_sample)
+        if self._voice is not None and rate != self.VOICE_RATE:
+            self._drop_voice(f"microphone at {rate} Hz")
+        if self._voice is not None and audio is not None:
+            # Before any commit drops this audio from the recorder ring.
+            self._voice.feed(self._committed_sample, audio)
+        if self._head_pending and not self._stop_event.is_set():
+            self._settle_head(rate)
         if audio is None or len(audio) < rate * 0.6:
             return
         uncommitted_secs = len(audio) / rate
@@ -273,15 +296,32 @@ class StreamingSession:
                 # finalize_text=False: forced capitals/periods per chunk corrupt
                 # the joined text at mid-sentence commit boundaries — polish is
                 # applied once on the full utterance in finalize().
-                results = self._transcribe_paragraph_parts(chunk, rate)
+                cut = None
+                if self._voice is not None:
+                    # Only the start can be settled mid-dictation: the end
+                    # belongs to the tail decode at the stop.
+                    cut = relative_spans(
+                        self._voice.spans(head_only=True),
+                        self._committed_sample, self._committed_sample + boundary)
+                conf_at = len(self._conf)
+                results = self._transcribe_paragraph_parts(chunk, rate, cut)
+                if cut:
+                    self.voice_cut_s += getattr(self._engine, "last_voice_cut_s", 0.0)
                 preview = " ".join(t for t, _ in results if t)
                 with self._state_lock:
                     if self._finalized or self._stop_event.is_set():
                         return  # finalize owns the tail now — discard, tail re-covers it
+                    first = len(self._committed_texts)
                     for text, brk in results:
                         if text:
                             self._committed_texts.append(text)
                             self._para_flags.append(brk)
+                    if (self._voice is not None and not cut
+                            and self._committed_sample < self._voice.head_horizon()):
+                        self._head_pending.append({
+                            "at": self._committed_sample, "audio": chunk.copy(),
+                            "first": first, "n": len(self._committed_texts) - first,
+                            "conf": (conf_at, len(self._conf))})
                     if preview:
                         print(f"[Stream] Committed {boundary / rate:.1f}s: {len(preview)} chars")
                     # A chunk with no words (noise) breaks the chain: the next
@@ -361,7 +401,8 @@ class StreamingSession:
                     # the newest words itself and lets the user scroll back through
                     # everything said. Strings this size are trivial to rejoin.
                     shown = " ".join(
-                        self._committed_texts + ([shown_hyp] if shown_hyp else [])
+                        [t for t in self._committed_texts if t]
+                        + ([shown_hyp] if shown_hyp else [])
                     )
                     self._on_caption(shown)
             # ── Live injection (append-only) ──
@@ -425,20 +466,26 @@ class StreamingSession:
         return splits, lead * self.SILENCE_WIN, trail * self.SILENCE_WIN
 
     def _transcribe_paragraph_parts(
-        self, chunk: np.ndarray, rate: int
+        self, chunk: np.ndarray, rate: int, voice_spans=None, conf_out=None
     ) -> list[tuple[str, bool]]:
         """Transcribe a chunk, split at paragraph-length pauses when
         auto-paragraphs is on. Returns (text, break_before) pairs and updates
         the boundary-spanning quiet carry. Context chains across the parts so
-        a split never costs recognition accuracy."""
+        a split never costs recognition accuracy. voice_spans (chunk-relative
+        sample ranges of someone else's voice) are handed to the engine only
+        when there are any, so without them every call is the one that
+        shipped before voice isolation."""
         base_ctx = self._context_with_committed()
+        conf = self._conf if conf_out is None else conf_out
         if not self._auto_paragraphs:
+            extra = {"voice_spans": list(voice_spans)} if voice_spans else {}
             text = self._engine.transcribe(
                 chunk, rate,
                 context_words=base_ctx,
                 hotwords_str=self._hotwords,
                 finalize_text=False,
-                conf_out=self._conf,
+                conf_out=conf,
+                **extra,
             ).strip()
             return [(text, False)]
         splits, lead_q, trail_q = self._quiet_profile(chunk, rate)
@@ -449,23 +496,26 @@ class StreamingSession:
             self._carry_quiet += len(chunk) / rate
         else:
             self._carry_quiet = trail_q
-        parts: list[np.ndarray] = []
+        parts: list[tuple[int, np.ndarray]] = []
         prev = 0
         for s in splits:
-            parts.append(chunk[prev:s])
+            parts.append((prev, chunk[prev:s]))
             prev = s
-        parts.append(chunk[prev:])
+        parts.append((prev, chunk[prev:]))
         out: list[tuple[str, bool]] = []
         ctx = base_ctx
-        for part in parts:
+        for at, part in parts:
             if len(part) < int(rate * 0.25):
                 continue
+            mine = relative_spans(voice_spans, at, at + len(part)) if voice_spans else []
+            extra = {"voice_spans": mine} if mine else {}
             text = self._engine.transcribe(
                 part, rate,
                 context_words=ctx,
                 hotwords_str=self._hotwords,
                 finalize_text=False,
-                conf_out=self._conf,
+                conf_out=conf,
+                **extra,
             ).strip()
             if not text:
                 continue
@@ -476,6 +526,67 @@ class StreamingSession:
         if not out:
             return [("", False)]
         return out
+
+    # Voice isolation judges and cuts in 16 kHz samples. A microphone that
+    # opened at another rate (44.1 or 48 kHz fallback) is never filtered.
+    VOICE_RATE = 16000
+
+    def _drop_voice(self, why: str) -> None:
+        voice, self._voice = self._voice, None
+        self._head_pending = []
+        if voice is not None:
+            voice.close()
+            print(f"[Stream] Voice isolation off for this dictation: {why}")
+
+    def _settle_head(self, rate: int, at_stop: bool = False) -> None:
+        """Voice isolation: once the start of the dictation is decided, put
+        right the chunks committed before it was. A chunk that was all
+        someone else loses its text (no decode); one that was partly someone
+        else is decoded again with the cut, on the worker. At the stop only
+        the free case runs, so the stop never pays for a decode."""
+        voice = self._voice
+        if voice is None or not self._head_pending:
+            return
+        head = voice.spans(head_only=True)
+        if not head:
+            if voice.head_settled():
+                self._head_pending = []     # began with the user: nothing to fix
+            return
+        pending, self._head_pending = self._head_pending, []
+        conf_shift = 0      # earlier chunks' confidence lists changed length
+        for ch in pending:
+            n = len(ch["audio"])
+            cut = relative_spans(head, ch["at"], ch["at"] + n)
+            if not cut:
+                continue
+            covered = sum(e - s for s, e in cut) >= n
+            if not covered and (at_stop or self._stop_event.is_set()):
+                continue    # the key is up: a decode now would cost the stop
+            new_conf: list = []
+            texts: list[str] = []
+            if not covered:
+                keep_carry = self._carry_quiet
+                try:
+                    texts = [t for t, _ in self._transcribe_paragraph_parts(
+                        ch["audio"], rate, cut, conf_out=new_conf) if t]
+                finally:
+                    self._carry_quiet = keep_carry
+            with self._state_lock:
+                if self._finalized and not at_stop:
+                    return
+                first = ch["first"]
+                # Same number of entries, so seam decodes keyed by entry stay
+                # in step: the new text goes in the chunk's first slot.
+                joined = " ".join(texts)
+                for i in range(ch["n"]):
+                    self._committed_texts[first + i] = joined if i == 0 else ""
+                a, b = ch["conf"][0] + conf_shift, ch["conf"][1] + conf_shift
+                self._conf[a:b] = new_conf
+                conf_shift += len(new_conf) - (b - a)
+                self.voice_cut_s += sum(e - s for s, e in cut) / rate
+            print(f"[Stream] Voice isolation: start of the dictation was someone "
+                  f"else; chunk at {ch['at'] / rate:.1f}s "
+                  f"{'dropped' if covered else 're-decoded'}")
 
     def _tail_is_quiet(self, audio: np.ndarray, rate: int) -> bool:
         """True when the trailing PAUSE_FLUSH_QUIET seconds of the uncommitted
@@ -670,7 +781,17 @@ class StreamingSession:
         rate = max(1, self._recorder.active_sample_rate)
         offset_before = self._recorder.dropped_samples
         audio = self._recorder.stop()
+        if self._voice is not None and rate != self.VOICE_RATE:
+            self._drop_voice(f"microphone at {rate} Hz")
+        voice = self._voice
+        if voice is not None:
+            # Stop judging now; the stop only reads what was judged while the
+            # user talked, so it costs no model time here.
+            voice.close()
 
+        if voice is not None and self._head_pending and audio is not None:
+            voice.feed(offset_before, audio)
+            self._settle_head(rate, at_stop=True)
         with self._state_lock:
             committed_sample = self._committed_sample
             committed_texts = list(self._committed_texts)
@@ -684,9 +805,20 @@ class StreamingSession:
 
         tail_entries: list[tuple[str, bool]] = []
         if tail is not None and len(tail) >= rate * 0.25:
+            cut = None
+            if voice is not None and audio is not None:
+                voice.feed(offset_before, audio)
+                tail_at = offset_before + (len(audio) - len(tail))
+                cut = relative_spans(voice.spans(), tail_at, tail_at + len(tail))
             padded = np.concatenate(
                 [tail, np.zeros(int(self.FINAL_PAD * rate), dtype=tail.dtype)])
-            tail_entries = self._transcribe_paragraph_parts(padded, rate)
+            tail_entries = self._transcribe_paragraph_parts(padded, rate, cut)
+            if cut:
+                self.voice_cut_s += getattr(self._engine, "last_voice_cut_s", 0.0)
+        if voice is not None:
+            print(f"[Stream] Voice isolation: {voice.windows} windows judged while "
+                  f"talking ({voice.embed_ms} ms), {self.voice_cut_s:.1f}s of "
+                  f"someone else cut")
 
         entries = list(zip(committed_texts, para_flags))
         entries += [(t, b) for t, b in tail_entries if t]
@@ -738,6 +870,8 @@ class StreamingSession:
         with self._state_lock:
             self._finalized = True
         self._stop_event.set()
+        if self._voice is not None:
+            self._voice.close()
         t = self._thread
         if t is not None and t.is_alive():
             t.join(timeout=1.0)
@@ -751,7 +885,7 @@ class StreamingSession:
 
     @property
     def committed_text(self) -> str:
-        return " ".join(self._committed_texts)
+        return " ".join(t for t in self._committed_texts if t)
 
     @property
     def injected_text(self) -> str:

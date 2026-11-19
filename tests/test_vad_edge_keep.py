@@ -109,6 +109,18 @@ class TailPreservationTests(unittest.TestCase):
             "audio after Silero's last region was dropped — a trailing word "
             "fades exactly the same way a leading one does")
 
+    def test_no_voice_isolation_cut_keeps_both_edges(self):
+        # Voice isolation may only shorten an edge when it passes a cut. With
+        # none (feature off, nothing judged, any doubt) both edges survive.
+        _FakeVad([(2.0, 4.0), (9.0, 11.0)]).install(self)
+        audio = _clip(14.0)
+        for others in (None, []):
+            out = self.engine._vad_clip(audio, others)
+            self.assertEqual(float(out[0]), float(audio[0]),
+                             "the head was trimmed with no voice cut")
+            self.assertEqual(float(out[-1]), float(audio[-1]),
+                             "the tail was trimmed with no voice cut")
+
 
 class InteriorSplicingStillWorksTests(unittest.TestCase):
     """The gate's real job is untouched: long non-speech BETWEEN utterances is

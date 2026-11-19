@@ -64,7 +64,7 @@ from typing import Callable, Optional
 # whisper_model / parakeet_version (each triggers a multi-hundred-MB download).
 SYNCED_SETTINGS = (
     # Behaviour toggles
-    "mode", "inject_method", "noise_gate",
+    "mode", "inject_method", "noise_gate", "voice_isolation",
     # Punctuation & formatting
     "auto_punctuate", "end_punctuation", "spoken_punctuation",
     "homophone_fix", "auto_lists", "email_format", "auto_paragraphs",

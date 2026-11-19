@@ -251,7 +251,11 @@ class WiringTests(unittest.TestCase):
     def test_the_caption_preview_records_no_confidence(self):
         src = self._src("stream_session.py")
         # Two kept passes in _transcribe_paragraph_parts, and nothing else.
-        self.assertEqual(2, src.count("conf_out=self._conf"))
+        # They record into the session's list (or, for a voice isolation
+        # re-decode, a list that is spliced into it in place of the old one).
+        self.assertEqual(2, src.count("conf_out=conf,"))
+        self.assertIn("conf = self._conf if conf_out is None else conf_out", src)
+        self.assertEqual(0, src.count("conf_out=self._conf"))
         tick = src[src.index("def _tick"):src.index("def _norm_word")]
         self.assertNotIn("conf_out", tick)
 
