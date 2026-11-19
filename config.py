@@ -166,7 +166,7 @@ class Config:
     auto_update: bool = True  # Silently download new releases and install them when the app is idle
     use_parakeet: bool = True  # Parakeet TDT engine (near-instant, high accuracy, English) with whisper fallback
     noise_gate: bool = True  # Silero VAD gate on the Parakeet engine — background noise never reaches the model (whisper path has its own)
-    voice_isolation: bool = True  # Settings > Microphone > Voice Isolation: learns the user's voice from their own saved dictations (voiceprint kept on this PC only) and cuts out stretches that are clearly someone else talking. Off = the speech path exactly as before, and the voiceprint is deleted (voice_filter.py)
+    voice_isolation: bool = False  # Off by default: a voiceprint is biometric data (UK GDPR special category), so each person switches it on themselves. Settings > Microphone > Voice Isolation: learns the user's voice from their own saved dictations (voiceprint kept on this PC only) and cuts out stretches that are clearly someone else talking. Off = the speech path exactly as before, and the voiceprint is deleted (voice_filter.py)
     spoken_punctuation: bool = True  # Convert dictated symbol names ("slash", "underscore", "hashtag") into the characters themselves
     custom_vocabulary: str = ""  # Comma-separated terms to boost in Whisper (names, acronyms, domain words)
     auto_punctuate: bool = True   # Master punctuation cleanup: pause-artefact repair, leading capital, terminal stop. No UI — the terminal stop is governed by end_punctuation below

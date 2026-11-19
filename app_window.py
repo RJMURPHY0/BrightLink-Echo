@@ -9935,7 +9935,7 @@ class AppWindow:
         _toggle_card("voice_isolation", "Voice Isolation",
                      "Learns your voice over your first few dictations, then "
                      "ignores other people nearby. Stays on this PC; off deletes it.",
-                     True, icon="mic")
+                     False, icon="mic")
 
         # ── Feedback ──────────────────────────────────────────────────────────
         # Sounds now closes the page, after Popup — both are "what the app does

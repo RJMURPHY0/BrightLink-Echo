@@ -58,8 +58,10 @@ class _ReadyIsolation:
 
 
 class SwitchTests(unittest.TestCase):
-    def test_setting_exists_default_on_and_synced(self):
-        self.assertTrue(config_mod.Config().voice_isolation)
+    def test_setting_exists_default_off_and_synced(self):
+        # Off by default: a voiceprint is biometric data, so only the person\'s
+        # own switch may start it (UK GDPR explicit consent, never pre-ticked).
+        self.assertFalse(config_mod.Config().voice_isolation)
         self.assertIn('"voice_isolation", "Voice Isolation"', _src("app_window.py"))
         import cloud_sync
         self.assertIn("voice_isolation", cloud_sync.SYNCED_SETTINGS)

@@ -729,7 +729,7 @@ class WhisperFlowApp:
             if self.parakeet.is_loaded:
                 print("[App] Parakeet engine active, near-instant transcription enabled.")
                 self._start_keep_warm()
-                if getattr(self.config, "voice_isolation", True):
+                if getattr(self.config, "voice_isolation", False):
                     self._start_voice_isolation()
         except Exception as e:
             print(f"[App] Parakeet init failed ({e}), using Whisper pipeline.")
@@ -1216,7 +1216,7 @@ class WhisperFlowApp:
         """This dictation's voice tracker, or None: feature off, not enough
         dictations learned yet, or Live Typing. None runs the session exactly
         as it was before voice isolation."""
-        if live or not getattr(self.config, "voice_isolation", True):
+        if live or not getattr(self.config, "voice_isolation", False):
             return None
         vi = getattr(self, "_voice_isolation", None)
         if vi is None:
