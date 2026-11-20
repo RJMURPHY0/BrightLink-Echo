@@ -73,7 +73,9 @@ jobs:
             ~\AppData\Local\FTC Whisper\models
           key: parakeet-${{ hashFiles('asr_engine.py') }}
       - run: python tools/e2e_upgrade.py seed-model
-      - run: python tools/e2e_upgrade.py upgrade --from ${{ matrix.from }} --assets dist --report report
+      - run: python tools/e2e_upgrade.py upgrade --from "$env:FROM_VERSION" --assets dist --report report
+        env:
+          FROM_VERSION: ${{ matrix.from }}
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -112,7 +114,9 @@ jobs:
             ~\AppData\Local\FTC Whisper\models
           key: parakeet-${{ hashFiles('asr_engine.py') }}
       - run: python tools/e2e_upgrade.py seed-model
-      - run: python tools/e2e_upgrade.py installed --from ${{ matrix.from }} --assets dist --report report
+      - run: python tools/e2e_upgrade.py installed --from "$env:FROM_VERSION" --assets dist --report report
+        env:
+          FROM_VERSION: ${{ matrix.from }}
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
