@@ -122,6 +122,18 @@ class RestrictTests(unittest.TestCase):
         self.assertEqual(word_confidence.restrict_to_unsure(raw, prop, conf),
                          raw.replace("two", "too"))
 
+    def test_one_unsure_half_of_a_compound_never_frees_the_sure_half(self):
+        # 2026-11-20 audit: "twenty" was sure, only "two" was not, and the
+        # whole token used to be replaceable.
+        raw = "Please use twenty-two bolts here."
+        conf = rec("please:1.0 use:1.0 twenty:0.99 two:0.2 bolts:1.0 here:1.0")
+        self.assertEqual(word_confidence.restrict_to_unsure(
+            raw, "Please use thirty-three bolts here.", conf), raw)
+        # The unsure half alone may still change.
+        self.assertEqual(word_confidence.restrict_to_unsure(
+            raw, "Please use twenty-too bolts here.", conf),
+            "Please use twenty-too bolts here.")
+
     def test_unaligned_word_counts_as_sure(self):
         # "BrightLink" was rewritten by the vocabulary, so no record holds it.
         raw = "Open BrightLink now please."

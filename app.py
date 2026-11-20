@@ -1194,8 +1194,20 @@ class WhisperFlowApp:
                 audio_dir=audio_store.audio_dir(),
                 is_busy=_busy, report=_report,
                 # The voiceprint belongs to the signed-in account only.
-                owner=lambda: getattr(self._auth, "user_id", None) or "")
+                owner=lambda: getattr(self._auth, "user_id", None) or "",
+                owned=self._own_recording_names)
         self._voice_isolation.start()
+
+    def _own_recording_names(self):
+        """File names of the signed-in account's saved dictations (its own
+        history rows), or None when the history cannot be read."""
+        import audio_store
+        db = getattr(self, "db", None)
+        if db is None:
+            return None
+        rows = db.get_cached_history(audio_store._MAX_FILES)
+        return {os.path.basename(audio_store.path_for(r["created_at"]))
+                for r in rows if r.get("created_at")}
 
     def _stop_voice_isolation(self) -> None:
         vi = getattr(self, "_voice_isolation", None)
@@ -3491,14 +3503,19 @@ class WhisperFlowApp:
                         fixed = rescued
                     # Whole phrases said all the time ("push everything to
                     # main"): repair the one word the engine slipped on.
+                    heard = []
                     repaired = phrase_learning.apply_habits(
                         fixed, store.habit_counts(), word_conf,
-                        store.habit_index(), store.forgotten_norms())
+                        store.habit_index(), store.forgotten_norms(),
+                        heard=heard)
                     if repaired != fixed:
                         print(f"[App] Habit phrases: {len(fixed)} -> {len(repaired)} chars")
                         word_conf = phrase_learning.align(repaired, conf)
                         fixed = repaired
                     learned = store.observe(fixed, word_conf)
+                    # What was really said, where a sure word was repaired.
+                    for said_run, said_conf in heard:
+                        learned += store.observe(said_run, said_conf) or []
                     if learned:
                         print(f"[App] Phrases learned: {len(learned)}")
             except Exception as exc:

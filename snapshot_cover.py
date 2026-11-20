@@ -195,8 +195,9 @@ def _push(hwnd: int, shot) -> bool:
     layered window `hwnd`, opaque, at that place and size."""
     u32, g32 = _load()
     (x, y, w, h), pixels = shot
-    pixels = bytearray(pixels)
-    pixels[3::4] = bytes([255]) * (w * h)        # opaque
+    # No alpha fill: _opaque_blend() (AlphaFormat 0) ignores the alpha bytes,
+    # so the BitBlt copy goes straight in. Filling them and copying the
+    # buffer twice more cost every page change several ms (2026-11-20).
     screen_dc = u32.GetDC(None)
     mem_dc = g32.CreateCompatibleDC(screen_dc)
     bmp, bits = _dib(g32, mem_dc, w, h)
@@ -204,7 +205,7 @@ def _push(hwnd: int, shot) -> bool:
     try:
         if not bmp or not bits.value:
             return False
-        ctypes.memmove(bits.value, bytes(pixels), len(pixels))
+        ctypes.memmove(bits.value, pixels, len(pixels))
         blend = _opaque_blend()       # the same mode refresh() shows in
         return bool(u32.UpdateLayeredWindow(
             hwnd, screen_dc, ctypes.byref(W.POINT(x, y)),

@@ -115,6 +115,36 @@ class PageChangeGuardTests(unittest.TestCase):
         self.assertLessEqual(callers, {"_switch_to_dashboard",
                                        "_show_login_screen"})
 
+    def test_a_covered_change_is_painted_before_the_click_returns(self):
+        # Instant page changes (Ryan, 2026-11-20, "it must be instant"): left
+        # to Tk the new page drew over 150-300ms of later passes and the
+        # cover waited each one out (300-950ms a click). _covered_change
+        # paints the whole change itself and hands the result to the cover
+        # watch, which drops the cover on the first read that still matches.
+        m = next(m for m in _methods() if m.name == "_covered_change")
+        self.assertTrue(_calls(m, "_paint_now"),
+                        "_covered_change must _paint_now behind the cover")
+        src = ast.unparse(m)
+        self.assertIn("painted=painted", src)
+        drop = next(m for m in _methods() if m.name == "_drop_cover_when_drawn")
+        self.assertIn("painted", [a.arg for a in drop.args.args])
+
+    def test_history_left_stale_is_drawn_behind_the_cover(self):
+        # Dictations made while another page was open: drawn inside the
+        # covered swap, never by a timer after the cover drops (old list,
+        # then the new one: two frames).
+        import inspect
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
+        from app_window import AppWindow
+        src = inspect.getsource(AppWindow._switch_dash_tab)
+        refresh = src[src.index("def _refresh_chrome_and_page"):
+                      src.index("if name in tab_frames:")]
+        self.assertIn("self._render_history()", refresh)
+        # The first visit's render, queued by the canvas getting its width
+        # inside the swap, is taken over there too (review, 2026-11-20).
+        self.assertIn("_hist_first_job", refresh)
+
     def test_the_allow_lists_name_real_methods(self):
         names = {m.name for m in _methods()}
         for name in list(_ATOMIC_ALLOWED) + list(_MOVE_ALLOWED):

@@ -192,6 +192,38 @@ class StoreTests(unittest.TestCase):
                                          s.habit_index()), text)
 
     @unittest.skipUnless(HAVE_DM, "metaphone not installed")
+    def test_a_repaired_sure_variant_still_counts_in_the_app_order(self):
+        # 2026-11-20 audit: the app repairs BEFORE it observes, so a sure
+        # "pushed to me" became "pushed to main" every time and was never
+        # counted (the repaired word has no confidence). The words really
+        # heard are now counted, so the variant builds up and stops being
+        # repaired.
+        s = pl.PhraseStore("a@b.c", directory=self.tmp)
+        self._say(s, "it was pushed to main", 30)
+        text = "it was pushed to me"
+        conf = _conf(text, 0.97)
+        outs = []
+        for _ in range(12):
+            heard = []
+            out = pl.apply_habits(text, s.habit_counts(), conf,
+                                  s.habit_index(), s.forgotten_norms(),
+                                  heard=heard)
+            outs.append(out)
+            s.observe(out, pl.align(out, list(zip(text.split(), conf))))
+            for run, rc in heard:
+                s.observe(run, rc)
+        self.assertEqual(outs[0], "it was pushed to main")
+        self.assertEqual(outs[-1], text, outs)
+        self.assertGreater(s.habit_counts().get("pushed to me", 0), 0)
+
+    def test_an_unsure_repair_reports_nothing_to_count(self):
+        heard = []
+        text = "it was pushed to mean"
+        pl.apply_habits(text, {"pushed to main": pl.HABIT_REPAIR_COUNT},
+                        _conf(text, 0.5), heard=heard)
+        self.assertEqual(heard, [])
+
+    @unittest.skipUnless(HAVE_DM, "metaphone not installed")
     def test_forget_reaches_habits(self):
         # Review repro: a forgotten phrase went on repairing into itself.
         s = pl.PhraseStore("a@b.c", directory=self.tmp)
