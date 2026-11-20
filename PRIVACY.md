@@ -17,8 +17,12 @@ your recordings stay on your computer, except for these:
 
 - **The AI accuracy check**, which is on by default when you are signed in. It
   sends the text of a dictation, never the audio, to an AI provider to fix
-  mistakes from context (see "AI features" below). You can switch it off in
-  Settings.
+  mistakes from context (see "AI features" below). It runs while you are
+  speaking, a sentence at a time, and also suggests where paragraphs go. With
+  the text it sends the names that could be in it: your own vocabulary words,
+  contact and company names synced from BrightLink (only while that is
+  switched on), everyday tool names, and the work you chose under Learning >
+  Your Work with what you wrote about it. You can switch it off in Settings.
 - **Cloud Sync** (Settings > Account, off by default), described below.
 - **Voice training**, if you turn it on.
 - **A feedback report** from History, when you choose to send one (and its
@@ -62,9 +66,11 @@ optional: the app works offline without an account.
 
 Refine, Fix All and the AI accuracy check (on by default, Settings to switch
 it off) send the text being
-worked on (never audio) to an AI provider: OpenRouter, which routes to model
-providers such as Google, or Anthropic. The text is used only to return the
-result.
+worked on (never audio), and for the accuracy check the names described
+above, to an AI provider: OpenRouter, which routes to model providers such as
+Google, or Anthropic. The text is used only to return the result. Your Work
+choices stay on this computer, kept separately for each account you sign in
+with; they are not part of Cloud Sync.
 
 ## Diagnostics
 

@@ -938,7 +938,7 @@ class WhisperFlowApp:
                 # The engines already settled the full stop for the user's
                 # Sentence Endings mode; the correction must not reopen it.
                 pick = sentence_end.match_ending(
-                    self.ai_refiner.context_fix(pick) or pick, pick)
+                    self.ai_refiner.context_fix(pick, self._names_block(pick)) or pick, pick)
             except Exception as e:
                 print(f"[App] Retry context_fix failed: {e}")
         return pick.strip()
@@ -2151,6 +2151,51 @@ class WhisperFlowApp:
         """Whether the background AI check on dictations is enabled."""
         return bool(getattr(self.config, "ai_accuracy_check", AI_ACCURACY_CHECK_DEFAULT))
 
+    def _new_spec_fixer(self, live: bool):
+        """The AI check that runs while the user talks (speculative_fix.py),
+        or None: Live Typing (the words are already typed), the AI check off,
+        or no AI to ask. Same switch and same data as the post-paste check,
+        which it moves earlier; nothing new leaves the PC."""
+        old = getattr(self, "_spec", None)
+        if old is not None:
+            old.stop()
+        self._spec = None
+        try:
+            if live or not self._ai_accuracy_check_on() or not self.ai_refiner.is_available:
+                return None
+            from speculative_fix import SpeculativeFixer
+            self._spec = SpeculativeFixer(
+                self.ai_refiner, self._names_block,
+                paragraphs=bool(getattr(self.config, "auto_paragraphs", True)))
+        except Exception as e:
+            print(f"[App] Live AI check unavailable: {e}")
+            self._spec = None
+        return self._spec
+
+    def _names_block(self, text: str) -> str:
+        """The names and work words the AI check gets with `text`
+        (vocab_context.py): the user's own vocabulary, CRM names, job words
+        and everyday tool names that bear on it. "" on any failure, which
+        only costs the check its hints."""
+        try:
+            import job_vocab
+            import vocab_context
+            email = self._account_email()
+            roles = job_vocab.effective_roles(self.config, email)
+            user_terms = [e.get("term") for e in self._user_entries("vocabulary")
+                          if isinstance(e, dict)]
+            # CRM names only while the CRM-names switch is on: turning it off
+            # must take them out of every correction path, this one included.
+            crm = (list(getattr(self, "_estate_terms", None) or [])
+                   if getattr(self.config, "managed_vocab", True) else [])
+            return vocab_context.block(
+                text, user_terms, crm,
+                job_vocab.terms_for(roles, email),
+                job_vocab.job_line(self.config, email))
+        except Exception as e:
+            print(f"[App] Names for the AI check skipped: {e}")
+            return ""
+
     def _on_voice_consent(self, enabled) -> None:
         """Push the server's answer into the Settings toggle. `enabled` is None
         when the server could not be reached, and the switch then stays in its
@@ -2541,6 +2586,7 @@ class WhisperFlowApp:
                 self._live_inject_active = live
                 self._live_focus_lost = False
                 from stream_session import StreamingSession
+                spec = self._new_spec_fixer(live)
                 session = StreamingSession(
                     self.recorder,
                     self.parakeet,
@@ -2554,6 +2600,7 @@ class WhisperFlowApp:
                     auto_paragraphs=bool(getattr(self.config, "auto_paragraphs", True)),
                     trim_silence=bool(getattr(self.config, "trim_silence", True)),
                     voice_track=self._new_voice_track(live),
+                    on_hypothesis=spec.feed if spec is not None else None,
                 )
                 self._session = session
                 session.start()
@@ -2586,6 +2633,13 @@ class WhisperFlowApp:
         self._cancel_recording_timer()
         session = self._session
         self._session = None
+        # The live AI check: no new calls from here. What it already knows is
+        # read below without waiting; a call still in flight may still land
+        # before the tail decode finishes.
+        spec = getattr(self, "_spec", None)
+        self._spec = None
+        if spec is not None:
+            spec.stop()
         # Take ownership of this dictation's audio writer. Every discard path
         # below must abort() it; the success path finish()es it under the
         # history row's created_at so playback/retry can find the clip.
@@ -2687,9 +2741,24 @@ class WhisperFlowApp:
                         return
                 transcribed_text = text
                 _conf = session.confidence
+                # Fixes the AI check found while the user talked: word swaps
+                # applied with no wait (speculative_fix.py). Never under Live
+                # Typing (no fixer then): those words are already typed.
+                if spec is not None:
+                    try:
+                        _sf, _n, _hit, _tot = spec.apply_fixes(transcribed_text)
+                        if _n:
+                            transcribed_text = _sf
+                        print(f"[SpecFix] hit {_hit}/{_tot} sentences, {_n} fix(es) applied, "
+                              f"{spec.stats['fix_calls']} check(s), "
+                              f"{spec.stats['plan_calls']} paragraph plan(s)")
+                    except Exception as e:
+                        print(f"[SpecFix] apply failed, engine text kept: {e}")
                 # Upgrade = LLM context-fix only. Parakeet already beats the
                 # local whisper models on English accuracy, so a whisper
-                # re-pass would usually be a downgrade — skip it.
+                # re-pass would usually be a downgrade, so skip it. Still
+                # offered after a full live check: the live check applies name
+                # fixes only, and the offer is where other fixes are decided.
                 upgrading = (self.ai_refiner.is_available
                              and self._ai_accuracy_check_on()
                              and len(text.split()) >= 4)
@@ -2858,6 +2927,30 @@ class WhisperFlowApp:
         # single post-processing point, for the same reason. Vocabulary first,
         # so a corrected term can complete a snippet trigger ("pipe drive link"
         # -> "Pipedrive link" -> the URL) but never the reverse.
+        # Paragraphs where the topic changes: the AI plan made while the user
+        # talked, then the local rules for whatever it never saw (the last
+        # sentences, or no AI). Parakeet path only, like the pause breaks;
+        # never under Live Typing; a list or email layout is left alone
+        # (single line breaks), and it runs before snippets so a snippet
+        # body is never split.
+        if (transcribed_text and session is not None
+                and getattr(self.config, "auto_paragraphs", True)
+                and not getattr(self.config, "live_inject", False)):
+            try:
+                from paragraphs import split_local
+                from speculative_fix import apply_paragraphs, sentence_key
+                _keys, _covered = (spec.paragraph_plan() if spec is not None
+                                   else (set(), set()))
+                _pp = apply_paragraphs(
+                    transcribed_text, _keys, _covered,
+                    local_rules=lambda t, c: split_local(t, c, sentence_key))
+                if _pp != transcribed_text:
+                    print(f"[App] Paragraphs: {transcribed_text.count(chr(10) * 2) + 1}"
+                          f" -> {_pp.count(chr(10) * 2) + 1}")
+                    transcribed_text = _pp
+            except Exception as e:
+                print(f"[App] Paragraph layout skipped: {e}")
+
         transcribed_text = self._apply_user_libraries(transcribed_text, _conf)
 
         # ── Injection — isolated so a failure never prevents the popup ──────────
@@ -3188,7 +3281,7 @@ class WhisperFlowApp:
                         # likes to close sentences, and accepting it would
                         # otherwise put back a stop Sentence Endings removed.
                         fixed = sentence_end.match_ending(
-                            self.ai_refiner.context_fix(_text), _text)
+                            self.ai_refiner.context_fix(_text, self._names_block(_text)), _text)
                         # The LLM decides only the words the engine itself was
                         # unsure of; every word it heard clearly keeps the
                         # injected spelling (word_confidence.py).
@@ -3239,7 +3332,7 @@ class WhisperFlowApp:
                     if self.ai_refiner.is_available and self._ai_accuracy_check_on():
                         try:
                             fixed = sentence_end.match_ending(
-                                self.ai_refiner.context_fix(accurate), accurate)
+                                self.ai_refiner.context_fix(accurate, self._names_block(accurate)), accurate)
                             if fixed and fixed != accurate:
                                 print(f"[App] LLM context-fix: {len(accurate)} -> {len(fixed)} chars")
                                 final = fixed
@@ -3465,6 +3558,17 @@ class WhisperFlowApp:
             # carry no sounds_like, so including them here would only cost
             # regex branches.
             fixed = apply_vocabulary(text, vocab)
+            # The user's job words with their own capitals ("riddor" ->
+            # "RIDDOR"). Distinctive terms only; the rest of each pack goes to
+            # the AI accuracy check (job_vocab.py). Its own guard: a bad pack
+            # must not cost the user their own vocabulary above.
+            try:
+                import job_vocab
+                fixed = job_vocab.apply_job_casing(
+                    fixed, job_vocab.effective_roles(self.config, self._account_email()),
+                    self._account_email())
+            except Exception as exc:
+                print(f"[App] Job word casing skipped: {exc}")
             # Phonetic safety net for close mishearings nobody listed
             # ("vercell" -> "Vercel"). Additive, bounded, and off the
             # transcription/injection path entirely; a kill switch each in case

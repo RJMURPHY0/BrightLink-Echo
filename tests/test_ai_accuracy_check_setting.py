@@ -29,7 +29,9 @@ class AccuracyCheckTests(unittest.TestCase):
 
     def test_both_background_paths_are_gated(self):
         src = open(app_mod.__file__, encoding="utf-8").read()
-        self.assertEqual(src.count("self._ai_accuracy_check_on()"), 2)
+        # The post-paste check (Parakeet and whisper paths) and the live check
+        # while the user talks (_new_spec_fixer, 2026-11-20).
+        self.assertEqual(src.count("self._ai_accuracy_check_on()"), 3)
 
 
 class SwitchAndPolicy(unittest.TestCase):

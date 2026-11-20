@@ -134,6 +134,10 @@ class StreamingSession:
                                # pauses; the text must also agree, see
                                # _assemble_paragraphs)
     PARAGRAPH_RMS = 0.006      # absolute quiet floor for paragraph detection
+    SPEC_EVERY = 1.5           # seconds between hypothesis decodes for the AI
+                               # check (speculative_fix.py), only when it is on
+    SPEC_MIN_AUDIO = 3.0       # uncommitted speech before one is worth it
+    SPEC_VOICE_WIN = 0.3       # trailing window that must hold speech
     SEAM_LEFT = 5.0            # audio (s) before a commit boundary in its seam
                                # decode: the model judges "is this sentence
                                # finished" from what came before the join
@@ -163,6 +167,7 @@ class StreamingSession:
         auto_paragraphs: bool = False,
         trim_silence: bool = False,
         voice_track=None,
+        on_hypothesis: Optional[Callable[[str], None]] = None,
     ):
         self._recorder = recorder
         # Voice isolation (voice_filter.VoiceTrack): judges the user's voice
@@ -211,6 +216,11 @@ class StreamingSession:
         # plain words, and a newline emitted as a keypress could submit a chat
         # box, so the reconcile must never see paragraph breaks it didn't type.
         self._auto_paragraphs = bool(auto_paragraphs) and not live_inject
+        # Text so far for the AI check that runs while the user talks
+        # (speculative_fix.py). Never under live injection. Display-only like
+        # captions: nothing it receives reaches the final text by this path.
+        self._on_hypothesis = on_hypothesis if not live_inject else None
+        self._last_spec = 0.0
         self._trim_silence = bool(trim_silence)
         # Break-BEFORE flag per _committed_texts entry (parallel list; only
         # finalize() reads it, so captions/context joins stay space-separated).
@@ -346,13 +356,16 @@ class StreamingSession:
                     # The caption window's start just moved — the previous
                     # hypothesis no longer aligns with it.
                     self._prev_hyp_words = []
+                    committed_now = " ".join(t for t in self._committed_texts if t)
+                self._hypothesis_out(committed_now)
                 return
 
         # The stable-hypothesis pass feeds BOTH live captions and live injection.
         # Run it whenever either consumer is active.
         want_captions = bool(self._captions and self._on_caption)
         want_inject = bool(self._live_inject and self._on_inject and not self._stream_frozen)
-        if want_captions or want_inject:
+        want_spec = self._spec_decode_due(audio, rate, uncommitted_secs)
+        if want_captions or want_inject or want_spec:
             # Use the SAME context as finalize() so the live hypothesis tracks the
             # text that will actually be injected — a context-free hypothesis
             # reads noticeably rougher than the final pass. Display-only for
@@ -377,6 +390,10 @@ class StreamingSession:
                 # frontier. Leave the caption showing its last text — updating
                 # it with committed-only would visibly shrink then regrow.
                 return
+            if want_spec:
+                self._last_spec = time.monotonic()
+                self._hypothesis_out(" ".join(
+                    [t for t in self._committed_texts if t] + [hyp]))
             stable: list[str] = []
             words = hyp.split()
             if self._prev_hyp_words:
@@ -587,6 +604,31 @@ class StreamingSession:
             print(f"[Stream] Voice isolation: start of the dictation was someone "
                   f"else; chunk at {ch['at'] / rate:.1f}s "
                   f"{'dropped' if covered else 're-decoded'}")
+
+    def _spec_decode_due(self, audio: np.ndarray, rate: int,
+                         uncommitted_secs: float) -> bool:
+        """Whether this tick runs a hypothesis decode for the AI check. At
+        most every SPEC_EVERY seconds, only with SPEC_MIN_AUDIO of uncommitted
+        speech, and only while the user is audibly talking: the release comes
+        after they stop, so a decode started in a pause is the one most likely
+        to still hold the engine when the final tail decode wants it."""
+        if self._on_hypothesis is None or uncommitted_secs < self.SPEC_MIN_AUDIO:
+            return False
+        if time.monotonic() - self._last_spec < self.SPEC_EVERY:
+            return False
+        n = int(self.SPEC_VOICE_WIN * rate)
+        if n <= 0 or len(audio) < n:
+            return False
+        tail = audio[-n:].astype(np.float64)
+        return float(np.sqrt(np.mean(tail * tail))) >= self.PAUSE_FLUSH_RMS
+
+    def _hypothesis_out(self, text: str) -> None:
+        if self._on_hypothesis is None or not text:
+            return
+        try:
+            self._on_hypothesis(text)
+        except Exception as e:
+            print(f"[Stream] Hypothesis consumer error: {e}")
 
     def _tail_is_quiet(self, audio: np.ndarray, rate: int) -> bool:
         """True when the trailing PAUSE_FLUSH_QUIET seconds of the uncommitted

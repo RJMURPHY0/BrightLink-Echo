@@ -27,6 +27,7 @@ Enabled via Config.spoken_punctuation (default on).
 import re
 
 from tech_terms import apply_tech_terms
+from common_terms import apply_common_terms
 
 _S = r"[ \t]*"  # horizontal space only — never swallow newlines
 
@@ -335,6 +336,7 @@ def apply_spoken_commands(text: str) -> str:
     out = _CURRENCY_WORDS.sub(_sub_currency_words, out)
     out = _apply_times(out)
     out = apply_tech_terms(out)
+    out = apply_common_terms(out)
     if out != text:
         out = re.sub(r" {2,}", " ", out)
         out = re.sub(r" +([.,!?;:])", r"\1", out)
