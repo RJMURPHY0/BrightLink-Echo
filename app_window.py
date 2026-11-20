@@ -11538,14 +11538,14 @@ class AppWindow:
                 except Exception:
                     pass
 
-        def _reset_btns():
+        def _reset_btns(label="Update Now"):
             # Re-enable the button(s) after a failed attempt so the user can retry.
             self._update_in_flight = False
             for btn in _btns:
                 try:
                     if not btn.winfo_exists():
                         continue
-                    btn.configure(text="Update Now", bg=C["accent"], cursor="hand2")
+                    btn.configure(text=label, bg=C["accent"], cursor="hand2")
                     btn.bind("<Button-1>", _do_update)
                     btn.bind("<Enter>", lambda _e, b=btn: b.configure(bg=C["accent_hover"]))
                     btn.bind("<Leave>", lambda _e, b=btn: b.configure(bg=C["accent"]))
@@ -11556,6 +11556,7 @@ class AppWindow:
             if self._update_in_flight:
                 return
             from updater import run_auto_update, current_exe_path
+            from update_now import update_target
             import threading
             exe_path = current_exe_path()
             if not exe_path:
@@ -11581,13 +11582,19 @@ class AppWindow:
                         to_version=version, ok=ok, detail=detail)
 
             def _worker():
+                # The installer route needs this release's installer details
+                # in the release cache. A banner raised earlier (or by an older
+                # check) can face a stale or empty cache, which made the run
+                # fail at once and send people to the browser: re-read the
+                # latest release first so the install happens in the app.
+                want, url = update_target(version, download_url)
                 # Drive the exact same proven flow as the automatic updater
                 # (reliable LOCALAPPDATA download + retries + verified swap script)
                 # instead of a separate hand-rolled download. is_idle=True +
                 # idle_samples=1 makes it apply immediately, since the user asked
                 # to update NOW rather than waiting for the next idle window.
                 joined = run_auto_update(
-                    version, download_url, exe_path,
+                    want, url, exe_path,
                     is_idle=lambda: True,
                     on_status=_status,
                     poll_interval=0.0,
@@ -11604,27 +11611,24 @@ class AppWindow:
                     return
                 # run_auto_update only returns when the download failed after all
                 # retries (on success apply_update replaces the exe and exits the
-                # process). Fall back to opening the release page in the browser —
-                # a genuine last resort so the user is never fully stuck.
+                # process). The update stays inside the app: never open the
+                # browser (Ryan, 2026-11-20). Say why on the version line and
+                # bring the button back as Try again.
                 from updater import update_failure
                 failed = update_failure()
                 stage = failed.get("stage") or "unknown"
-                _log_event("manual_fallback_browser", False,
+                _log_event("manual_update_failed", False,
                            f"in-place update failed at {stage}")
                 from error_reporter import report_error
                 report_error(
-                    f"Manual 'Update Now' failed at {stage} for v{version}",
-                    context={"version": version, "url": download_url,
+                    f"Manual 'Update Now' failed at {stage} for v{want}",
+                    context={"version": want, "url": url,
                              "stage": stage,
                              "detail": failed.get("detail", "")},
                     user_email=getattr(self._auth, "user_email", None),
                 )
-                # Say why on the version line; the button comes back to retry.
                 self.set_update_status("")
-                import webbrowser
-                from updater import manual_download_url
-                webbrowser.open(manual_download_url())
-                self._ui_after(0, _reset_btns)
+                self._ui_after(0, lambda: _reset_btns("Try again"))
 
             threading.Thread(target=_worker, daemon=True, name="in-app-update").start()
 
