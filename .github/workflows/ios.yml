@@ -1,0 +1,164 @@
+# BrightLink Echo for iPhone: build, test and (on request) ship to TestFlight.
+#
+# Runs on GitHub's macOS runners, so no Mac is needed anywhere. Separate from
+# the Windows release (build-release.yml): nothing here touches the desktop
+# app, its releases or the auto-updater.
+#
+# - Every push that touches ios/ (or the desktop refine prompts): EchoCore
+#   unit tests, the prompt drift check, then a simulator build + test of the
+#   app and keyboard. No secrets needed.
+# - Run workflow with "testflight" ticked: also archives, signs (cloud-managed,
+#   via an App Store Connect API key) and uploads a build to TestFlight.
+#   Needs the four secrets listed in docs/IOS.md.
+name: iOS
+
+on:
+  push:
+    paths:
+      - "ios/**"
+      - "ai_refiner.py"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+    inputs:
+      testflight:
+        description: "Archive, sign and upload a build to TestFlight"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          brew install xcodegen
+
+      - name: Refine prompts match the desktop
+        run: python3 -I ios/tools/gen_refine_prompts.py --check
+
+      - name: EchoCore unit tests
+        working-directory: ios/EchoCore
+        run: swift test 2>&1 | tail -200
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Pick a simulator
+        id: sim
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)["devices"]
+          phones = [d for rt, ds in data.items() if "iOS" in rt for d in ds if d["name"].startswith("iPhone")]
+          print(phones[-1]["udid"] if phones else "")
+          ')
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          echo "Simulator: $UDID"
+
+      - name: Build and test (simulator, unsigned)
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project BrightLinkEcho.xcodeproj \
+            -scheme BrightLinkEcho \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            ECHO_TEAM_ID="" \
+            | tee build.log | grep -E "error:|warning: .*(EchoKeyboard|App/|Shared/)|Test Suite|Executed|\*\* (BUILD|TEST)" || true
+          grep -q "\*\* TEST SUCCEEDED \*\*" build.log
+
+      - name: Build log on failure
+        if: failure()
+        working-directory: ios
+        run: grep -E "error:" build.log | head -100 || true
+
+  testflight:
+    if: github.event_name == 'workflow_dispatch' && inputs.testflight
+    needs: build-and-test
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets
+        run: |
+          for v in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8 APPLE_TEAM_ID; do
+            if [ -z "${!v}" ]; then echo "::error::Missing secret $v (see docs/IOS.md)"; exit 1; fi
+          done
+
+      - name: Prepare
+        run: |
+          brew install xcodegen
+          mkdir -p "$RUNNER_TEMP/asc"
+          KEY="$RUNNER_TEMP/asc/AuthKey_${ASC_KEY_ID}.p8"
+          printf '%s\n' "$ASC_KEY_P8" > "$KEY"
+          echo "ASC_KEY_PATH=$KEY" >> "$GITHUB_ENV"
+          cd ios && xcodegen generate
+
+      - name: Archive (cloud-managed signing)
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project BrightLinkEcho.xcodeproj \
+            -scheme BrightLinkEcho \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/Echo.xcarchive" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$ASC_KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            ECHO_TEAM_ID="$APPLE_TEAM_ID" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            | tail -80
+
+      - name: Export and upload to TestFlight
+        working-directory: ios
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+          </dict></plist>
+          EOF
+          set -o pipefail
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Echo.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$ASC_KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            | tail -60
+          echo "Uploaded build ${{ github.run_number }} to App Store Connect. It appears in TestFlight after Apple finishes processing (usually 5 to 30 minutes)."
+
+      - name: Remove key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/asc"

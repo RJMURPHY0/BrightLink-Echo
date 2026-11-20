@@ -17,6 +17,7 @@ Record a new decision as a dated entry at the bottom of the matching area file. 
 - [`reliability-telemetry.md`](reliability-telemetry.md): Fleet telemetry, memory guard, dead audio stack, hot-path costs.
 - [`cloud-sync.md`](cloud-sync.md): Opt-in Cloud Sync (off by default): what syncs, merge rules, delete-my-data, what stays outside it.
 - [`invariants.md`](invariants.md): the key invariants list, verbatim. Each item encodes a shipped bug.
+- [`ios-app.md`](ios-app.md): Echo for iPhone: keyboard + app architecture, engines, bridge, CI/TestFlight, what syncs.
 - [`architecture-notes.md`](architecture-notes.md): threading, Parakeet path, Live Typing, injection, popup, hotkeys, update flow, config.
 - [`claude-md-archive.md`](claude-md-archive.md): lines of the old CLAUDE.md that were rewritten, kept verbatim.
 
