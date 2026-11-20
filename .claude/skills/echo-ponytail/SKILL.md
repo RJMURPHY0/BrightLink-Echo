@@ -14,7 +14,7 @@ The method is in `references/ponytail.md` (upstream, unchanged). Read it, then f
 2. **Stay inside the task.** "Deletion beats addition" applies to the code you are changing. Do not delete or rewrite other code you happen to see; list it in your closing line instead. Wider clean-up goes through a separate, named clean-up task.
 3. **No new packages** without Ryan saying yes, even when upstream rule 4 would allow one.
 4. **Finished means checked.** Run `python -m unittest discover -s tests` (three known failures are listed in `docs/INSTALLER_MIGRATION_BRIEF.md`) and paste the real output. A smaller diff that fails a check is not done.
-5. **Closing line**: end with what you skipped or did not check, and any risk, in plain British English (no em dashes).
+5. **Closing line**: say what you skipped or did not check, and any risk, in plain British English (no em dashes). It goes just above the standard reply ending in `.claude/rules/reply-endings.md` (What you need to do, Push status, Still waiting on you), never instead of it.
 6. **Shortcut comments** use upstream's form `shortcut: <the limit>, <when to upgrade>`. Never put one on auth, permission, money or data-safety code: those are finished properly or not at all.
 7. **Ultra level** questions the request before building. Keep it to one short list of pushbacks, then do what Ryan decides.
 
