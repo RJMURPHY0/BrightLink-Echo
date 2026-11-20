@@ -9,4 +9,5 @@ Applies to every session on this repo, laptop or cloud. Ryan reads these on a ph
   2. `Push status:` pushed and live / pushed, CI running / not pushed (and why), with the commit linked.
   3. `Still waiting on you:` one line, or "nothing."
 - The echo-ponytail closing line (what was skipped, unchecked or risky) goes just above these three, never instead of them.
+- Keep the desktop app's recap card: when its wrap-up tool is available (laptop sessions in the Claude desktop app), call it just before the final reply. Cloud sessions don't have it; the ending above still applies.
 - A short progress note mid-task needs none of this.
