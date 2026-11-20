@@ -263,10 +263,52 @@ class StatsStore:
         key = user_id if (user_id and user_id != "local") else "local"
         changed = key != self._user_key
         self._user_key = key
+        if key != "local":
+            if self._adopt_local_days(key):
+                changed = True
         if changed:
             self._notify()
         if key != "local":
             self._start_sync(key)
+
+    _SUM_FIELDS = (("w", int), ("s", float), ("v", float), ("vw", int),
+                   ("r", int), ("rs", float), ("rp", int), ("rv", int))
+
+    def _adopt_local_days(self, uid: str) -> bool:
+        """Fold dictations made while signed out into the account that signs
+        in, so time saved and the streak never lose a day to a sign-out.
+
+        Signed-out dictations are different dictations from the account's own
+        (the account was not counting while signed out), so each field is
+        ADDED, not maxed. The local bucket is emptied in the same save, so a
+        later sign-in can never count them twice. The next remote sync pushes
+        the raised days, because they are now ahead of the server."""
+        with self._lock:
+            self._load_locked()
+            users = self._data["users"]
+            local = users.get("local") or {}
+            local_days = local.get("days") or {}
+            carry_w = int(local.get("carry_words", 0) or 0)
+            carry_m = float(local.get("carry_saved_min", 0.0) or 0.0)
+            if not local_days and not carry_w and not carry_m:
+                return False
+            u = self._user_blob()
+            for day, rec in local_days.items():
+                cur = u["days"].setdefault(day, {"w": 0, "s": 0.0})
+                for k, cast in self._SUM_FIELDS:
+                    if k in rec or k in cur:
+                        cur[k] = cast(cur.get(k, 0)) + cast(rec.get(k, 0))
+                for k in ("s", "v", "rs"):
+                    if k in cur:
+                        cur[k] = round(float(cur[k]), 2)
+            u["carry_words"] = int(u.get("carry_words", 0)) + carry_w
+            u["carry_saved_min"] = float(u.get("carry_saved_min", 0.0)) + carry_m
+            users["local"] = {"days": {}, "seeded": False,
+                              "carry_saved_min": 0.0, "carry_words": 0}
+            self._trim_locked(u)
+            self._save_locked()
+        print(f"[Stats] Moved {len(local_days)} signed-out day(s) into the account.")
+        return True
 
     def record_dictation(self, words: int, audio_seconds: float,
                          voiced_seconds: float = 0.0) -> None:

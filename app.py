@@ -5360,7 +5360,15 @@ def _sync_startup(enabled: bool) -> None:
     The logon task is what starts the app early: it fires at sign-in, before
     Explorer gets round to Run entries. It exists only while the setting is
     on, and a task launch still checks the Run entry first (_main), so a
-    disable in Task Manager holds even before the app next syncs."""
+    disable in Task Manager holds even before the app next syncs.
+
+    Frozen builds only. A source run (a dev checkout or a chat's preview
+    worktree) pointed both launchers at its own app.py on 20 Nov 2026, so
+    after a restart Windows started that copy instead of the installed app:
+    no server settings, the user shown signed out, every password refused."""
+    if not getattr(sys, "frozen", False):
+        print("[App] Start with Windows left alone: running from source.")
+        return
     import winreg
     from app_install import RUN_KEY as _RUN_KEY, STARTUP_APPROVED_KEY as _APPROVED_KEY
     cmd = _startup_command()
@@ -5775,7 +5783,12 @@ def _register_url_protocol() -> None:
     Register our URL protocols so browsers can launch the app: the current
     scheme and the legacy one the CRM still opens. Runs each startup so the
     path stays current after an update or move.
+
+    Frozen builds only: a source run would take the links over from the
+    installed app (see _sync_startup).
     """
+    if not getattr(sys, "frozen", False):
+        return
     import winreg
 
     target = _startup_target()

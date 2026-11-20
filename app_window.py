@@ -12183,16 +12183,32 @@ class AppWindow:
                 text=action_text, fg=C["error"] if signed_in else C["accent"])
 
     def _do_sign_in(self) -> None:
-        from login_window import LoginWindow
+        """Sign In from a signed-out dashboard.
 
-        def _on_success(auth):
-            email = auth.user_email or ""
-            self._email_display.configure(text=email if email else "Not signed in")
-            self._sign_btn.configure(text="Sign Out" if email else "Sign In")
+        Shown as the one sign-in window with the dashboard hidden behind it
+        (_show_login_screen), never as a dialog stacked on the dashboard:
+        that left the dashboard's own title bar showing above the dialog's
+        (Ryan, 20 Nov 2026). Closing it brings the dashboard straight back."""
+
+        def _after_login(auth):
             if self._on_sign_in:
                 threading.Thread(target=self._on_sign_in, args=(auth,), daemon=True).start()
 
-        LoginWindow(self._auth, on_success=_on_success).run(parent=self._root)
+        try:
+            before = self._root.geometry()
+        except tk.TclError:
+            before = ""
+
+        def _after_cancel():
+            try:
+                if before:
+                    self._root.geometry(before)
+                self._root.deiconify()
+                self._apply_auth_ui()
+            except tk.TclError:
+                pass
+
+        self._show_login_screen(after_login=_after_login, after_cancel=_after_cancel)
 
     def _do_quit(self) -> None:
         self._on_quit()
