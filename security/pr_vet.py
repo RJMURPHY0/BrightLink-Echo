@@ -70,7 +70,8 @@ CODE_RULES = [
 ]
 PATH_RULES = [
     ("BLOCK", "env or key file", re.compile(r"(^|/)\.env($|\.(?!example))|\.(pem|key|p12|pfx)$|prod-env\.txt$")),
-    ("REVIEW", "changes a CI workflow", re.compile(r"^\.github/workflows/")),
+    # Workflows and security/ are graded in scan() instead: a pull request runs its OWN copy of the
+    # workflow files, so one that edits them can switch off the checks that would catch it.
     ("REVIEW", "changes the database (db-reviewer first)", re.compile(r"migrations/.*\.sql$|\.sql$")),
     ("REVIEW", "changes packages: real, wanted, no install script?", re.compile(
         r"(^|/)(package\.json|requirements[^/]*\.txt|pyproject\.toml|Cargo\.toml|bunfig\.toml|\.npmrc)$")),
@@ -80,8 +81,17 @@ PATH_RULES = [
         r"^(api|supabase/functions|app/api|pages/api)/")),
     ("REVIEW", "changes sign-in or permissions", re.compile(r"(^|/)(auth|mfa|rls|permission|middleware)[^/]*(/|\.)", re.I)),
     ("REVIEW", "changes a check's settings", re.compile(
-        r"(^|/)(tsconfig[^/]*\.json|eslint[^/]*|\.eslintrc[^/]*|vitest[^/]*|\.gitleaks[^/]*|security/)")),
+        r"(^|/)(tsconfig[^/]*\.json|eslint[^/]*|\.eslintrc[^/]*|vitest[^/]*|\.gitleaks[^/]*)")),
 ]
+# A pull request runs the workflow files on its own branch, and the scans read their settings from
+# it, so a PR that edits them can turn off what checks it. Those changes need Ryan's own yes
+# (security audit 2026-11-19). Two kinds stay REVIEW so routine work keeps moving: a workflow change
+# that only re-pins actions to a full commit SHA (what Dependabot sends), and new Semgrep rules
+# that remove nothing (the security agent adds those).
+WORKFLOW_PATH = re.compile(r"^\.github/workflows/")
+SECURITY_PATH = re.compile(r"^security/")
+SEMGREP_PATH = re.compile(r"^security/semgrep/")
+PINNED_USES = re.compile(r"^\s*(-\s*)?uses:\s*[\w.-]+/[\w./-]+@[0-9a-f]{40}(\s+#.*)?\s*$")
 PKG_RULES = [
     ("BLOCK", "package install script", re.compile(r'^\s*"(pre|post)?install"\s*:')),
     ("REVIEW", "package from a git address or URL, not the registry", re.compile(r'"\s*:\s*"(git\+|https?:|github:)')),
@@ -106,6 +116,56 @@ def added_lines(diff: str):
             line += 1
 
 
+def changed_lines(diff: str) -> dict:
+    """{path: (added texts, removed texts)} for every file in a unified diff."""
+    # "---" and "+++" are file headers only between "diff --git" and the first hunk:
+    # inside a hunk they are an added or removed line that happens to start "++" or "--".
+    # A deleted file's "+++" is /dev/null, so its lines stay filed under the old path.
+    out, path, in_header = {}, "", False
+    for raw in diff.splitlines():
+        if raw.startswith("diff --git "):
+            in_header, path = True, ""
+            m = re.match(r"diff --git a/(.+?) b/(.+)$", raw)
+            if m:
+                path = m.group(2)
+                out.setdefault(path, ([], []))
+                if m.group(1) != m.group(2):
+                    out.setdefault(m.group(1), ([], ["(renamed away)"]))
+        elif in_header and raw.startswith("--- "):
+            old = raw[4:].strip()
+            if old != "/dev/null":
+                path = old.removeprefix("a/")
+                out.setdefault(path, ([], []))
+        elif in_header and raw.startswith("+++ "):
+            new = raw[4:].strip()
+            if new != "/dev/null":
+                path = new.removeprefix("b/")
+                out.setdefault(path, ([], []))
+        elif raw.startswith("@@"):
+            in_header = False
+        elif in_header:
+            continue
+        elif raw.startswith("+") and path:
+            out[path][0].append(raw[1:])
+        elif raw.startswith("-") and path:
+            out[path][1].append(raw[1:])
+    return out
+
+
+def gate_change_severity(path: str, added, removed) -> tuple:
+    """(severity, why) for a change to a workflow or to security/, or None for any other path."""
+    if WORKFLOW_PATH.search(path):
+        lines = [t for t in (*added, *removed) if t.strip()]
+        if lines and all(PINNED_USES.match(t) for t in lines):
+            return ("REVIEW", "re-pins a CI action to a commit: is it the real release?")
+        return ("BLOCK", "changes a CI workflow, which can switch off the checks on this PR")
+    if SECURITY_PATH.search(path):
+        if SEMGREP_PATH.search(path) and not any(t.strip() for t in removed):
+            return ("REVIEW", "adds a Semgrep rule: does it catch what it says?")
+        return ("BLOCK", "changes the security scans or their settings")
+    return None
+
+
 def scan(paths, diff: str, title: str = "", body: str = "", from_fork: bool = False, checks=None) -> dict:
     """checks: list of (name, state) with state one of FAILED, PENDING, PASSED. None means unknown."""
     found = []
@@ -124,10 +184,15 @@ def scan(paths, diff: str, title: str = "", body: str = "", from_fork: bool = Fa
             add("REVIEW", "automated checks still running", ", ".join(pending[:8]))
         if not checks:
             add("REVIEW", "no automated tests or scans ran on this PR, so only the read below stands behind it", "PR")
+    changes = changed_lines(diff)
     for p in paths:
         for severity, why, rx in PATH_RULES:
             if rx.search(p) and not (why.startswith("env") and p.endswith(".example")):
                 add(severity, why, p)
+        # A listed path the diff does not show (too large, binary, renamed) cannot be judged: block it.
+        graded = gate_change_severity(p, *changes.get(p, ([], ["(not in the diff)"])))
+        if graded:
+            add(graded[0], graded[1], p)
     for rx_sev, why, rx in SECRET_RULES:
         for field, text in (("PR title", title), ("PR text", body)):
             if text and rx.search(text):
