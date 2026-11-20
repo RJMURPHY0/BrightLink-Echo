@@ -623,7 +623,7 @@ class VoiceIsolation:
 
     def __init__(self, model_dir: str, profile_path: str, audio_dir: str,
                  is_busy=lambda: False, log=print, report=None, embedder=None,
-                 owner=lambda: ""):
+                 owner=lambda: "", owned=None):
         # One thread: with intra-op 1, onnxruntime computes on the calling
         # thread, so a track never takes more than one core from the decode.
         self.embedder = embedder or SpeakerEmbedder(model_dir, threads=1)
@@ -634,6 +634,13 @@ class VoiceIsolation:
         self._log = log
         self._report = report      # report(event, details) for failures
         self._owner_fn = owner     # the signed-in account's id, or ""
+        # owned() -> the file names of the signed-in account's own saved
+        # dictations (its history), or None when that cannot be read. The
+        # audio folder is shared by every account on this Windows user, so
+        # a first voiceprint built from "every saved dictation" could be
+        # somebody else's voice (2026-11-20 audit); it then cut the real
+        # user's words as another speaker's.
+        self._owned_fn = owned
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._live = False
@@ -718,6 +725,18 @@ class VoiceIsolation:
             return []
         seen = set(self.profile.seen)
         since = self.profile.since
+        if not since and self._owned_fn is not None:
+            # First voiceprint, learned from saved dictations: only the
+            # signed-in account's own. Unreadable history: none this pass.
+            try:
+                owned = self._owned_fn()
+            except Exception as e:
+                self._log(f"[VoiceIsolation] could not read whose dictations these are: {e}")
+                owned = None
+            if owned is None:
+                return []
+            owned = set(owned)
+            names = [n for n in names if n in owned]
         if since:
             def _mine(n: str) -> bool:
                 try:

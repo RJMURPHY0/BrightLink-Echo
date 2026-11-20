@@ -105,7 +105,7 @@ class SourceInvariantTests(unittest.TestCase):
     def test_the_list_refreshes_on_arrival(self):
         # Phrases are learned in the background, so a list drawn on the last
         # visit is already stale.
-        self.assertIn("_render_phrases()",
+        self.assertIn("_render_phrases(if_changed=True)",
                       inspect.getsource(AppWindow._switch_dash_tab))
 
     def test_the_ui_uses_the_apps_store_not_a_second_one(self):
@@ -256,6 +256,40 @@ class PhrasesPageRenderTests(unittest.TestCase):
         labels = self._labels()
         self.assertIn("prospect intel", labels)
         self.assertNotIn("brightlink pipeline", labels)
+
+    def _rows(self):
+        return list(self.w._lib_state("phrases")["list"].winfo_children())
+
+    def test_arriving_with_nothing_new_keeps_the_rows_on_screen(self):
+        # Instant page changes (2026-11-20): rebuilding an unchanged list
+        # cost every visit 40-270ms, so an arrival keeps what is drawn.
+        self._learn("Open the Brightlink pipeline now.", pl.PROMOTE_COUNT)
+        self.w._build_phrases_page(self.frame)
+        self.root.update()
+        before = self._rows()
+        self.w._render_phrases(if_changed=True)
+        self.root.update()
+        self.assertEqual(before, self._rows())
+        self.assertTrue(all(r.winfo_exists() for r in before))
+
+    def test_arriving_after_a_new_phrase_shows_it(self):
+        self._learn("Open the Brightlink pipeline now.", pl.PROMOTE_COUNT)
+        self.w._build_phrases_page(self.frame)
+        self.root.update()
+        self._learn("Run the prospect intel report.", pl.PROMOTE_COUNT)
+        self.w._render_phrases(if_changed=True)
+        self.root.update()
+        self.assertIn("prospect intel", self._labels())
+
+    def test_arriving_with_a_search_typed_refilters(self):
+        self._learn("Open the Brightlink pipeline now.", pl.PROMOTE_COUNT)
+        self._learn("Run the prospect intel report.", pl.PROMOTE_COUNT)
+        self.w._build_phrases_page(self.frame)
+        self.root.update()
+        self.w._lib_state("phrases")["query"] = "prospect"
+        self.w._render_phrases(if_changed=True)
+        self.root.update()
+        self.assertNotIn("brightlink pipeline", self._labels())
 
     def test_the_page_survives_the_feature_being_off(self):
         self.w.set_phrase_provider(lambda: None)

@@ -101,16 +101,29 @@ def restrict_to_unsure(original: str, proposed: str, recorded,
     if not otoks or not ptoks:
         return original
 
-    def _tok_conf(m) -> Optional[float]:
-        # A token's confidence is its least sure word; unknown if any is.
-        vals = []
+    def _tok_words(m):
+        # [(word, confidence or None)] of the words inside one token.
+        out = []
         for i, w in enumerate(words):
             if m.start() <= w.start() < m.end():
-                c = word_confs[i] if i < len(word_confs) else None
-                if c is None:
-                    return None
-                vals.append(c)
-        return min(vals) if vals else None
+                out.append((w.group(0).lower(),
+                            word_confs[i] if i < len(word_confs) else None))
+        return out
+
+    def _tok_ok(k: int, new_tok) -> bool:
+        # A token may change only where its words were unsure. "twenty-two"
+        # with "two" unsure may become "twenty-too", never "thirty-three":
+        # one unsure word used to let the whole token go (2026-11-20 audit).
+        old = _tok_words(otoks[k])
+        if not old:
+            return False
+        new = [w.lower() for w in _WORD_RE.findall(new_tok)] \
+            if new_tok is not None else None
+        if new is not None and len(new) == len(old):
+            changed = [c for (w, c), n in zip(old, new) if w != n]
+            if changed:
+                return all(is_unsure(c, limit) for c in changed)
+        return all(is_unsure(c, limit) for _w, c in old)
 
     sm = difflib.SequenceMatcher(
         a=[_bare(m.group(0)) for m in otoks], b=[_bare(t) for t in ptoks],
@@ -121,7 +134,9 @@ def restrict_to_unsure(original: str, proposed: str, recorded,
             continue    # equal keeps the original; insert/delete refused
         if (j2 - j1) > (i2 - i1) + 1 or (i2 - i1) > 3:
             continue
-        if not all(is_unsure(_tok_conf(otoks[k]), limit) for k in range(i1, i2)):
+        pairs = (ptoks[j1 + (k - i1)] if (i2 - i1) == (j2 - j1) else None
+                 for k in range(i1, i2))
+        if not all(_tok_ok(k, t) for k, t in zip(range(i1, i2), pairs)):
             continue
         edits.append((otoks[i1].start(), otoks[i2 - 1].end(),
                       " ".join(ptoks[j1:j2])))
