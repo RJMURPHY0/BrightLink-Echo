@@ -2296,6 +2296,10 @@ class GlassButton(tk.Canvas):
     config = configure
 
 
+# The "Echo updated" card's see-through colour (its four rounded corners).
+_UPDATE_CARD_KEY = "#010102"
+
+
 class AppWindow:
     _STATUS = {
         "idle":       ("● Ready",         C["success"]),
@@ -11673,209 +11677,188 @@ class AppWindow:
 
     def show_update_celebration(self, prev_version: str, new_version: str,
                                 product_name: str) -> None:
-        """Centre-screen confetti + 'Updated to vX' popup. Auto-dismisses.
+        """Centre-screen 'Echo updated to vX' card with a confetti burst.
 
-        Called from _announce_update_if_any on first run after an update.
-        Professional, fast, dismissible — never blocks the user.
+        Same design as BrightLink's "You're on Growth" pop-up (update_card.py
+        draws it); the confetti plays inside the card. Called from
+        _announce_update_if_any on first run after an update. Dismissed by
+        "Got it", any click, or by itself after a while (held while the
+        pointer is over the card). Never blocks the user.
         """
         if not self._root:
             return
-        import random
+        import threading
 
+        import update_card
+
+        def _render():
+            # Drawing both card images takes about a second of PIL work, so it
+            # runs here and the window opens once they are ready, without
+            # freezing the app meanwhile.
+            try:
+                pil = {
+                    hover: update_card.render_card(
+                        prev_version, new_version, product_name,
+                        hover=hover, key_colour=_UPDATE_CARD_KEY)
+                    for hover in (False, True)
+                }
+            except Exception as e:
+                print(f"[App] Update card render failed (non-fatal): {e}")
+                return
+            self._ui_after(0, self._open_update_card,
+                           prev_version, new_version, pil)
+
+        threading.Thread(target=_render, daemon=True,
+                         name="update-card").start()
+
+    def _open_update_card(self, prev_version: str, new_version: str,
+                          pil: dict) -> None:
+        import update_card
+        from PIL import ImageTk
+
+        if not self._root:
+            return
         root = self._root
         pop = tk.Toplevel(root)
         pop.overrideredirect(True)
         pop.attributes("-topmost", True)
-        # The confetti overlay shows the desktop through this one key colour.
-        _SEE_THROUGH = "#010102"
+        # The key colour is visible only at the four rounded corners.
+        _SEE_THROUGH = _UPDATE_CARD_KEY
         pop.configure(bg=_SEE_THROUGH)
         pop.attributes("-transparentcolor", _SEE_THROUGH)
         pop.attributes("-alpha", 0.0)
 
-        # ── Confetti canvas (full overlay) ──────────────────────────────
-        canvas = tk.Canvas(pop, highlightthickness=0, bg=_SEE_THROUGH,
-                           cursor="hand2")
+        _DISMISS_MS = 9000
+        _FRAME_MS = 16
+
+        n_rows = len(update_card.card_rows(prev_version, new_version))
+        imgs = {
+            hover: ImageTk.PhotoImage(pil[hover], master=pop)
+            for hover in (False, True)
+        }
+        cw = imgs[False].width()
+        ch = imgs[False].height()
+        canvas = tk.Canvas(pop, width=cw, height=ch,
+                           highlightthickness=0, bd=0, bg=_SEE_THROUGH)
         canvas.pack(fill="both", expand=True)
+        card_id = canvas.create_image(0, 0, image=imgs[False], anchor="nw")
+        pop._card_imgs = imgs  # keep the images alive with the window
+        bx0, by0, bx1, by1 = update_card.button_box(n_rows)
+        conf = update_card.Confetti((cw, ch))
+        piece_ids: dict[int, int] = {}
+        state = {"closing": False, "hover": False, "over_card": False}
 
-        # Particles: {id: {x, y, vx, vy, colour, size, rotation, spin}}
-        particles: dict[int, dict] = {}
-        _COLOURS = ("#f39200", "#4ade80", "#38bdf8", "#f472b6",
-                    "#a78bfa", "#fbbf24", "#fb7185", "#34d399")
-        _GRAVITY = 120.0          # px/s² downward
-        _DRAG = 0.985             # velocity retention per frame
-        _CONFETTI_W, _CONFETTI_H = 360, 220
-        _N_PARTICLES = 60
-        _DISMISS_MS = 4500        # auto-dismiss after this many ms
-        _FADE_MS = 600            # fade-out duration
+        def _draw_pieces():
+            live = {p["id"] for p in conf.pieces}
+            for piece_id in piece_ids.keys() - live:
+                canvas.delete(piece_ids.pop(piece_id))
+            for p in conf.pieces:
+                pid = piece_ids.get(p["id"])
+                if pid is None:
+                    make = canvas.create_oval if p["round"] else canvas.create_polygon
+                    pid = make(*update_card.Confetti.shape(p), fill=p["colour"], outline="")
+                    piece_ids[p["id"]] = pid
+                canvas.coords(pid, *update_card.Confetti.shape(p))
+                alpha = update_card.Confetti.opacity(p)
+                if alpha < 1:
+                    from PIL import ImageColor
+                    rgb = ImageColor.getrgb(p["colour"])
+                    base = ImageColor.getrgb(update_card.SURFACE)
+                    fade = tuple(round(a * alpha + b * (1 - alpha)) for a, b in zip(rgb, base))
+                    canvas.itemconfigure(pid, fill="#%02x%02x%02x" % fade)
 
-        def _spawn():
-            """Create the initial particle burst."""
-            cx = _CONFETTI_W / 2
-            cy = _CONFETTI_H * 0.38
-            for i in range(_N_PARTICLES):
-                angle = random.uniform(-3.1, 3.1)  # upward-biased burst
-                speed = random.uniform(80, 320)
-                sz = random.choice((6, 8, 10, 12))
-                rnd = random.choice(_COLOURS)
-                pid = canvas.create_rectangle(
-                    0, 0, sz, sz, fill=rnd, outline="")
-                # Slight x-offset so not all explode from exact centre
-                sx = cx + random.uniform(-30, 30)
-                sy = cy + random.uniform(-10, 10)
-                particles[pid] = {
-                    "x": sx, "y": sy,
-                    "vx": speed * math.cos(angle) * 0.6,
-                    "vy": speed * math.sin(angle) - random.uniform(100, 240),
-                    "colour": rnd,
-                    "size": sz,
-                    "rotation": random.uniform(0, 360),
-                    "spin": random.uniform(-360, 360),
-                }
+        clock = {"t": time.perf_counter()}
 
-        import math  # noqa: E402 — lazy so we only import when called
+        def _tick():
+            try:
+                # Real elapsed time, not the frame target: a see-through window
+                # repaints at ~25-40 ms a frame, and a fixed step made the
+                # burst crawl in slow motion behind the card.
+                now = time.perf_counter()
+                dt = min(0.1, max(0.001, now - clock["t"]))
+                clock["t"] = now
+                active = conf.step(dt)
+                _draw_pieces()
+                if active and not state["closing"]:
+                    pop.after(_FRAME_MS, _tick)
+            except tk.TclError:
+                pass
 
-        def _step():
-            """Advance one physics tick."""
-            dt = 1.0 / 30.0  # ~30 fps
-            alive = False
-            for pid, p in list(particles.items()):
-                p["vy"] += _GRAVITY * dt
-                p["vx"] *= _DRAG
-                p["vy"] *= _DRAG
-                p["x"] += p["vx"] * dt
-                p["y"] += p["vy"] * dt
-                p["rotation"] += p["spin"] * dt
-                sz = p["size"]
-                # Keep on-screen with bounce off edges
-                if p["x"] < -sz or p["x"] > _CONFETTI_W + sz:
-                    p["vx"] *= -0.5
-                if p["y"] < -sz * 3:
-                    p["vy"] *= -0.3
-                if p["y"] > _CONFETTI_H + sz:
-                    # Fell off bottom — hide but keep in dict (simple cull)
-                    try:
-                        canvas.coords(pid, -999, -999, -998, -998 + sz)
-                    except tk.TclError:
-                        pass
-                    continue
-                alive = True
-                # Draw as rotated rectangle (simple AABB approximation —
-                # the confetti is small enough that true rotation looks
-                # fine without affine transforms)
-                canvas.coords(pid, p["x"], p["y"],
-                              p["x"] + sz, p["y"] + sz)
-            if alive:
-                pop.after(33, _step)
+        def _dismiss(_ev=None):
+            if state["closing"]:
+                return
+            state["closing"] = True
 
-        # ── Content card (centre of the canvas) ─────────────────────────
-        card_frame = tk.Frame(canvas, bg=C["surface"],
-                               highlightbackground=C["border"],
-                               highlightthickness=1)
-        # Will be placed by <Configure> once geometry is known
-
-        inner_pad = 28
-        content = tk.Frame(card_frame, bg=C["surface"])
-
-        # ✓ icon circle
-        check_size = 44
-        check_canvas = tk.Canvas(content, width=check_size, height=check_size,
-                                 bg=C["surface"], highlightthickness=0)
-        check_canvas.pack(pady=(inner_pad - 4, 10))
-        _cr = check_size // 2 - 1
-        _cx = _cy = check_size // 2
-        check_canvas.create_oval(
-            4, 4, check_size - 4, check_size - 4,
-            fill="#1a3d1e", outline=C["success"], width=2)
-        # Tick mark
-        check_canvas.create_line(
-            _cx - 10, _cy, _cx - 3, _cy + 8,
-            fill=C["success"], width=3, capstyle="round", joinstyle="round")
-        check_canvas.create_line(
-            _cx - 3, _cy + 8, _cx + 12, _cy - 9,
-            fill=C["success"], width=3, capstyle="round", joinstyle="round")
-
-        tk.Label(
-            content, text=f"Updated to v{new_version}",
-            fg=C["text"], bg=C["surface"],
-            font=("Segoe UI Semibold", 15),
-        ).pack()
-        tk.Label(
-            content,
-            text=(f"{product_name} is up to date."
-                  if not prev_version else
-                  f"Previously v{prev_version}. All set."),
-            fg=C["subtext"], bg=C["surface"],
-            font=("Segoe UI", 10),
-        ).pack(pady=(4, 0))
-
-        btn_bar = tk.Frame(content, bg=C["surface"])
-        btn_bar.pack(pady=(18, inner_pad - 6))
-
-        got_it = tk.Label(
-            btn_bar, text="Got it ✨", fg=C["accent"], bg=C["surface"],
-            font=("Segoe UI", 10, "bold"), cursor="hand2",
-        )
-        got_it.pack()
-        content.pack()
-
-        # ── Placement & lifecycle ───────────────────────────────────────
-        screen_w = root.winfo_screenwidth()
-        screen_h = root.winfo_screenheight()
-        x = (screen_w - _CONFETTI_W) // 2
-        y = (screen_h - _CONFETTI_H) // 2
-        pop.geometry(f"{_CONFETTI_W}x{_CONFETTI_H}+{x}+{y}")
-
-        def _place_card(_ev=None):
-            canvas.create_window(
-                _CONFETTI_W // 2, _CONFETTI_H // 2,
-                window=card_frame, anchor="center")
-
-        def _dismiss():
-            """Fade out and destroy."""
             def _fade(a):
                 try:
-                    a -= 0.08
+                    a -= 0.1
                     if a <= 0:
                         pop.destroy()
                         return
-                    pop.attributes("-alpha", max(0.0, a))
-                    pop.after(20, _fade, a)
+                    pop.attributes("-alpha", a)
+                    pop.after(16, _fade, a)
                 except tk.TclError:
                     pass
             _fade(1.0)
 
-        def _on_click(_ev):
+        def _auto_dismiss():
+            # Held while the pointer rests on the card, so it never vanishes
+            # while someone is reading it.
+            if state["over_card"]:
+                try:
+                    pop.after(1500, _auto_dismiss)
+                except tk.TclError:
+                    pass
+                return
             _dismiss()
 
-        # Wire dismiss
-        got_it.bind("<Button-1>", _on_click)
-        pop.bind("<Button-1>", _on_click)
-        canvas.bind("<Button-1>", _on_click)
+        def _on_motion(ev):
+            on_btn = bx0 <= ev.x <= bx1 and by0 <= ev.y <= by1
+            state["over_card"] = True
+            if on_btn != state["hover"]:
+                state["hover"] = on_btn
+                canvas.itemconfigure(card_id, image=imgs[on_btn])
+                canvas.configure(cursor="hand2" if on_btn else "")
 
-        # Show (fade in)
+        def _on_leave(_ev):
+            state["over_card"] = False
+            if state["hover"]:
+                state["hover"] = False
+                canvas.itemconfigure(card_id, image=imgs[False])
+                canvas.configure(cursor="")
+
+        canvas.bind("<Motion>", _on_motion)
+        canvas.bind("<Leave>", _on_leave)
+        canvas.bind("<Button-1>", _dismiss)
+        pop.bind("<Escape>", _dismiss)
+
+        screen_w = root.winfo_screenwidth()
+        screen_h = root.winfo_screenheight()
+        pop.geometry(f"{cw}x{ch}"
+                     f"+{(screen_w - cw) // 2}+{(screen_h - ch) // 2}")
         pop.update_idletasks()
-        _place_card()
         try:
             from popup import _apply_popup_corners
             _apply_popup_corners(pop.winfo_id())
-        except Exception:
-            pass
+        except (ImportError, OSError, tk.TclError) as exc:
+            import logging
+            logging.getLogger(__name__).warning("Popup corner rounding unavailable: %s", exc)
 
-        def _fadeIn(a):
+        def _fade_in(a):
             try:
-                a = min(1.0, a + 0.12)
+                if state["closing"]:
+                    return
+                a = min(1.0, a + 0.14)
                 pop.attributes("-alpha", a)
                 if a < 1.0:
-                    pop.after(18, _fadeIn, a)
-                else:
-                    # Start confetti once visible
-                    _spawn()
-                    pop.after(200, _step)
-                    pop.after(_DISMISS_MS, _dismiss)
+                    pop.after(16, _fade_in, a)
             except tk.TclError:
                 pass
 
-        _fadeIn(0.0)
+        _fade_in(0.0)
+        _draw_pieces()
+        pop.after(_FRAME_MS, _tick)
+        pop.after(_DISMISS_MS, _auto_dismiss)
 
     # ── Auth callbacks ────────────────────────────────────────────────────────
 
