@@ -2184,8 +2184,12 @@ class WhisperFlowApp:
             roles = job_vocab.effective_roles(self.config, email)
             user_terms = [e.get("term") for e in self._user_entries("vocabulary")
                           if isinstance(e, dict)]
+            # CRM names only while the CRM-names switch is on: turning it off
+            # must take them out of every correction path, this one included.
+            crm = (list(getattr(self, "_estate_terms", None) or [])
+                   if getattr(self.config, "managed_vocab", True) else [])
             return vocab_context.block(
-                text, user_terms, list(getattr(self, "_estate_terms", None) or []),
+                text, user_terms, crm,
                 job_vocab.terms_for(roles, email),
                 job_vocab.job_line(self.config, email))
         except Exception as e:

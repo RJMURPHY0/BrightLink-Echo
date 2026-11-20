@@ -216,8 +216,8 @@ class Config:
     snippets: dict = field(default_factory=dict)
     vocab_fuzzy: bool = True  # Phonetic safety net: auto-correct close mishearings of a vocabulary term ("vercell" -> "Vercel") the user hasn't listed. Kill switch only; the exact sounds_like path is unaffected when off
     learned_phrases: bool = True  # Learn the phrases you actually repeat and boost them back: a phrase said enough times, always heard confidently, is remembered and used to rescue the next low-confidence span that sounds like it. Local to this machine and this account; kill switch only — turning it off stops both the learning and the correcting, the stored list is kept
-    work_roles: list = field(default_factory=list)  # Settings > Vocabulary > Your work: job_vocab.PACKS ids the user ticked. Empty = no job words (a BrightLink team account gets job_vocab.BRIGHTLINK_TEAM_DEFAULT until it ticks its own)
-    work_description: str = ""  # "What do you do?" in the user's own words; given to the AI accuracy check only, never a decoder prompt
+    work_roles: dict = field(default_factory=dict)  # Learning > Your Work, per account (vocab_store.account_key -> job_vocab.PACKS ids ticked). Missing = never chose (a BrightLink team account gets job_vocab.BRIGHTLINK_TEAM_DEFAULT). Per account like vocabulary, and not in Cloud Sync's preferences, so one account's work never reaches another's prompts
+    work_description: dict = field(default_factory=dict)  # Same keys: "What do you do?" in the user's own words; given to the AI accuracy check only, never a decoder prompt
     managed_vocab: bool = True  # Correct names synced from the CRM (contacts, companies) as well as the user's own vocabulary. Separate switch from vocab_fuzzy because the two fail for unrelated reasons: a bad CRM sync must not cost the user the safety net on their own words
     supabase_url: str = ""  # Optional — enables transcription logging
     supabase_key: str = ""  # Publishable (anon) key

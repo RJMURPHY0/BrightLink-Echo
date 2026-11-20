@@ -92,7 +92,7 @@ def _wait(cond, timeout=3.0):
 
 class Fixer(unittest.TestCase):
     def _fixer(self, ref, **kw):
-        f = sf.SpeculativeFixer(ref, lambda t: "Names: Claude.", **kw)
+        f = sf.SpeculativeFixer(ref, lambda t: vocab_context.LIST_MARK + "Claude.", **kw)
         f.MIN_GAP = 0.0
         self.addCleanup(f.stop)
         return f
@@ -109,7 +109,7 @@ class Fixer(unittest.TestCase):
         self.assertEqual((n, hit, total), (1, 2, 3))
         # The unfinished last sentence was never sent.
         self.assertNotIn("And then", ref.fix_calls[0][0])
-        self.assertEqual(ref.fix_calls[0][1], "Names: Claude.")
+        self.assertEqual(ref.fix_calls[0][1], vocab_context.LIST_MARK + "Claude.")
 
     def test_only_swaps_into_a_listed_name_are_applied(self):
         class _Wild(_FakeRefiner):
@@ -117,7 +117,8 @@ class Fixer(unittest.TestCase):
                 self.fix_calls.append((text, names))
                 return text.replace("clawed", "Claude").replace("moon", "mood")
         ref = _Wild()
-        f = sf.SpeculativeFixer(ref, lambda t: "Names: Claude, ChatGPT.", paragraphs=False)
+        f = sf.SpeculativeFixer(ref, lambda t: vocab_context.LIST_MARK + "Claude; ChatGPT.",
+                                paragraphs=False)
         f.MIN_GAP = 0.0
         self.addCleanup(f.stop)
         f.feed("I asked clawed about the moon tonight. Then")
@@ -126,6 +127,14 @@ class Fixer(unittest.TestCase):
         out, n, _h, _t = f.apply_fixes("I asked clawed about the moon tonight. Then we left.")
         self.assertEqual(out, "I asked Claude about the moon tonight. Then we left.")
         self.assertEqual(n, 1)
+
+    def test_words_in_the_blocks_own_wording_are_not_names(self):
+        # Review 2026-11-20: "there" -> "here" passed because the header says
+        # "written here".
+        block = vocab_context.block("memory and clawed put it there")
+        self.assertTrue(sf._is_listed(["Claude"], block))
+        self.assertFalse(sf._is_listed(["here"], block))
+        self.assertFalse(sf._is_listed(["exactly"], block))
 
     def test_release_never_waits_for_a_call_in_flight(self):
         ref = _FakeRefiner(delay=1.5)
@@ -208,6 +217,18 @@ class NamesBlock(unittest.TestCase):
     def test_sound_alike_list_pulls_its_name_in(self):
         self.assertIn("Hermes", vocab_context.block("the homies cloud agent"))
 
+    def test_part_of_a_longer_name_counts_when_the_rest_is_beside_it(self):
+        b = vocab_context.block("john smit", ["John Smith"])
+        (sw,) = sf.derive_swaps("I called John Smit yesterday", "I called John Smith yesterday")
+        self.assertTrue(sf._is_listed(sw.new, b, sw.left, sw.right))
+        self.assertFalse(sf._is_listed(["Smith"], b, "the", "said"))
+
+    def test_a_name_with_a_comma_stays_one_name(self):
+        # Review 2026-11-20: "Smith, Jones & Co" became two listed names.
+        b = vocab_context.block("smith jones", ["Smith, Jones & Co"])
+        self.assertIn("Smith, Jones & Co", vocab_context.listed_names(b))
+        self.assertFalse(sf._is_listed(["Smith"], b))
+
     def test_block_fits_the_relay(self):
         many = [f"Name{i} Person{i}" for i in range(3000)]
         b = vocab_context.block("name person " * 50, crm_names=many)
@@ -227,12 +248,26 @@ class JobWords(unittest.TestCase):
         self.assertEqual(job_vocab.apply_job_casing(prose, list(job_vocab.PACKS)), prose)
 
     def test_team_default_and_an_explicit_none(self):
-        cfg = SimpleNamespace(work_roles=[], work_description="")
+        cfg = SimpleNamespace(work_roles={}, work_description={})
         self.assertEqual(job_vocab.effective_roles(cfg, "a@brightlink.io"),
                          list(job_vocab.BRIGHTLINK_TEAM_DEFAULT))
         self.assertEqual(job_vocab.effective_roles(cfg, "a@gmail.com"), [])
-        cfg.work_roles = [job_vocab.NONE_CHOSEN]
+        cfg.work_roles = job_vocab.with_mine(cfg, "work_roles", "a@brightlink.io",
+                                             [job_vocab.NONE_CHOSEN])
         self.assertEqual(job_vocab.effective_roles(cfg, "a@brightlink.io"), [])
+
+    def test_work_details_belong_to_one_account(self):
+        # Review 2026-11-20: one account's description reached another's prompts.
+        cfg = SimpleNamespace(work_roles={}, work_description={})
+        cfg.work_roles = job_vocab.with_mine(cfg, "work_roles", "a@x.com", ["legal"])
+        cfg.work_description = job_vocab.with_mine(cfg, "work_description", "a@x.com",
+                                                   "Partner at a law firm")
+        self.assertEqual(job_vocab.effective_roles(cfg, "b@y.com"), [])
+        self.assertEqual(job_vocab.job_line(cfg, "b@y.com"), "")
+        self.assertIn("law firm", job_vocab.job_line(cfg, "A@X.com"))
+        import cloud_sync
+        self.assertNotIn("work_roles", cloud_sync.SYNCED_SETTINGS)
+        self.assertNotIn("work_description", cloud_sync.SYNCED_SETTINGS)
 
     def test_every_pack_is_sizeable_and_labelled(self):
         for rid, (label, terms) in job_vocab.PACKS.items():
@@ -242,8 +277,8 @@ class JobWords(unittest.TestCase):
     def test_config_defaults_exist(self):
         from config import Config
         c = Config()
-        self.assertEqual(c.work_roles, [])
-        self.assertEqual(c.work_description, "")
+        self.assertEqual(c.work_roles, {})
+        self.assertEqual(c.work_description, {})
 
 
 if __name__ == "__main__":

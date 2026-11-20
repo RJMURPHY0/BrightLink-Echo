@@ -1016,8 +1016,10 @@ class AIRefiner:
         if len(text.split()) < 4:
             return text
         self.last_relay_error = ""
-        result = self.refine(text, mode="context_fix",
-                             user_context=(names or None))
+        if names:
+            result = self.refine(text, mode="context_fix", user_context=names)
+        else:
+            result = self.refine(text, mode="context_fix")
         if result == text:
             return text
         # Structural guard, not just a prompt instruction: context_fix runs in

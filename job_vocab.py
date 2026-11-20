@@ -237,10 +237,32 @@ def _team_account(email: str) -> bool:
     return e.endswith("@brightlink.io") or e.endswith("@ftc-ss.com")
 
 
+def _account(email: str) -> str:
+    import vocab_store
+    return vocab_store.account_key(email)
+
+
+def _mine(config, field_name: str, email: str):
+    """This account's value of a per-account work field, or None."""
+    v = getattr(config, field_name, None)
+    if isinstance(v, dict):
+        return v.get(_account(email))
+    return None
+
+
+def with_mine(config, field_name: str, email: str, value) -> dict:
+    """A copy of the field's per-account dict with this account's value set,
+    ready to hand to the settings change handler."""
+    v = getattr(config, field_name, None)
+    out = dict(v) if isinstance(v, dict) else {}
+    out[_account(email)] = value
+    return out
+
+
 def effective_roles(config, email: str = "") -> list:
     """The user's ticked jobs; a BrightLink team account that ticked none gets
     the team default, everyone else nothing."""
-    raw = list(getattr(config, "work_roles", None) or [])
+    raw = list(_mine(config, "work_roles", email) or [])
     if raw:
         # Anything stored means the user chose; NONE_CHOSEN is "I ticked
         # nothing", which must not bring the team default back.
@@ -339,7 +361,7 @@ def job_line(config, email: str = "") -> str:
     when nothing is known. The pack's words go in vocab_context.block, which
     keeps only the ones that bear on the text."""
     roles = effective_roles(config, email)
-    desc = " ".join((getattr(config, "work_description", "") or "").split())[:300]
+    desc = " ".join(str(_mine(config, "work_description", email) or "").split())[:300]
     parts = []
     if roles:
         parts.append("The speaker works in: " + ", ".join(label(r) for r in roles) + ".")

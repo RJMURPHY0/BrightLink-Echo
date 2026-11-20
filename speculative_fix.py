@@ -92,14 +92,32 @@ def derive_swaps(before: str, after: str) -> list:
     return out
 
 
-def _is_listed(words, names_block: str) -> bool:
-    """Whether the swapped-in words are one of the names handed to the check
-    (case-insensitive, whole words)."""
-    phrase = " ".join(words).strip()
+def _is_listed(words, names_block: str, left=None, right=None) -> bool:
+    """Whether the swapped-in words are exactly one of the NAMES handed to the
+    check: only the comma-separated list after vocab_context.LIST_MARK, never
+    the block's own wording (a search of the whole block let "there" ->
+    "here" through because the header says "written here", review
+    2026-11-20)."""
+    phrase = " ".join(words).strip().lower()
     if not phrase or not names_block:
         return False
-    return re.search(rf"(?<![\w]){re.escape(phrase)}(?![\w])", names_block,
-                     re.IGNORECASE) is not None
+    import vocab_context
+    names = [n.lower() for n in vocab_context.listed_names(names_block)]
+    if phrase in names:
+        return True
+    # Part of a longer name, with the rest of that name right beside it:
+    # "John Smit" -> "John Smith" swaps only "Smith" (review 2026-11-20).
+    new = [_bare(w) for w in words]
+    for n in names:
+        parts = [_bare(w) for w in n.split()]
+        k = len(new)
+        for i in range(len(parts) - k + 1):
+            if parts[i:i + k] != new:
+                continue
+            if (i > 0 and left == parts[i - 1]) or (
+                    i + k < len(parts) and right == parts[i + k]):
+                return True
+    return False
 
 
 def apply_swaps(text: str, swaps) -> tuple:
@@ -230,7 +248,7 @@ class SpeculativeFixer:
                     # "mood"); those stay the pop-up offer's job, where the
                     # user decides.
                     swaps = [w for w in derive_swaps(batch, fixed)
-                             if _is_listed(w.new, names)]
+                             if _is_listed(w.new, names, w.left, w.right)]
                     with self._lock:
                         self._swaps.extend(swaps)
                     if swaps:

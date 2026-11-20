@@ -18,6 +18,10 @@ import re
 import common_terms
 
 MAX_CHARS = 2200
+# The line holding the names list; speculative_fix reads the names back from
+# it, and only from it.
+LIST_MARK = ("Names and work words this speaker uses. Spell them exactly as "
+             "written here: ")
 _WORD = re.compile(r"[A-Za-z][A-Za-z0-9'&.-]*")
 
 
@@ -74,19 +78,20 @@ def block(text: str, user_terms=(), crm_names=(), job_terms=(),
             add(t)
     if not picked and not job_line:
         return ""
-    head = ("Names and work words this speaker uses. Spell them exactly as "
-            "written here: ")
+    head = LIST_MARK
     body, used = [], len(head) + len(job_line) + 2
     for t in picked:
         if used + len(t) + 2 > MAX_CHARS:
             break
-        body.append(t)
+        # "; " separates the names, so one may hold a comma ("Smith, Jones
+        # & Co") without splitting into names nobody listed.
+        body.append(t.replace(";", ","))
         used += len(t) + 2
     lines = []
     if job_line:
         lines.append(job_line)
     if body:
-        lines.append(head + ", ".join(body) + ".")
+        lines.append(head + "; ".join(body) + ".")
     # The known mishearings of the names in play, said plainly: with only the
     # list, the model left "short-term memory and clawed" alone (real-model
     # check, 2026-11-20). Only names whose sound-alike is in this text.
@@ -99,3 +104,11 @@ def block(text: str, user_terms=(), crm_names=(), job_terms=(),
         lines.append("Often misheard here: " + "; ".join(hints) + ". Use the name "
                      "only where the sentence means it.")
     return "\n".join(lines)
+
+def listed_names(block: str) -> list:
+    """The names in a block made by block(), and nothing else from it."""
+    for line in (block or "").splitlines():
+        if line.startswith(LIST_MARK):
+            body = line[len(LIST_MARK):].rstrip(".")
+            return [n.strip() for n in body.split("; ") if n.strip()]
+    return []

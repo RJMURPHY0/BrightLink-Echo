@@ -42,7 +42,7 @@ _NAMES = [
     (r"claude[ \t]ai", "Claude AI"),
     (r"(?:wispr|whisper)[ \t]?flow", "Wispr Flow"),
     (r"notebook[ \t]?lm", "NotebookLM"),
-    (r"open[ \t]?router", "OpenRouter"),
+    (r"openrouter", "OpenRouter"),        # "open router settings"
     (r"perplexity[ \t]ai", "Perplexity AI"),
     (r"(?:github|git[ \t]hub)[ \t]co[ \t-]?pilot", "GitHub Copilot"),
     (r"microsoft[ \t]co[ \t-]?pilot", "Microsoft Copilot"),
@@ -87,16 +87,16 @@ _NAMES = [
     (r"hub[ \t]?spot", "HubSpot"),
     (r"salesforce", "Salesforce"),
     (r"pipe[ \t]?drive", "Pipedrive"),
-    (r"quick[ \t]?books", "QuickBooks"),
+    (r"quickbooks", "QuickBooks"),        # "quick books to read"
     (r"xero", "Xero"),
     (r"docu[ \t]?sign", "DocuSign"),
     (r"mail[ \t]?chimp", "Mailchimp"),
     (r"zapier", "Zapier"),
     (r"air[ \t]?table", "Airtable"),
     (r"zen[ \t]?desk", "Zendesk"),
-    (r"fresh[ \t]?desk", "Freshdesk"),
+    (r"freshdesk", "Freshdesk"),          # "a fresh desk"
     (r"survey[ \t]?monkey", "SurveyMonkey"),
-    (r"type[ \t]?form", "Typeform"),
+    (r"typeform", "Typeform"),            # "type form A" is a sentence
     (r"calendly", "Calendly"),
     (r"canva", "Canva"),
     (r"figma", "Figma"),
@@ -127,7 +127,9 @@ _NAMES = [
     (r"postgres(?:ql)?", None),
     (r"supabase|supa[ \t]base", "Supabase"),
     (r"vercel", "Vercel"),
-    (r"local[ \t]host(?![ \t]+(?:family|families|community|communities|town|city|club|clubs|team|teams|nation|country)\b)", "localhost"),
+    # "local host" is also a person ("our local host welcomed us"): only next
+    # to a word that makes it the address. The AI check has the rest.
+    (r"local[ \t]host(?=[ \t]*(?:[:?!,]|\.(?!\w)|$)|[ \t]+(?:or|and|so|that|which|server|url|address|page|link|port|instance|preview|build|site|app|\d|(?:zero|one|two|three|four|five|six|seven|eight|nine)\b))", "localhost"),
     (r"node[ \t]?js|node[ \t]dot[ \t]js", "Node.js"),
     (r"next[ \t]?js|next[ \t]dot[ \t]js", "Next.js"),
     (r"vs[ \t]code|v[ \t]s[ \t]code", "VS Code"),

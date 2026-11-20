@@ -52,8 +52,9 @@ def main() -> int:
     cfg = config_mod.Config()
     cfg.save = lambda *a, **k: None
     cfg.save_async = lambda *a, **k: None
-    cfg.work_roles = roles
-    cfg.work_description = "Co-founder of a SaaS company, health and safety background"
+    cfg.work_roles = {"check@example.com": roles}
+    cfg.work_description = {"check@example.com":
+                            "Co-founder of a SaaS company, health and safety background"}
     auth = _FakeAuth()
     aw._input_idle_ms = lambda: 10 ** 6
     win = aw.AppWindow(auth=auth, on_authenticated=lambda *_a: None,

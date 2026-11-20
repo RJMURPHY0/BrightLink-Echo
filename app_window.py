@@ -9381,7 +9381,9 @@ class AppWindow:
         def _save() -> None:
             roles = [r for r in job_vocab.ROLE_IDS if r in picked]
             if self._on_settings_change:
-                self._on_settings_change("work_roles", roles or [job_vocab.NONE_CHOSEN])
+                self._on_settings_change("work_roles", job_vocab.with_mine(
+                    cfg, "work_roles", self._account_email(),
+                    roles or [job_vocab.NONE_CHOSEN]))
 
         def _paint(rid: str) -> None:
             box = self._work_ticks.get(rid)
@@ -9401,7 +9403,25 @@ class AppWindow:
                     box.create_image(11, 11, image=mark, anchor="center")
                     box._mark = mark
 
+        def _reload(_e=None) -> None:
+            """Re-read the signed-in account's choice. The card can be built
+            before a saved session is restored, so the account it was built
+            for is not necessarily the one using it (review 2026-11-20)."""
+            nonlocal email
+            email = self._account_email()
+            picked.clear()
+            picked.update(job_vocab.effective_roles(cfg, email) if cfg else ())
+            for r in job_vocab.ROLE_IDS:
+                _paint(r)
+            if "var" in state:
+                cur = str(job_vocab._mine(cfg, "work_description", email) or "")
+                if cur != state["saved"] and self._root.focus_get() is not state.get("entry"):
+                    state["saved"] = cur
+                    state["var"].set(cur)
+
         def _flip(rid: str) -> None:
+            if email != self._account_email():
+                _reload()
             if rid in picked:
                 picked.discard(rid)
             else:
@@ -9427,7 +9447,8 @@ class AppWindow:
         tk.Label(card, text="What do you do? (optional)", fg=C["subtext"],
                  bg=C["surface"], font=("Segoe UI", 8), anchor="w").pack(
                      fill="x", pady=(10, 3))
-        var = tk.StringVar(value=(getattr(cfg, "work_description", "") or "") if cfg else "")
+        var = tk.StringVar(value=str(job_vocab._mine(cfg, "work_description", email) or "")
+                           if cfg else "")
         # The frame carries the outline and the inner padding (tk.Entry has
         # none of its own, so the text sat against the edge).
         well = tk.Frame(card, bg=C["input_bg"], highlightthickness=1,
@@ -9442,7 +9463,9 @@ class AppWindow:
         entry.bind("<FocusOut>", lambda _e: well.configure(
             highlightbackground=C["border"]), add="+")
         self._work_entry = entry
-        state = {"job": None, "saved": var.get()}
+        state = {"job": None, "saved": var.get(), "var": var, "entry": entry}
+        # Each time Learning is shown, the card shows the signed-in account.
+        card.bind("<Map>", _reload, add="+")
 
         def _commit(_e=None) -> None:
             if state["job"] is not None:
@@ -9456,7 +9479,8 @@ class AppWindow:
                 return
             state["saved"] = text
             if self._on_settings_change:
-                self._on_settings_change("work_description", text)
+                self._on_settings_change("work_description", job_vocab.with_mine(
+                    cfg, "work_description", self._account_email(), text))
 
         def _typed(_e=None) -> None:
             if state["job"] is not None:
