@@ -159,6 +159,23 @@ class CommentaryGuardTests(unittest.TestCase):
         self.assertEqual(strip_commentary(said, "Here is the edited version:\nFoo."),
                          "Here is the edited version:\nFoo.")
 
+    def test_a_dictated_wait_line_survives_its_new_full_stop(self):
+        # 2026-11-20 audit: refine added the missing full stop, the line no
+        # longer matched the original exactly, and it was cut as self-talk
+        # along with everything above it.
+        said = ("The first load is ready.\nWait until the updated invoice "
+                "arrives\nThen send both together.")
+        out = ("The first load is ready.\nWait until the updated invoice "
+               "arrives.\nThen send both together.")
+        self.assertEqual(strip_commentary(said, out), out)
+        out2 = "Hi Sam,\nWait for the revised quote before you order.\nThanks"
+        self.assertEqual(strip_commentary("x", out2), out2)
+
+    def test_a_said_preamble_survives_a_punctuation_change(self):
+        said = "here is the edited version\nfoo"
+        self.assertEqual(strip_commentary(said, "Here is the edited version:\nFoo."),
+                         "Here is the edited version:\nFoo.")
+
     def test_nothing_is_cut_when_no_answer_follows(self):
         out = "Hello.\nThe corrected version:"
         self.assertEqual(strip_commentary("x", out), out)

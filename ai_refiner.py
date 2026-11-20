@@ -156,9 +156,13 @@ _EDIT_WORD = (r"(?:correct\w*|edit\w*|revis\w*|rewrit\w*|refin\w*|polish\w*|"
 # Self-talk anywhere: "Wait: ... should be removed ... version:" or a bare
 # "The corrected version:" line. Only lines that talk about editing count,
 # so a dictated "Wait for me at the station." is never taken for one.
+# The model's "Wait" is self-talk: "Wait:" / "Wait," / "Wait -" opens it.
+# A dictated "Wait until the updated invoice arrives" has no mark after the
+# word and must never be cut (2026-11-20 audit: refine adding its full stop
+# deleted that line and everything above it).
 _COMMENTARY_LINE = re.compile(
     r"(?im)^[ \t]*(?:"
-    r"wait\b[^\n]*\b" + _EDIT_WORD + r"\b[^\n]*"
+    r"wait[ \t]*[:,\-][^\n]*\b" + _EDIT_WORD + r"\b[^\n]*"
     r"|(?:the )?(?:corrected|edited|revised|rewritten|refined|updated|final|"
     r"improved|polished) (?:version|text|email|message|prompt)[ \t]*:"
     r")[ \t]*$")
@@ -166,6 +170,17 @@ _COMMENTARY_LINE = re.compile(
 _PREAMBLE_LINE = re.compile(
     r"(?i)^[ \t]*(?:sure|certainly|of course)?[,!. \t]*"
     r"(?:here(?: is|'s)|below is)\b[^\n]*\b" + _EDIT_WORD + r"\b[^\n]*:[ \t]*\r?\n")
+
+
+def _words(text: str) -> str:
+    """Lower-case words only, single-spaced and padded, so a line the speaker
+    said still matches after the model changed its punctuation or casing."""
+    return " " + " ".join(re.findall(r"[a-z0-9']+", (text or "").lower())) + " "
+
+
+def _was_said(line: str, said_words: str) -> bool:
+    words = _words(line)
+    return words.strip() != "" and words in said_words
 
 
 def strip_commentary(original: str, out: str) -> str:
@@ -178,13 +193,13 @@ def strip_commentary(original: str, out: str) -> str:
     if no answer follows."""
     if not out:
         return out
-    said = (original or "").lower()
+    said = _words(original)
     m = _PREAMBLE_LINE.match(out)
-    if m and m.group(0).strip().lower() not in said and out[m.end():].strip():
+    if m and not _was_said(m.group(0), said) and out[m.end():].strip():
         out = out[m.end():].lstrip("\r\n")
     last = None
     for m in _COMMENTARY_LINE.finditer(out):
-        if m.group(0).strip().lower() not in said:
+        if not _was_said(m.group(0), said):
             last = m
     if last is None:
         return out

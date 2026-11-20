@@ -1040,7 +1040,7 @@ def build_habit_index(habits: dict) -> dict:
 
 
 def apply_habits(text: str, habits: dict, word_conf=None, index=None,
-                 forgotten=()) -> str:
+                 forgotten=(), heard=None) -> str:
     """Repair one slipped word inside a phrase this person says all the time.
 
     `habits` is PhraseStore.habit_counts(), `index` its habit_index() (built
@@ -1064,6 +1064,12 @@ def apply_habits(text: str, habits: dict, word_conf=None, index=None,
     repair: an alignment that lost the thread must not guess. A repair that
     would spell out a phrase in `forgotten` (PhraseStore.forgotten_norms) is
     refused: Forget means the app stops producing it, by any route.
+
+    `heard`, when a list, receives (window text, its confidences) for every
+    window repaired although its odd word was heard SURELY: the caller counts
+    what was really said, so a variant the person truly says ("pushed to me")
+    builds up its own count and stops being repaired. Counted only after the
+    repair, it never got one (2026-11-20 audit).
     """
     if not text or not habits:
         return text
@@ -1156,9 +1162,12 @@ def apply_habits(text: str, habits: dict, word_conf=None, index=None,
                         if any(f" {f} " in padded for f in forgotten):
                             continue
                     if best is None or count > best[0]:
-                        best = (count, i + j, target)
+                        best = (count, i + j, target, c)
             if best is not None:
-                _count, at, target = best
+                _count, at, target, c_said = best
+                if heard is not None and c_said >= LEARN_CONF:
+                    heard.append((text[tokens[i].start():tokens[end - 1].end()],
+                                  conf[i:end]))
                 tok = tokens[at]
                 replacements.append(
                     (tok.start(), tok.end(), _recase(target, text, tok.start())))

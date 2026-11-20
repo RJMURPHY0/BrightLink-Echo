@@ -3649,8 +3649,10 @@ class AppWindow:
 
         # Same reason: phrases are learned in the background, so the list on
         # arrival must be what the store holds NOW, not what it held last visit.
+        # Rebuilt only when something did change: rebuilding an unchanged
+        # list cost 40-270ms of every visit (measured 2026-11-20).
         if name == "phrases":
-            self._render_phrases()
+            self._render_phrases(if_changed=True)
 
         # Map/unmap, not just a z-order raise: an unmapped window has NO
         # pixels on screen, so a hidden tab structurally cannot bleed through
@@ -3686,9 +3688,22 @@ class AppWindow:
                         self._update_check_btn.bind("<Button-1>", self._do_update_check)
             elif name == "learning":
                 self._refresh_library_counts()
+            elif name == "history" and (
+                    self._history_pending_render
+                    or getattr(self, "_hist_first_job", None) is not None):
+                # Dictations that landed while another page was open, or the
+                # first visit's list (queued by the canvas getting its width
+                # during this swap): drawn behind the cover, so the page
+                # arrives current in one frame instead of the cover dropping
+                # on the old or empty list (2026-11-20). Still pending (canvas
+                # not laid out yet) falls through to the timer below.
+                self._cancel_after(getattr(self, "_hist_first_job", None))
+                self._hist_first_job = None
+                self._history_pending_render = False
+                self._render_history()
             elif name in self._LIB_SPECS:
                 # Its own _atomic_ui joins this freeze (see _atomic_ui).
-                self._render_library(name)
+                self._render_library(name, if_changed=True)
 
         if name in tab_frames:
             def _swap():
@@ -3871,15 +3886,26 @@ class AppWindow:
             fn()                # inside an outer change: it presents for both
             return True
         cover = self._cover_page_change()
+        painted = None
         try:
             if cover is not None:
                 self._covered_ui(fn)
+                # Instant page changes (2026-11-20): left to Tk, the new page
+                # drew over the next 150-300ms of event-loop passes in bands,
+                # and the cover had to wait every one out (a click showed its
+                # page 300-950ms later). Painting it all here, before the
+                # click returns, means the window is finished the moment the
+                # handler ends, so one confirming read drops the cover.
+                if self._paint_now():
+                    painted = snapshot_cover.window_fingerprint(
+                        self._top_hwnd())
             else:
                 self._atomic_ui(fn)
         finally:
             if cover is not None:
                 self._drop_cover_when_drawn(cover, max_ms=_PAGE_COVER_MAX_MS,
-                                            poll_ms=_PAGE_COVER_POLL_MS)
+                                            poll_ms=_PAGE_COVER_POLL_MS,
+                                            painted=painted)
         return cover is not None
 
     # ── First visits ──────────────────────────────────────────────────────────
@@ -4104,7 +4130,8 @@ class AppWindow:
                 pass
 
     def _drop_cover_when_drawn(self, cover, max_ms: int = _COVER_MAX_MS,
-                               poll_ms: int = _COVER_POLL_MS) -> None:
+                               poll_ms: int = _COVER_POLL_MS,
+                               painted=None) -> None:
         """Close `cover` once the window behind it has stopped changing.
 
         "Tk is idle" is not enough: some of the dashboard draws from timers
@@ -4113,9 +4140,21 @@ class AppWindow:
         the cover goes once _COVER_STABLE_READS readings in a row match. A
         hard deadline (`max_ms`) closes it regardless, so it can never be
         left up. A later page change may take the cover over
-        (_cover_page_change), which ends this watch without closing it."""
+        (_cover_page_change), which ends this watch without closing it.
+
+        `painted` is the window's fingerprint taken right after _paint_now
+        finished the change: the page is already drawn, so the first read
+        (at the next idle, no timer wait) that still matches it drops the
+        cover. Anything that drew after it (a timer) falls back to the
+        stable-reads watch."""
         hwnd = self._top_hwnd()
         state = {"done": False, "last": None, "same": 0, "cover": cover}
+        need = _COVER_STABLE_READS
+        first_ms = poll_ms
+        if painted is not None:
+            state["last"] = painted
+            need = 1
+            first_ms = 0
         self._held_cover = state
 
         def _close():
@@ -4140,9 +4179,14 @@ class AppWindow:
             if fp is None:
                 _close()            # cannot tell: never hold the cover blind
                 return
-            state["same"] = state["same"] + 1 if fp == state["last"] else 0
+            if fp == state["last"]:
+                state["same"] += 1
+            else:
+                # Changed after the paint: wait for it to settle as before.
+                state["same"] = 0
+                state["need"] = _COVER_STABLE_READS
             state["last"] = fp
-            if state["same"] >= _COVER_STABLE_READS:
+            if state["same"] >= state.get("need", need):
                 _close()
                 return
             try:
@@ -4151,7 +4195,10 @@ class AppWindow:
                 _close()
 
         try:
-            self._root.after(poll_ms, _poll_when_idle)
+            if first_ms:
+                self._root.after(first_ms, _poll_when_idle)
+            else:
+                _poll_when_idle()
             self._root.after(max_ms, _close)
         except tk.TclError:
             _close()
@@ -8461,7 +8508,10 @@ class AppWindow:
             if (getattr(self, "_history_pending_render", False)
                     and event.width > 10):
                 self._history_pending_render = False
-                self._root.after(16, self._render_history)
+                # A page change drawing History runs this job itself behind
+                # its cover (_switch_dash_tab); the timer is for any other way.
+                self._hist_first_job = self._root.after(
+                    16, self._render_history_first)
             return
         old = getattr(self, "_hist_canvas_width", 0)
         self._hist_canvas_width = event.width
@@ -8474,6 +8524,10 @@ class AppWindow:
             except tk.TclError:
                 pass
         self._hist_resize_job = self._root.after(30, self._render_history)
+
+    def _render_history_first(self) -> None:
+        self._hist_first_job = None
+        self._render_history()
 
     def _on_history_click(self, event) -> None:
         if getattr(self, "_hist_clear_confirm", False):
@@ -10686,18 +10740,36 @@ class AppWindow:
 
     # ── List rendering ───────────────────────────────────────────────────────
 
-    def _render_library(self, kind: str) -> None:
+    @staticmethod
+    def _list_key(*parts) -> str:
+        """What a list page was drawn from, to tell whether a redraw would
+        change anything. Unserialisable values fall back to repr."""
+        try:
+            return json.dumps(parts, sort_keys=True, default=repr)
+        except Exception:
+            return repr(parts)
+
+    def _render_library(self, kind: str, if_changed: bool = False) -> None:
+        """Rebuild a library page's list. `if_changed`: keep the rows already
+        on screen when the entries, the open editor, the search text and the
+        error are exactly what they were drawn from (a page arrival)."""
         state = self._lib_state(kind)
         holder = state.get("list")
         if holder is None:
             return
         spec = self._LIB_SPECS[kind]
+        entries = self._lib_entries(kind)
+        key = self._list_key(entries, state.get("editing"),
+                             state.get("query", ""), state.get("error", ""))
+        if (if_changed and key == state.get("drawn_key")
+                and holder.winfo_children()):
+            self._usearch_filter_hits = state.get("drawn_hits", 0)
+            return
 
         def _draw():
             for child in holder.winfo_children():
                 child.destroy()
 
-            entries = self._lib_entries(kind)
             singular, plural = spec["unit"]
             n = len(entries)
             if state.get("count_lbl") is not None:
@@ -10711,6 +10783,8 @@ class AppWindow:
             shown = [e for e in entries
                      if self._lib_matches(kind, e, state.get("query", ""))]
             self._usearch_filter_hits = len(shown)
+            state["drawn_key"] = key
+            state["drawn_hits"] = len(shown)
 
             if not entries and editing != "new":
                 self._draw_library_empty(holder, kind)
@@ -11195,16 +11269,22 @@ class AppWindow:
         state["list"] = pane.content
         self._render_phrases()
 
-    def _render_phrases(self) -> None:
+    def _render_phrases(self, if_changed: bool = False) -> None:
         state = self._lib_state("phrases")
         holder = state.get("list")
         if holder is None:
+            return
+        rows = self._phrase_rows()
+        key = self._list_key(rows, state.get("query", ""),
+                             bool(getattr(self._config, "learned_phrases", True)))
+        if (if_changed and key == state.get("drawn_key")
+                and holder.winfo_children()):
+            self._usearch_filter_hits = state.get("drawn_hits", 0)
             return
 
         def _draw():
             for child in holder.winfo_children():
                 child.destroy()
-            rows = self._phrase_rows()
             n = len(rows)
             if state.get("count_lbl") is not None:
                 state["count_lbl"].configure(
@@ -11213,6 +11293,8 @@ class AppWindow:
             shown = [r for r in rows
                      if not query or query in (r.get("phrase") or "").lower()]
             self._usearch_filter_hits = len(shown)
+            state["drawn_key"] = key
+            state["drawn_hits"] = len(shown)
             if not rows:
                 self._draw_phrases_empty(holder)
                 return

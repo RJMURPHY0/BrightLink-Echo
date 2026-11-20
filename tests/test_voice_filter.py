@@ -711,6 +711,28 @@ class IsolationLifecycleTests(unittest.TestCase):
             self.assertEqual(vi.profile.count, 0, "A's voice joined B's voiceprint")
             self.assertFalse(vi.profile.seen)
 
+    def test_a_first_voiceprint_learns_only_this_accounts_dictations(self):
+        # 2026-11-20 audit: the audio folder is shared by every account on
+        # the PC, so a first voiceprint from "every saved dictation" could be
+        # another person's voice.
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in range(vf.MIN_ENROLL + 3):
+                self._wav(tmp, f"{i:04d}.wav", _voice(5, U_AMP))
+            mine = {f"{i:04d}.wav" for i in range(vf.MIN_ENROLL)}
+            vi = self._vi(tmp, owner=lambda: "user-b", log=lambda m: None)
+            vi._owned_fn = lambda: mine
+            self.assertEqual(vi.learn_once(), vf.MIN_ENROLL)
+            self.assertEqual(set(vi.profile.seen), mine)
+
+    def test_unreadable_history_learns_nothing_yet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in range(vf.MIN_ENROLL):
+                self._wav(tmp, f"{i:04d}.wav", _voice(5, U_AMP))
+            vi = self._vi(tmp, owner=lambda: "user-b", log=lambda m: None)
+            vi._owned_fn = lambda: None
+            self.assertEqual(vi.learn_once(), 0)
+            self.assertFalse(vi.profile.ready)
+
     def test_voiceprint_belongs_to_one_account(self):
         with tempfile.TemporaryDirectory() as tmp:
             for i in range(vf.MIN_ENROLL):

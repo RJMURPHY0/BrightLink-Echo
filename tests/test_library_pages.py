@@ -56,7 +56,8 @@ class SourceInvariantTests(unittest.TestCase):
         refresh = src[src.index("def _refresh_chrome_and_page"):
                       src.index("if name in tab_frames:")]
         for call in ("self._tab_strip.set_active(", "self._gear_btn.configure(",
-                     "self._render_library(name)", "self._apply_auth_ui()"):
+                     "self._render_library(name, if_changed=True)",
+                     "self._apply_auth_ui()"):
             self.assertIn(call, refresh)
 
     def test_a_nested_atomic_change_joins_the_outer_freeze(self):
@@ -324,6 +325,49 @@ class LivePageTests(unittest.TestCase):
         self.w._render_library(self.kind)
         self.root.update()
         self.assertIn("2 words", self._texts())
+
+    def _rows(self):
+        return list(self.w._lib_state(self.kind)["list"].winfo_children())
+
+    def test_arriving_with_nothing_changed_keeps_the_rows(self):
+        if self.kind != "vocabulary":
+            self.skipTest("vocabulary seeds")
+        # Instant page changes (2026-11-20): an arrival no longer rebuilds an
+        # unchanged list (40-270ms a visit).
+        self._seed(term="Pipedrive")
+        self._build()
+        before = self._rows()
+        self.w._render_library(self.kind, if_changed=True)
+        self.root.update()
+        self.assertEqual(before, self._rows())
+        self.assertTrue(all(r.winfo_exists() for r in before))
+
+    def test_arriving_after_a_sync_added_an_entry_shows_it(self):
+        if self.kind != "vocabulary":
+            self.skipTest("vocabulary seeds")
+        self._seed(term="Pipedrive")
+        self._build()
+        self._seed(term="Xero")
+        self.w._render_library(self.kind, if_changed=True)
+        self.root.update()
+        self.assertIn("Xero", self._texts())
+        self.assertIn("2 words", self._texts())
+
+    def test_arriving_closes_an_editor_left_open(self):
+        if self.kind != "vocabulary":
+            self.skipTest("vocabulary seeds")
+        entry = self._seed(term="Pipedrive")
+        self._build()
+        st = self.w._lib_state(self.kind)
+        st["editing"] = entry["id"]
+        self.w._render_library(self.kind)
+        self.root.update()
+        editor_rows = self._rows()
+        st["editing"] = None          # what _switch_dash_tab does on arrival
+        self.w._render_library(self.kind, if_changed=True)
+        self.root.update()
+        self.assertNotEqual(editor_rows, self._rows())
+        self.assertIn("Pipedrive", self._texts())
 
     def test_a_deleted_entry_leaves_the_list(self):
         entry = self._seed(term="Pipedrive")
