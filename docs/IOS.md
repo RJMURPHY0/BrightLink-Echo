@@ -1,6 +1,6 @@
 # BrightLink Echo for iPhone
 
-*Started 2026-11-19 on branch `claude/echo-ios-app-0lacuj`. Status: first cut written, **not yet compiled** (see "State of the build").*
+*Started 2026-11-19; on `main` since 2026-11-20. Status: first cut **builds and passes its tests on GitHub's macOS runners** (see "State of the build"). Not yet on a real iPhone: that needs the Apple account steps below.*
 
 Echo on iPhone works the way the PC app does: talk, and clean text appears in whatever app you are typing in. It is a normal iPhone app plus an **Echo keyboard**. You tap the mic on the keyboard, speak, tap ✓, and the text is typed for you.
 
@@ -57,7 +57,7 @@ There is no way to install a home-made iPhone app without an Apple Developer acc
 
 ### Each build
 
-1. GitHub → Actions → **iOS** → Run workflow → branch `claude/echo-ios-app-0lacuj` → tick **testflight** → Run.
+1. GitHub → Actions → **iOS** → Run workflow → branch `main` → tick **testflight** → Run.
 2. After the run, wait 5 to 30 minutes for Apple to process the build. Then go to App Store Connect → TestFlight → Internal Testing, add yourself, and accept the email on your iPhone.
 3. Install **TestFlight** from the App Store, then install Echo from it. Open Echo and follow the setup. It covers the microphone, adding the keyboard with Full Access, the model download, a practice dictation, your default style, and optional sign-in.
 
@@ -72,19 +72,19 @@ The same workflow's uploads can be submitted for review from App Store Connect. 
 
 ## State of the build (read this first)
 
-- **Not compiled yet.** This session could not push: the repo's CLAUDE.md says "do not commit or push unless explicitly asked", and the push was blocked. No Swift toolchain was reachable from the build container either.
-  - The code was reviewed by hand against the real FluidAudio v0.18.3 source and Apple's APIs, but the first macOS build will almost certainly turn up some compile errors. Most likely spots: the Apple SpeechAnalyzer calls (newest API), ICU regex syntax in the ported pipeline, and Swift concurrency checks.
-  - `.github/workflows/ios.yml` builds and tests on every push to the branch, so the fix loop is: push, read the log, fix.
+- **Builds and tests green (2026-11-20).** First macOS run (Xcode 26.6, Swift 6.3.3, iPhone simulator, unsigned): EchoCore 341 tests, 0 failures; the app with its embedded keyboard extension builds and its 4 tests pass.
+  - Simulator only so far. A signed device build first happens on the TestFlight run, after the Apple account steps above; signing or entitlement errors would show up there.
+  - Nothing has run on a real iPhone yet: microphone, keyboard Full Access, the Parakeet download and Apple speech are untested on hardware.
+  - `.github/workflows/ios.yml` builds and tests on every push that touches `ios/`.
 - **Desktop untouched.** Nothing outside `ios/`, `.github/workflows/ios.yml` and the docs changed, so the Windows app, its release workflow and the auto-updater are untouched. The new workflow has no shared triggers or secrets with `build-release.yml`.
 - **Cost.** macOS runner minutes on a private repo bill at 10× Linux minutes. One build-and-test run is roughly 10 to 15 minutes.
 
 ## Decisions waiting for you
 
-1. **Let the branch be pushed.** Pushing is what starts CI, and CI is the only compiler. Say "commit and push the iOS branch" and the build/fix loop can run.
-2. **Bundle IDs.** `io.brightlink.echo`, `io.brightlink.echo.keyboard` and `group.io.brightlink.echo` are permanent after the first upload. They are set in one place, `ios/project.yml`.
-3. **Phone stats in "Your impact" on BrightLink Home.** Desktop upserts absolute per-day totals into `user_daily_stats` and merges by per-day max, which assumes one device. A phone writing the same row would overwrite the PC's numbers. The phone therefore keeps its stats locally for now. Fixing it properly needs an additive schema change, for example a `device` column in the key or a server-side increment RPC. That needs your approval because the table is shared with BrightLink Home.
-4. **CLAUDE.md says "Out of scope: non-Windows platforms".** If iPhone is now in scope, that line should change. Agents read it and may refuse iOS work.
-5. **Automatic return to the previous app.** Wispr Flow appears to do this. On iOS it needs private APIs, which broke in iOS 26.4 and risk App Review, so Echo points at the system ◀ link instead. Revisit only if testers find the extra tap a problem.
+1. **Bundle IDs.** `io.brightlink.echo`, `io.brightlink.echo.keyboard` and `group.io.brightlink.echo` are permanent after the first upload. They are set in one place, `ios/project.yml`.
+2. **Phone stats in "Your impact" on BrightLink Home.** Desktop upserts absolute per-day totals into `user_daily_stats` and merges by per-day max, which assumes one device. A phone writing the same row would overwrite the PC's numbers. The phone therefore keeps its stats locally for now. Fixing it properly needs an additive schema change, for example a `device` column in the key or a server-side increment RPC. That needs your approval because the table is shared with BrightLink Home.
+3. **CLAUDE.md says "Out of scope: non-Windows platforms".** If iPhone is now in scope, that line should change. Agents read it and may refuse iOS work.
+4. **Automatic return to the previous app.** Wispr Flow appears to do this. On iOS it needs private APIs, which broke in iOS 26.4 and risk App Review, so Echo points at the system ◀ link instead. Revisit only if testers find the extra tap a problem.
 
 ## Known gaps in this first cut
 
