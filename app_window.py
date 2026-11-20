@@ -9335,6 +9335,7 @@ class AppWindow:
         self._link_card(body, "snippets", "Snippets",
                         "A short phrase expands into a block of text.",
                         "wand")
+        self._build_work_card(body)
 
         self._page_section(body, "brain", "Learned from you")
         self._link_card(body, "phrases", "Phrases You Say Often",
@@ -9346,6 +9347,128 @@ class AppWindow:
                           True, icon="mic")
 
         self._build_voice_training(body)
+
+    def _build_work_card(self, parent: tk.Frame) -> None:
+        """Your Work: the jobs the user ticks (job_vocab.PACKS) and what they
+        do in their own words. Ticked jobs give Echo that work's words; the
+        line is handed to the AI accuracy check. Saves on every tick and as
+        the line is typed (debounced, flushed on leaving the box)."""
+        import job_vocab
+        cfg = self._config
+        card = self._card(parent, margin=(0, 4))
+        row = tk.Frame(card, bg=C["surface"]); row.pack(fill="x")
+        self._card_glyph(row, "person")
+        col = tk.Frame(row, bg=C["surface"]); col.pack(side="left", fill="x", expand=True)
+        title = "Your Work"
+        sub = "Tick what you do and Echo gets that work's words right."
+        tk.Label(col, text=title, fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(anchor="w")
+        desc = tk.Label(col, text=sub, fg=C["subtext"], bg=C["surface"],
+                        font=("Segoe UI", 8), anchor="w", justify="left",
+                        wraplength=260)
+        desc.pack(fill="x")
+        self._autowrap(desc)
+        self._register_search_setting(title, sub, "work_roles")
+
+        email = self._account_email()
+        picked = set(job_vocab.effective_roles(cfg, email)) if cfg else set()
+        grid = tk.Frame(card, bg=C["surface"])
+        grid.pack(fill="x", pady=(10, 2))
+        grid.columnconfigure(0, weight=1, uniform="work")
+        grid.columnconfigure(1, weight=1, uniform="work")
+        self._work_ticks = {}
+
+        def _save() -> None:
+            roles = [r for r in job_vocab.ROLE_IDS if r in picked]
+            if self._on_settings_change:
+                self._on_settings_change("work_roles", roles or [job_vocab.NONE_CHOSEN])
+
+        def _paint(rid: str) -> None:
+            box = self._work_ticks.get(rid)
+            if box is None:
+                return
+            on = rid in picked
+            box.delete("all")
+            fill = ui_render._mix(C["surface"], C["success"], 0.15) if on else C["input_bg"]
+            ph = ui_render.round_rect(box, 22, 22, 6, fill,
+                                      "" if on else C["border"], 1, C["surface"])
+            if ph is not None:
+                box.create_image(0, 0, image=ph, anchor="nw")
+                box._ph = ph
+            if on:
+                mark = ui_render.icon_glyph(box, "check", 14, C["success"], bg=fill)
+                if mark is not None:
+                    box.create_image(11, 11, image=mark, anchor="center")
+                    box._mark = mark
+
+        def _flip(rid: str) -> None:
+            if rid in picked:
+                picked.discard(rid)
+            else:
+                picked.add(rid)
+            _paint(rid)
+            _save()
+
+        for i, rid in enumerate(job_vocab.ROLE_IDS):
+            cell = tk.Frame(grid, bg=C["surface"], cursor="hand2")
+            cell.grid(row=i // 2, column=i % 2, sticky="ew", padx=(0, 6), pady=3)
+            box = tk.Canvas(cell, width=22, height=22, bg=C["surface"],
+                            highlightthickness=0, bd=0, cursor="hand2")
+            box.pack(side="left")
+            self._work_ticks[rid] = box
+            lbl = tk.Label(cell, text=job_vocab.label(rid), fg=C["text"],
+                           bg=C["surface"], font=("Segoe UI", 8), anchor="w",
+                           cursor="hand2")
+            lbl.pack(side="left", padx=(7, 0), fill="x", expand=True)
+            for w in (cell, box, lbl):
+                w.bind("<Button-1>", lambda _e, r=rid: _flip(r))
+            _paint(rid)
+
+        tk.Label(card, text="What do you do? (optional)", fg=C["subtext"],
+                 bg=C["surface"], font=("Segoe UI", 8), anchor="w").pack(
+                     fill="x", pady=(10, 3))
+        var = tk.StringVar(value=(getattr(cfg, "work_description", "") or "") if cfg else "")
+        # The frame carries the outline and the inner padding (tk.Entry has
+        # none of its own, so the text sat against the edge).
+        well = tk.Frame(card, bg=C["input_bg"], highlightthickness=1,
+                        highlightbackground=C["border"], highlightcolor=C["accent"])
+        well.pack(fill="x")
+        entry = tk.Entry(well, textvariable=var, bg=C["input_bg"], fg=C["text"],
+                         insertbackground=C["text"], relief="flat", bd=0,
+                         font=("Segoe UI", 9), highlightthickness=0)
+        entry.pack(fill="x", padx=9, pady=6)
+        entry.bind("<FocusIn>", lambda _e: well.configure(
+            highlightbackground=C["accent"]), add="+")
+        entry.bind("<FocusOut>", lambda _e: well.configure(
+            highlightbackground=C["border"]), add="+")
+        self._work_entry = entry
+        state = {"job": None, "saved": var.get()}
+
+        def _commit(_e=None) -> None:
+            if state["job"] is not None:
+                try:
+                    entry.after_cancel(state["job"])
+                except (tk.TclError, ValueError):
+                    pass
+                state["job"] = None
+            text = " ".join(var.get().split())[:300]
+            if text == state["saved"]:
+                return
+            state["saved"] = text
+            if self._on_settings_change:
+                self._on_settings_change("work_description", text)
+
+        def _typed(_e=None) -> None:
+            if state["job"] is not None:
+                try:
+                    entry.after_cancel(state["job"])
+                except (tk.TclError, ValueError):
+                    pass
+            state["job"] = entry.after(700, _commit)
+
+        entry.bind("<KeyRelease>", _typed)
+        entry.bind("<FocusOut>", _commit, add="+")
+        entry.bind("<Destroy>", _commit, add="+")
 
     def _build_voice_training(self, parent: tk.Frame) -> None:
         """Voice Training, closing the Learning tab.

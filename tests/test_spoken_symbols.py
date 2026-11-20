@@ -219,6 +219,11 @@ class CorpusRegressionTests(unittest.TestCase):
             out = sc(text)
             if out == text:
                 continue
+            # Product names (ChatGPT, localhost, Wispr Flow) are their own
+            # module with their own prose guard (tests/test_common_terms.py).
+            from common_terms import apply_common_terms
+            if out == apply_common_terms(text):
+                continue
             # A change is only allowed where the source carries the shape the
             # rules key off: a symbol name, an address run, or a percentage.
             if re.search(r"\b(slash|underscore|hyphen|hash ?tag|tilde|ampersand"

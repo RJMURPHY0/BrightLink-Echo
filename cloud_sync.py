@@ -76,6 +76,7 @@ SYNCED_SETTINGS = (
     "trim_silence", "toggle_timeout", "max_recording_duration",
     # Stats & intelligence
     "impact_range", "vocab_fuzzy", "learned_phrases", "managed_vocab",
+    "work_roles", "work_description",
 )
 
 # What the card says while the switch is off. Words, snippets and learned
