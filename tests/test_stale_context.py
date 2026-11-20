@@ -61,7 +61,8 @@ class ResumeReopenTests(unittest.TestCase):
         r._stream_is_silently_dead = lambda: False
         r._last_record_activity_ts = 0.0
 
-        walls = iter([1000.0, 1002.0, 1002.0 + 600.0])
+        # two reads per tick: before and after the sleep
+        walls = iter([1000.0, 1002.0, 1002.0, 1602.0, 1602.0])
         sleeps = {"n": 0}
 
         def fake_sleep(_s):
@@ -89,7 +90,7 @@ class ResumeReopenTests(unittest.TestCase):
         r._stream_looks_alive = lambda: True
         r._stream_is_silently_dead = lambda: False
         r._last_record_activity_ts = 0.0
-        walls = iter([1000.0, 1002.1, 1004.2])
+        walls = iter([1000.0, 1002.1, 1002.1, 1004.2, 1004.2])
         n = {"n": 0}
 
         def fake_sleep(_s):
