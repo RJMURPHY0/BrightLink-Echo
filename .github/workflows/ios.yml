@@ -50,7 +50,10 @@ jobs:
 
       - name: EchoCore unit tests
         working-directory: ios/EchoCore
-        run: swift test 2>&1 | tail -200
+        # pipefail: without it the tail's exit status hides failing tests.
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tee swift-test.log | tail -200
 
       - name: Generate Xcode project
         working-directory: ios
