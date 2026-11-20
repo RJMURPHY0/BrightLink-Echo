@@ -784,16 +784,19 @@ class Recorder:
 
     def _watchdog_loop(self) -> None:
         tick = 0
-        wall = time.time()
         while True:
+            # Time ONLY the sleep. Measuring from the previous tick's top also
+            # counted that tick's own work: a reopen that took ~20 s under RAM
+            # pressure read as "machine was asleep", forced another reopen, and
+            # looped until PortAudio crashed natively (v1.8.39 and v1.8.41).
+            slept_from = time.time()
             time.sleep(_WATCHDOG_INTERVAL)
             tick += 1
-            # A tick that took far longer on the wall clock than it slept means
+            # A sleep that took far longer on the wall clock than asked means
             # the machine was asleep. Streams usually die across sleep, so
             # reopen now rather than wait for a press to find out.
-            now_wall = time.time()
-            woke = now_wall - wall > _WATCHDOG_INTERVAL + _RESUME_GAP_SECONDS
-            wall = now_wall
+            woke = (time.time() - slept_from
+                    > _WATCHDOG_INTERVAL + _RESUME_GAP_SECONDS)
             if woke:
                 self._last_resume_ts = time.monotonic()
             if not self._warm_enabled:
