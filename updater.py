@@ -222,6 +222,11 @@ def parse_release(data: dict) -> Optional[dict]:
     exactly as before v1.8.0. "setup" describes the installer and "rollout"
     the migration switch; each is {} when the release does not carry it."""
     tag = data.get("tag_name", "")
+    try:
+        install_layout.version_component(tag)
+    except ValueError:
+        print("[Updater] Release has an unsafe version tag; refusing it.")
+        return None
     assets = data.get("assets", []) or []
     onefile = _asset(assets, _DOWNLOAD_FILENAME)
     if not (tag and onefile):
@@ -608,7 +613,7 @@ def stage_installer(setup: str, version: str, timeout: float = _STAGE_TIMEOUT_SE
     once its files match the version's manifest. Raises on any failure."""
     import pyi_runtime
     root = root or install_layout.install_dir()
-    log = os.path.join(root, f"setup-{version.lstrip('vV')}.log")
+    log = os.path.join(root, f"setup-{install_layout.version_component(version)}.log")
     # Always name the folder: an installer run with /STAGEONLY and no /DIR
     # takes it for a v1.8.0 to v1.8.4 updater and stages in the legacy folder.
     cmd = [setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/STAGEONLY",

@@ -28,6 +28,8 @@ all read this module.
 import hashlib
 import json
 import os
+import ntpath
+import re
 import sys
 import time
 
@@ -60,12 +62,21 @@ def canonical_exe(root: str = "") -> str:
     return data_paths.canonical_exe(root or install_dir())
 
 
+def version_component(version: str) -> str:
+    """A release version used as one local filename component."""
+    value = version.lstrip("vV") if isinstance(version, str) else ""
+    if (not re.fullmatch(r"[0-9][A-Za-z0-9._+-]{0,127}", value)
+            or ".." in value or value.endswith(".")):
+        raise ValueError("Release version is not a safe filename component")
+    return value
+
+
 def contents_dir_name(version: str) -> str:
-    return brand.CONTENTS_DIR_PREFIX + version.lstrip("vV")
+    return brand.CONTENTS_DIR_PREFIX + version_component(version)
 
 
 def pending_dir_name(version: str) -> str:
-    return brand.PENDING_DIR_PREFIX + version.lstrip("vV")
+    return brand.PENDING_DIR_PREFIX + version_component(version)
 
 
 # ── What kind of build is running ────────────────────────────────────────────
@@ -196,12 +207,24 @@ def verify_tree(root: str, manifest: dict, full_hash: bool = True,
     entries = list(manifest.get("files") or [])
     if include_exe:
         entries.insert(0, manifest.get("exe") or {})
+    real_root = os.path.realpath(root)
     for entry in entries:
         rel = str(entry.get("path") or "")
-        if not rel or rel.startswith(("/", "\\")) or ".." in rel.replace("\\", "/").split("/"):
+        parts = rel.replace("\\", "/").split("/")
+        # Manifests are relative Windows paths, even when verified on another OS.
+        # Reject drive paths and alternate data streams before touching the file.
+        if (not rel or ntpath.splitdrive(rel)[0] or rel.startswith(("/", "\\"))
+                or ".." in parts or any(":" in part for part in parts)):
             problems.append(f"bad manifest path {rel!r}")
             break
-        full = os.path.join(root, *rel.split("/"))
+        full = os.path.join(root, *parts)
+        try:
+            contained = os.path.commonpath([real_root, os.path.realpath(full)]) == real_root
+        except ValueError:
+            contained = False
+        if not contained:
+            problems.append(f"bad manifest path {rel!r}")
+            break
         try:
             size = os.path.getsize(full)
         except OSError:

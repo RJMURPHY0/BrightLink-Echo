@@ -53,6 +53,13 @@ def _release_json(setup=True, rollout=True, digest=True):
 
 
 class ParseReleaseTests(unittest.TestCase):
+    def test_unsafe_release_tags_are_refused(self):
+        for tag in ("v2/../../outside", "v2\\outside", "v2:C", "v2..3", "v2.", None):
+            with self.subTest(tag=tag):
+                data = _release_json()
+                data["tag_name"] = tag
+                self.assertIsNone(updater.parse_release(data))
+
     def test_the_onefile_fields_are_unchanged(self):
         info = updater.parse_release(_release_json())
         self.assertEqual("v1.8.0", info["version"])

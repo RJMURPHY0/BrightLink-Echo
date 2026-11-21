@@ -42,6 +42,7 @@ import sys
 import time
 
 import brand
+import system_tools
 import data_paths
 
 _REG_UNINSTALL = r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -311,7 +312,7 @@ def _write_shortcuts(paths: list, exe: str) -> bool:
         pass
     try:
         r = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            [system_tools.powershell_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass",
              "-Command", shortcut_script(paths, exe)],
             capture_output=True, text=True, timeout=25, creationflags=_NO_WIN,
         )
@@ -498,7 +499,7 @@ def remove_legacy_launchers() -> list:
     if brand.LEGACY_TASK_NAME != brand.TASK_NAME:
         try:
             r = subprocess.run(
-                ["schtasks", "/delete", "/tn", brand.LEGACY_TASK_NAME, "/f"],
+                [system_tools.system_tool("schtasks.exe"), "/delete", "/tn", brand.LEGACY_TASK_NAME, "/f"],
                 capture_output=True, text=True, timeout=20, creationflags=_NO_WIN,
             )
             if r.returncode == 0:
@@ -568,7 +569,7 @@ def retarget_legacy_links(exe: str) -> list:
         return []
     try:
         r = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+            [system_tools.powershell_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
              retarget_script(pinned_link_dirs(), [old], exe)],
             capture_output=True, text=True, timeout=30, creationflags=_NO_WIN,
         )
@@ -795,7 +796,7 @@ def _kill_other_instances() -> None:
     for image in image_names():
         try:
             subprocess.run(
-                ["taskkill", "/F", "/IM", image, "/FI", f"PID ne {os.getpid()}"],
+                [system_tools.system_tool("taskkill.exe"), "/F", "/IM", image, "/FI", f"PID ne {os.getpid()}"],
                 capture_output=True, text=True, timeout=20, creationflags=_NO_WIN,
             )
         except Exception:
@@ -807,7 +808,7 @@ def _remove_launchers() -> None:
 
     try:
         subprocess.run(
-            ["schtasks", "/delete", "/tn", TASK_NAME, "/f"],
+            [system_tools.system_tool("schtasks.exe"), "/delete", "/tn", TASK_NAME, "/f"],
             capture_output=True, text=True, timeout=20, creationflags=_NO_WIN,
         )
     except Exception:
@@ -965,7 +966,7 @@ foreach ($d in @({lit(dirs)})) {{
         Start-Sleep -Seconds 1
     }}
 }}
-foreach ($t in @({lit(tasks)})) {{ schtasks /delete /tn $t /f | Out-Null }}
+foreach ($t in @({lit(tasks)})) {{ & {lit([system_tools.system_tool("schtasks.exe")])} /delete /tn $t /f | Out-Null }}
 foreach ($k in @({lit(run_keys)})) {{
     foreach ($v in @({lit(run_values)})) {{ Remove-ItemProperty -LiteralPath ('HKCU:\\' + $k) -Name $v -ErrorAction SilentlyContinue }}
 }}
@@ -1045,7 +1046,7 @@ def _spawn_cleanup(dirs: list) -> bool:
     flags = (_NO_WIN
              | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
              | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0))
-    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path]
+    cmd = [system_tools.powershell_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path]
     # cwd outside every folder it removes: PowerShell holding its working
     # folder open would leave that folder behind ("COULD NOT REMOVE").
     std = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

@@ -322,12 +322,12 @@ class DeleteGuardTests(unittest.TestCase):
         self.assertIn("COULD NOT REMOVE", script)
         self.assertIn("u.log", script)
         # a launch during the uninstall re-registers; the entries go again after
-        self.assertIn("schtasks /delete /tn $t /f", script)
+        self.assertIn("schtasks.exe' /delete /tn $t /f", script)
         self.assertIn("Remove-ItemProperty", script)
         self.assertIn("ftcwhisper", script)
         self.assertIn("a.lnk", script)
         self.assertLess(script.index("Remove-Item -LiteralPath $d"),
-                        script.index("schtasks /delete"))
+                        script.index("schtasks.exe' /delete"))
 
     def test_spawn_cleanup_lists_every_name_both_generations(self):
         d = tempfile.mkdtemp()

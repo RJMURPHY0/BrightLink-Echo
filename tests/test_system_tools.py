@@ -33,7 +33,7 @@ class SystemToolsTests(unittest.TestCase):
 
     def test_no_bare_powershell_or_schtasks_launch_in_runtime_modules(self):
         """First list element of a subprocess call must not be a bare tool name."""
-        for rel in ("updater.py", "app.py", "audio_engine.py"):
+        for rel in ("updater.py", "app.py", "audio_engine.py", "app_install.py", "installer.py"):
             with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
                 tree = ast.parse(f.read())
             for node in ast.walk(tree):

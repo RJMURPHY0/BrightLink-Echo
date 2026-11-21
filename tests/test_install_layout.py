@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -30,6 +31,15 @@ def _exe_with_contents(path: str, contents: str, size: int = 200_000) -> None:
 
 
 class RunningLayoutTests(unittest.TestCase):
+    def test_version_directories_reject_path_syntax(self):
+        for version in ("v2/../../outside", "v2\\outside", "v2:C", "v2..3", "v2.", None):
+            for make in (il.contents_dir_name, il.pending_dir_name):
+                with self.subTest(version=version, function=make.__name__):
+                    with self.assertRaises(ValueError):
+                        make(version)
+        self.assertEqual("app-1.8.50", il.contents_dir_name("v1.8.50"))
+        self.assertEqual("pending-1.8.50-rc.1", il.pending_dir_name("v1.8.50-rc.1"))
+
     def test_source_run(self):
         self.assertEqual("source", il.running_layout(frozen=False))
 
@@ -139,6 +149,32 @@ class ManifestTests(unittest.TestCase):
         bad = dict(self.m, files=[{"path": "../../Windows/x.dll", "size": 1, "sha256": ""}])
         self.assertEqual(["bad manifest path '../../Windows/x.dll'"],
                          il.verify_tree(self.dir, bad, include_exe=False))
+
+    def test_windows_escape_paths_are_rejected_before_file_access(self):
+        for rel in (r"C:\outside.dll", "C:/outside.dll", "C:outside.dll",
+                    "app-2.0.0/C:/outside.dll", "app-2.0.0/x.dll:secret",
+                    r"\\server\share\outside.dll", r"app-2.0.0\..\outside.dll"):
+            with self.subTest(rel=rel), mock.patch.object(il.os.path, "getsize") as size:
+                bad = dict(self.m, files=[{"path": rel, "size": 1}])
+                self.assertEqual([f"bad manifest path {rel!r}"],
+                                 il.verify_tree(self.dir, bad, include_exe=False))
+                size.assert_not_called()
+
+    def test_symlink_outside_install_is_rejected(self):
+        with tempfile.TemporaryDirectory() as outside:
+            target = os.path.join(outside, "outside.dll")
+            with open(target, "wb") as f:
+                f.write(b"x")
+            link = os.path.join(self.dir, "escape.dll")
+            try:
+                os.symlink(target, link)
+            except OSError as exc:
+                self.skipTest(f"Symlinks unavailable: {exc}")
+            bad = dict(self.m, files=[{"path": "escape.dll", "size": 1}])
+            with mock.patch.object(il.os.path, "getsize") as size:
+                self.assertEqual(["bad manifest path 'escape.dll'"],
+                                 il.verify_tree(self.dir, bad, include_exe=False))
+                size.assert_not_called()
 
     def test_garbage_is_no_manifest(self):
         with open(self.path, "w") as f:

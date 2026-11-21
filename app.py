@@ -118,7 +118,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.8.49"
+APP_VERSION = "1.8.50"
 
 
 class _RECT(ctypes.Structure):
@@ -5428,6 +5428,7 @@ def _ensure_logon_task() -> None:
     above-normal priority. Re-registered when missing, pointing elsewhere,
     without --startup, or at the old below-normal priority."""
     import subprocess
+    from xml.sax.saxutils import escape
     target = _startup_target()
     _NO_WIN = subprocess.CREATE_NO_WINDOW
     try:
@@ -5437,7 +5438,7 @@ def _ensure_logon_task() -> None:
         )
         # lower(), not normcase(): normcase also turns the XML's / into \.
         out = result.stdout.lower()
-        if (result.returncode == 0 and target.lower() in out
+        if (result.returncode == 0 and escape(target).lower() in out
                 and _STARTUP_ARG in out and "<priority>4</priority>" in out):
             return  # already correct
     except Exception:
@@ -5458,7 +5459,7 @@ def _ensure_logon_task() -> None:
   <Triggers>
     <LogonTrigger>
       <Enabled>true</Enabled>
-      <UserId>{user_id}</UserId>
+      <UserId>{escape(user_id)}</UserId>
     </LogonTrigger>
   </Triggers>
   <Principals>
@@ -5480,8 +5481,8 @@ def _ensure_logon_task() -> None:
   </Settings>
   <Actions>
     <Exec>
-      <Command>{target}</Command>
-      <Arguments>{args.replace('"', '&quot;')}</Arguments>
+      <Command>{escape(target)}</Command>
+      <Arguments>{escape(args)}</Arguments>
     </Exec>
   </Actions>
 </Task>"""

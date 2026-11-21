@@ -493,7 +493,7 @@ class LegacyStartupCarryOverTests(unittest.TestCase):
         # The current pair is untouched, so the disable now lives there.
         self.assertIn(self.name, self.reg.keys[self.run_key])
         self.assertIs(app_mod._startup_registry_state(), False)
-        self.assertIn(["schtasks", "/delete", "/tn", app_mod.brand.LEGACY_TASK_NAME, "/f"],
+        self.assertIn([app_mod.system_tools.system_tool("schtasks.exe"), "/delete", "/tn", app_mod.brand.LEGACY_TASK_NAME, "/f"],
                       self.schtasks)
         self.assertIn("removed legacy Run value", done)
         self.assertIn("removed legacy Startup apps record", done)
@@ -506,7 +506,7 @@ class LegacyStartupCarryOverTests(unittest.TestCase):
         self.app_install._remove_launchers()
         self.assertEqual(self.reg.keys[self.run_key], {"Other App": '"other.exe"'})
         self.assertEqual(self.reg.keys[self.approved_key], {})
-        deleted = [c[3] for c in self.schtasks if c[:2] == ["schtasks", "/delete"]]
+        deleted = [c[3] for c in self.schtasks if c[:2] == [app_mod.system_tools.system_tool("schtasks.exe"), "/delete"]]
         self.assertIn(app_mod.brand.TASK_NAME, deleted)
         self.assertIn(app_mod.brand.LEGACY_TASK_NAME, deleted)
 

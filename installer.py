@@ -12,6 +12,7 @@ import subprocess
 import sys
 
 import brand
+import system_tools
 from app_install import _ps_quote  # escapes a value for PowerShell single quotes
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -77,7 +78,7 @@ def create_shortcut(icon_path: str) -> None:
 
     try:
         result = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+            [system_tools.powershell_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
             capture_output=True, text=True, timeout=20,
         )
         if result.returncode == 0:
@@ -114,7 +115,7 @@ def add_to_startup() -> None:
     )
     try:
         result = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+            [system_tools.powershell_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
             capture_output=True, text=True, timeout=20,
         )
         if result.returncode == 0:
