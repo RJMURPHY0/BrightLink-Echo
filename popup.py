@@ -1061,16 +1061,19 @@ class FloatingPopup:
         Call before show_status() so the next recording renders the right bar."""
         self._captions_enabled = bool(enabled)
 
-    def update_caption(self, text: str) -> None:
+    def update_caption(self, text: str, *, is_current=None) -> None:
         """Called from the caption loop (background thread) with live partial text.
         The full transcript-so-far is kept in the bar: the view tails the newest
         words, and the user can scroll back through everything said. (Text size
         is trivial even for long dictations — no need to truncate.)"""
-        if not text:
+        if not text or (is_current is not None and not is_current()):
             return
         self._last_activity = time.time()
         if self.root:
-            self.root.after(0, lambda: self._update_caption_widget(text))
+            def apply():
+                if is_current is None or is_current():
+                    self._update_caption_widget(text)
+            self.root.after(0, apply)
 
     def hide(self) -> None:
         if self.root:

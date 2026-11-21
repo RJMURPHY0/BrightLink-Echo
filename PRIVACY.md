@@ -1,6 +1,6 @@
 # BrightLink Echo privacy policy
 
-Last updated: 12 November 2026
+Last updated: 21 November 2026
 
 BrightLink Echo is a Windows dictation app published by BRIGHTLINK (OS) LTD,
 registered in England and Wales, company number 17459281. This policy covers
@@ -26,8 +26,15 @@ your recordings stay on your computer, except for these:
 - **Cloud Sync** (Settings > Account, off by default), described below.
 - **Voice training**, if you turn it on.
 - **A feedback report** from History or Alt+F spoken feedback, when you review
-  and choose to send one (and its
-  recording, when you tick "Include the recording").
+  and choose "Improve for everyone". It includes the feedback words you
+  reviewed, the correction pair if you changed the dictation, and the original
+  recording only when you tick "Share original recording with reviewers".
+  A general software request does not include the unrelated dictation.
+  "Improve for me" saves eligible word fixes to your account vocabulary only.
+  Feedback recordings are transcribed on your computer. "Update correction
+  from feedback" can send the reviewed feedback and dictation text to the
+  existing AI provider, never the feedback audio. Shared reports are reviewed
+  by administrators. They never automatically change other users' vocabulary.
 
 ## Your words are always backed up
 
@@ -113,10 +120,12 @@ within 30 days.
 
 If this policy changes, the date at the top changes with it.
 
-Alt+F recognises your spoken feedback on this device. Exact "replace X with Y"
-corrections are prepared locally. Other feedback uses the same AI service as
-refinement, sending the dictation text and feedback transcript to propose a
-correction for review. Sending a reviewed report can also teach safe word fixes
-to your account vocabulary. This does not retrain the speech model. The feedback
-recording is not uploaded, and the original dictation recording is excluded
-unless you tick "Include the recording".
+Alt+F recognises your spoken feedback on this device and shows it for editing.
+Exact "replace X with Y" corrections are prepared locally. Other corrections
+use the existing AI service only when you choose "Update correction from
+feedback", sending the reviewed feedback and dictation text for a draft.
+"Improve for me" teaches eligible word fixes to your account vocabulary.
+"Improve for everyone" sends a report for administrator review. Neither action
+retrains the speech model or automatically changes another user's vocabulary.
+Feedback audio is not uploaded. Original dictation audio is excluded unless you
+tick "Share original recording with reviewers" on a correction report.

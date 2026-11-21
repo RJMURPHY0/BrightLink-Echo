@@ -37,7 +37,10 @@ class CaptureTests(unittest.TestCase):
         self.app._not_dictating.return_value = True
         self.app.db.can_send_feedback = True
         self.app.db.get_cached_history.return_value = [{"transcribed_text": "Hello Brian"}]
+        self.app.recorder.read_aux_audio.return_value = None
+        self.app.config.live_captions = False
         self.flow = SpokenFeedback(self.app)
+        self.addCleanup(self.flow.cancel)
 
     def test_start_pins_account_and_suspends_other_capture(self):
         self.flow.toggle()
@@ -56,7 +59,7 @@ class CaptureTests(unittest.TestCase):
     def test_feedback_instruction_stays_visible_even_with_live_captions(self):
         self.flow.toggle()
         self.app.popup.show_status.assert_called_with(
-            "Feedback recording. Alt+F to stop", recording=False)
+            "Feedback recording. Alt+F to stop", recording=True)
 
     def test_no_main_or_popup_recording_overlap(self):
         self.app.popup._mic_recording = True
@@ -72,6 +75,36 @@ class CaptureTests(unittest.TestCase):
         self.flow.toggle()
         self.assertFalse(self.flow.active)
         self.app.hotkey_manager.resume.assert_called_once()
+
+    def test_empty_history_allows_general_spoken_feedback(self):
+        self.app.db.get_cached_history.return_value = []
+        self.flow.toggle()
+        self.assertTrue(self.flow.active)
+        self.assertEqual(self.flow.target[1], {})
+
+    def test_free_speech_is_reviewed_before_cloud_drafting(self):
+        self.flow.toggle()
+        self.app.recorder.stop_aux_capture.return_value = [1, 2, 3]
+        self.app._fast_engine.return_value.transcribe.return_value = "Please add shortcut help"
+        queued = []
+        self.app.app_window._ui_after.side_effect = lambda delay, fn: queued.append(fn)
+        with patch("spoken_feedback.threading.Thread") as thread:
+            thread.side_effect = lambda **kw: SimpleNamespace(start=kw["target"])
+            self.flow.stop()
+        queued[0]()
+        self.app.ai_refiner.refine.assert_not_called()
+        args = self.app.app_window._open_spoken_feedback.call_args.args
+        self.assertEqual(args[1], "Hello Brian")
+        self.assertEqual(args[2], "Please add shortcut help")
+
+    def test_stop_failure_restores_captions_and_opens_typed_fallback(self):
+        self.flow.toggle()
+        self.app.recorder.stop_aux_capture.side_effect = RuntimeError("device disconnected")
+        self.flow.stop()
+        self.assertFalse(self.flow.active)
+        self.app.popup.set_captions_enabled.assert_called_with(False)
+        self.app.hotkey_manager.resume.assert_called_once()
+        self.assertIn("Type your feedback", self.app.app_window._open_spoken_feedback.call_args.kwargs["error"])
 
     def test_signed_out_does_not_capture(self):
         self.app.db.can_send_feedback = False

@@ -571,7 +571,8 @@ class SupabaseLogger:
         return {}
 
     def send_feedback(self, report: dict, wav_path: Optional[str] = None,
-                      on_done: Optional[Callable[[bool], None]] = None) -> None:
+                      on_done: Optional[Callable[[bool], None]] = None, *,
+                      user_id=_CURRENT_USER) -> None:
         """Fire-and-forget: file a transcription feedback report.
 
         The recording is uploaded ONLY when the caller passes wav_path, which
@@ -581,14 +582,17 @@ class SupabaseLogger:
         on_done(ok) is called from the worker thread with whether the ROW
         landed."""
         payload = {k: v for k, v in dict(report).items()
-                   if v not in (None, "")}
-        user_id = self._user_id if self.can_send_feedback else None
+                   if v not in (None, "") or k in ("transcribed_text", "expected_text")}
+        owner = self._user_id if user_id is _CURRENT_USER else user_id
+        user_id = owner if self.can_send_feedback and owner == self._user_id else None
 
         def _work():
             ok = False
             try:
                 if not user_id:
                     raise RuntimeError("not signed in")
+                if self._user_id != user_id:
+                    raise RuntimeError("account changed")
                 client = self._get_client()
                 payload["user_id"] = user_id
                 if wav_path:
@@ -632,7 +636,7 @@ class SupabaseLogger:
     _LIBRARY_TABLES = {"vocabulary": "user_vocabulary",
                        "snippets": "user_snippets"}
 
-    def push_library(self, kind: str, entries, *, user_id=_CURRENT_USER) -> None:
+    def push_library(self, kind: str, entries, *, user_id=_CURRENT_USER) -> bool:
         """Upsert this account's entries, tombstones included.
 
         Blocking (callers already run it on a background thread) and entirely
@@ -644,9 +648,9 @@ class SupabaseLogger:
         owner = self._user_id if user_id is _CURRENT_USER else user_id
         table = self._LIBRARY_TABLES.get(kind)
         if not table or not self.library_active or not entries:
-            return
+            return False
         if not owner or owner == "local" or owner != self._user_id:
-            return
+            return False
         rows = []
         for e in entries:
             if not isinstance(e, dict) or not e.get("id"):
@@ -666,12 +670,14 @@ class SupabaseLogger:
                 row["body"] = e.get("body") or ""
             rows.append(row)
         if not rows:
-            return
+            return False
         try:
             self._get_client().table(table).upsert(rows).execute()
             print(f"[Supabase] {table}: pushed {len(rows)} row(s)")
+            return True
         except Exception as e:
             print(f"[Supabase] {table} push failed (non-fatal): {e}")
+            return False
 
     def fetch_library(self, kind: str) -> list:
         """This account's entries from Supabase, tombstones included so a

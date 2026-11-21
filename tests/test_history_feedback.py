@@ -125,6 +125,24 @@ class SendFeedbackTests(unittest.TestCase):
         self.report = {"transcribed_text": "a", "expected_text": "b",
                        "refined_text": None, "engine": ""}
 
+    def test_queued_send_rejects_account_switch(self):
+        c = _FakeClient()
+        log = _logger(c)
+        done = []
+        with mock.patch.object(supabase_client.threading, "Thread") as thread:
+            log.send_feedback(self.report, on_done=done.append, user_id="user-1")
+            run = thread.call_args.kwargs["target"]
+        log._user_id = "user-2"
+        run()
+        self.assertEqual(done, [False])
+        self.assertNotIn("row", c.sink)
+
+    def test_general_feedback_preserves_required_empty_text_columns(self):
+        c = _FakeClient()
+        self.assertEqual(_send(_logger(c), {"transcribed_text": "", "expected_text": "", "feedback_text": "Shortcut help"}), [True])
+        self.assertEqual(c.sink["row"]["transcribed_text"], "")
+        self.assertEqual(c.sink["row"]["expected_text"], "")
+
     def test_row_goes_to_echo_feedback_as_the_user(self):
         c = _FakeClient()
         self.assertEqual(_send(_logger(c), self.report), [True])
@@ -300,8 +318,8 @@ class DialogTests(unittest.TestCase):
         w._engine_meta = None
         w._auth = types.SimpleNamespace(user_email="")
         w._db = types.SimpleNamespace(
-            can_send_feedback=True, local_meta=lambda ca: {},
-            send_feedback=lambda report, wav_path=None, on_done=None:
+            _user_id="owner-a", can_send_feedback=True, local_meta=lambda ca: {},
+            send_feedback=lambda report, wav_path=None, on_done=None, **kw:
                 self.sent.append((report, wav_path)))
         self.w = w
         self.addCleanup(w._close_feedback)
@@ -350,7 +368,8 @@ class DialogTests(unittest.TestCase):
 
     def test_recording_is_attached_when_ticked(self):
         self.w._open_feedback(ITEM)
-        self.assertTrue(self.w._fb["include"])
+        self.assertFalse(self.w._fb["include"])
+        self.w._toggle_feedback_audio()
         self._type("push it to main")
         self.w._send_feedback()
         report, wav = self.sent[0]
@@ -359,6 +378,7 @@ class DialogTests(unittest.TestCase):
 
     def test_unticking_keeps_the_recording_on_the_machine(self):
         self.w._open_feedback(ITEM)
+        self.w._toggle_feedback_audio()
         self.w._toggle_feedback_audio()
         self._type("push it to main")
         self.w._send_feedback()
@@ -381,6 +401,32 @@ class DialogTests(unittest.TestCase):
         self.assertIs(self.w._fb, st)
         self.assertEqual(self.w._feedback_text(), "push it to main")
         self.assertIn("Try again", st["status"].cget("text"))
+
+    def test_typed_software_feedback_excludes_unrelated_dictation(self):
+        self.w._open_feedback(ITEM)
+        self.w._fb["notes"].insert("1.0", "Please add shortcut help")
+        self.w._send_feedback()
+        report, wav = self.sent[0]
+        self.assertEqual(report["feedback_text"], "Please add shortcut help")
+        self.assertEqual(report["transcribed_text"], "")
+        self.assertEqual(report["expected_text"], "")
+        self.assertIsNone(report["transcription_created_at"])
+        self.assertIsNone(wav)
+
+    def test_spoken_notes_are_editable_before_submission(self):
+        self.w._open_spoken_feedback(ITEM, "push it to main", "misheard note", "owner-a")
+        notes = self.w._fb["notes"]
+        self.assertEqual(notes.cget("state"), "normal")
+        notes.delete("1.0", "end")
+        notes.insert("1.0", "My reviewed feedback")
+        self.w._send_feedback()
+        self.assertEqual(self.sent[0][0]["feedback_text"], "My reviewed feedback")
+
+    def test_oversized_notes_cannot_be_submitted(self):
+        self.w._open_feedback(ITEM)
+        self.w._fb["notes"].insert("1.0", "x" * 4001)
+        self.w._send_feedback()
+        self.assertEqual(self.sent, [])
 
     # ── listening back ───────────────────────────────────────────────────
 
@@ -446,6 +492,20 @@ class DialogTests(unittest.TestCase):
         src = inspect.getsource(AppWindow._open_feedback)
         self.assertNotIn("Toplevel", src)
         self.assertIn("place(in_=self._dash_frame", src)
+
+
+class CaptionGuardTests(unittest.TestCase):
+    def test_queued_preview_cannot_overwrite_later_capture(self):
+        from popup import FloatingPopup
+        popup = FloatingPopup.__new__(FloatingPopup)
+        queued = []
+        popup.root = types.SimpleNamespace(after=lambda delay, fn: queued.append(fn))
+        popup._update_caption_widget = mock.Mock()
+        current = [True]
+        popup.update_caption("Feedback words", is_current=lambda: current[0])
+        current[0] = False
+        queued[0]()
+        popup._update_caption_widget.assert_not_called()
 
 
 class GlyphTests(unittest.TestCase):

@@ -6366,6 +6366,9 @@ class AppWindow:
             anchor="w", justify="left", wraplength=300)
         feedback_hint.pack(fill="x", padx=24, pady=(4, 8))
         self._autowrap(feedback_hint)
+        self._surface_btn(parent, "Type feedback or request a feature",
+            self._open_general_feedback, font=("Segoe UI", 9), padx=10,
+            pady=6, bg=C["bg"]).pack(anchor="w", padx=24, pady=(0, 8))
 
     # Help text is one short line of plain words. It is the first thing a new
     # user reads, so it says what the key does and stops there.
@@ -7038,6 +7041,9 @@ class AppWindow:
         """Route each Windows wheel event once to the active scroll surface."""
         cv = None
         tab = self._current_tab
+        fb = getattr(self, "_fb", None)
+        if fb and fb.get("pane"):
+            return self._wheel_scroll(fb["pane"], event)
         if tab == "history":
             cv = getattr(self, "_hist_cv", None)
         elif tab == "settings":
@@ -7949,13 +7955,19 @@ class AppWindow:
             "user_email": self._account_email() or None,
         }
 
-    def _open_spoken_feedback(self, item, draft, feedback, owner):
+    def _open_general_feedback(self):
+        if not self._feedback_available():
+            self.show_toast("Sign in to send feedback")
+            return
+        self._open_feedback({})
+
+    def _open_spoken_feedback(self, item, draft, feedback, owner, error=None):
         """Review a voice-generated correction before uploading or learning it."""
         if not self._db or self._db._user_id != owner:
             self.show_toast("Account changed. Feedback discarded")
             return
         self._open_feedback(item, spoken={"owner": owner, "draft": draft,
-                                           "feedback": feedback})
+                                           "feedback": feedback, "error": error})
 
     def _open_feedback(self, item: dict, *, spoken=None) -> None:
         self._close_feedback()
@@ -7963,7 +7975,7 @@ class AppWindow:
         audio_path = self._audio_path_for(item)
         st = {"item": item, "heard": heard, "audio": audio_path,
               "owner": getattr(self._db, "_user_id", None),
-              "include": bool(audio_path) and not spoken, "sending": False}
+              "include": False, "sending": False, "drafting": False}
         if spoken:
             st["spoken_owner"] = spoken["owner"]
             st["spoken_feedback"] = spoken["feedback"]
@@ -7971,14 +7983,18 @@ class AppWindow:
 
         cover = tk.Frame(self._dash_frame, bg=C["bg"])
         st["cover"] = cover
-        tk.Frame(cover, bg=C["bg"]).pack(fill="both", expand=True)
-        card = self._card(cover, inner_pad=(18, 16), margin=(0, 0))
-        tk.Frame(cover, bg=C["bg"]).pack(fill="both", expand=True)
+        pane = ScrollPane(cover, bg=C["bg"], stepper=self._scroll_step)
+        bar = ModernScrollbar(cover, command=lambda *a: self._scrollbar_command(pane, *a))
+        pane.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        pane.pack(side="left", fill="both", expand=True)
+        st["pane"] = pane
+        card = self._card(pane.content, inner_pad=(18, 12), margin=(0, 0))
         bg = C["surface"]
 
         head = tk.Frame(card, bg=bg)
         head.pack(fill="x")
-        tk.Label(head, text=("Review spoken feedback" if spoken else "Report to improve model"), bg=bg, fg=C["text"],
+        tk.Label(head, text="Review feedback", bg=bg, fg=C["text"],
                  font=("Segoe UI", 11, "bold")).pack(side="left")
         close = tk.Label(head, text="✕", bg=bg, fg=C["subtext"],
                          font=("Segoe UI", 10), cursor="hand2")
@@ -7986,10 +8002,9 @@ class AppWindow:
         close.bind("<Button-1>", lambda _e: self._close_feedback())
         close.bind("<Enter>", lambda _e: close.configure(fg=C["text"]))
         close.bind("<Leave>", lambda _e: close.configure(fg=C["subtext"]))
-        tk.Label(card, text=("Review the correction. Sending learns safe word fixes."
-                             if spoken else "Tell us what it should have said."), bg=bg,
-                 fg=C["subtext"], font=("Segoe UI", 9),
-                 anchor="w").pack(fill="x", pady=(2, 12))
+        tk.Label(card, text="Edit your feedback before choosing who it helps.", bg=bg,
+                 fg=C["subtext"], font=("Segoe UI", 9), anchor="w",
+                 wraplength=270).pack(fill="x", pady=(2, 10))
 
         def _caption(text):
             tk.Label(card, text=text, bg=bg, fg=C["subtext"],
@@ -8017,11 +8032,13 @@ class AppWindow:
             # the correction is checked against, so it sits beside the text
             # it contradicts rather than behind the History row.
             self._build_feedback_player(card, st)
-        if spoken:
-            _caption("YOUR SPOKEN FEEDBACK")
-            _box(spoken["feedback"], 2, False)
-        _caption("WHAT IT SHOULD HAVE SAID")
-        st["entry"] = _box(spoken["draft"] if spoken else heard, 4, True)
+        _caption("YOUR FEEDBACK (TYPE OR PRESS ALT+F)")
+        st["notes"] = _box(spoken["feedback"] if spoken else "", 3, True)
+        st["draft_button"] = self._surface_btn(card, "Update correction from feedback",
+            self._draft_feedback, font=("Segoe UI", 9), padx=8, pady=5, bg=bg)
+        st["draft_button"].pack(fill="x", pady=(0, 10))
+        _caption("CORRECTED DICTATION")
+        st["entry"] = _box(spoken["draft"] if spoken else heard, 3, True)
 
         if audio_path:
             row = tk.Frame(card, bg=bg, cursor="hand2")
@@ -8029,7 +8046,7 @@ class AppWindow:
             box = tk.Canvas(row, width=16, height=16, bg=bg,
                             highlightthickness=0, bd=0, cursor="hand2")
             box.pack(side="left")
-            lbl = tk.Label(row, text="Include the recording", bg=bg,
+            lbl = tk.Label(row, text="Share original recording with reviewers", bg=bg,
                            fg=C["text"], font=("Segoe UI", 9), cursor="hand2")
             lbl.pack(side="left", padx=(8, 0))
             st["tick"] = box
@@ -8039,20 +8056,21 @@ class AppWindow:
 
         foot = tk.Frame(card, bg=bg)
         foot.pack(fill="x")
-        st["status"] = tk.Label(card, text="", bg=bg, fg=C["subtext"],
-                                font=("Segoe UI", 9), anchor="w", wraplength=280)
+        st["status"] = tk.Label(card, text=(spoken or {}).get("error") or "",
+            bg=bg, fg=C["subtext"], font=("Segoe UI", 9), anchor="w", wraplength=270)
         st["status"].pack(fill="x", pady=(6, 0))
-        st["send"] = self._surface_btn(foot, "Send feedback", None,
-                                       font=("Segoe UI", 9, "bold"),
-                                       padx=14, pady=6, bg=bg)
-        st["send"].pack(side="right")
-        cancel = self._surface_btn(foot, "Cancel", self._close_feedback,
-                                   fg=C["subtext"], font=("Segoe UI", 9),
-                                   padx=14, pady=6, bg=bg)
-        cancel.pack(side="right", padx=(0, 8))
-
-        st["entry"].bind("<KeyRelease>", lambda _e: self._sync_feedback_send())
-        st["entry"].bind("<Escape>", lambda _e: self._close_feedback())
+        st["personal"] = self._surface_btn(foot, "Improve for me", self._personal_feedback,
+            font=("Segoe UI", 9, "bold"), padx=8, pady=6, bg=bg)
+        st["personal"].pack(fill="x", pady=(0, 6))
+        st["send"] = self._surface_btn(foot, "Improve for everyone", self._send_feedback,
+            font=("Segoe UI", 9, "bold"), padx=8, pady=6, bg=bg)
+        st["send"].pack(fill="x")
+        tk.Label(card, text="For me: account word fixes. For everyone: sends for review.",
+            bg=bg, fg=C["subtext"], font=("Segoe UI", 8), wraplength=270,
+            anchor="w").pack(fill="x", pady=(6, 0))
+        for key in ("entry", "notes"):
+            st[key].bind("<KeyRelease>", lambda _e: self._sync_feedback_send())
+            st[key].bind("<Escape>", lambda _e: self._close_feedback())
         self._sync_feedback_send()
 
         def _show():
@@ -8269,80 +8287,141 @@ class AppWindow:
         except tk.TclError:
             return ""
 
-    def _sync_feedback_send(self) -> None:
-        """Send is live only once the correction differs from what was heard:
-        an unchanged box says nothing a model could learn from."""
+    def _feedback_notes(self):
+        st = getattr(self, "_fb", None)
+        return st["notes"].get("1.0", "end-1c").strip() if st else ""
+
+    def _feedback_owner(self, st):
+        ok = bool(self._db and st.get("owner") and st["owner"] == self._db._user_id)
+        if not ok:
+            st["status"].configure(text="Account changed. Open feedback again.", fg=C["error"])
+        return ok
+
+    def _sync_feedback_send(self):
         st = getattr(self, "_fb", None)
         if not st:
             return
-        text = self._feedback_text()
-        ready = (not st["sending"] and bool(text)
-                 and text != st["heard"].strip())
-        st["send"].configure(
-            bg=C["accent"] if ready else C["border"],
-            fg=C["text"] if ready else C["subtext"],
-            cursor="hand2" if ready else "",
-            command=self._send_feedback if ready else None)
+        text, notes = self._feedback_text(), self._feedback_notes()
+        changed = bool(text) and text != st["heard"].strip()
+        idle = not st["sending"] and not st.get("drafting") and self._feedback_owner(st)
+        valid = len(notes) <= 4000
+        for key, ready, command in (
+            ("send", idle and valid and (changed or bool(notes)), self._send_feedback),
+            ("personal", idle and changed, self._personal_feedback),
+            ("draft_button", idle and valid and bool(notes), self._draft_feedback)):
+            st[key].configure(bg=C["accent"] if ready else C["border"],
+                fg=C["text"] if ready else C["subtext"], cursor="hand2" if ready else "",
+                command=command if ready else None)
+        if not valid:
+            st["status"].configure(text="Keep feedback to 4,000 characters.", fg=C["error"])
 
-    def _send_feedback(self) -> None:
+    def _draft_feedback(self):
         st = getattr(self, "_fb", None)
-        if not st or st["sending"] or not self._db:
+        if not st or st["sending"] or st.get("drafting") or not self._feedback_owner(st):
             return
-        if st.get("owner") and st["owner"] != self._db._user_id:
-            st["status"].configure(text="Account changed. Open feedback again.", fg=C["error"])
+        notes, before = self._feedback_notes(), self._feedback_text()
+        if not notes or len(notes) > 4000:
+            return
+        st["drafting"] = True
+        self._sync_feedback_send()
+        st["status"].configure(text="Preparing correction for review...", fg=C["subtext"])
+        refiner = getattr(self, "_ai_refiner", None)
+        def work():
+            from spoken_feedback import correction_draft
+            try:
+                if self._db._user_id != st["owner"] or getattr(self, "_fb", None) is not st:
+                    return
+                draft, error = correction_draft(st["heard"], notes, refiner), None
+            except Exception as exc:
+                draft, error = None, str(exc)
+            def finish():
+                if getattr(self, "_fb", None) is not st or not self._feedback_owner(st):
+                    return
+                st["drafting"] = False
+                if notes != self._feedback_notes() or before != self._feedback_text():
+                    error_text = "Feedback changed. Update correction again."
+                elif error:
+                    error_text = error
+                else:
+                    st["entry"].delete("1.0", "end")
+                    st["entry"].insert("1.0", draft)
+                    error_text = "Review the corrected dictation before applying it."
+                st["status"].configure(text=error_text, fg=C["subtext"])
+                self._sync_feedback_send()
+            self._ui_after(0, finish)
+        threading.Thread(target=work, daemon=True, name="feedback-draft").start()
+
+    def _learn_feedback(self, st, expected):
+        import word_fixes
+        if st.get("personal_text") == expected:
+            return st.get("learned", [])
+        result = word_fixes.learn(st["heard"], expected)
+        learned = result["learned"]
+        if learned:
+            word_fixes.apply_learned(self._config, learned, self._account_email())
+            st["personal_text"], st["learned"] = expected, learned
+            self.refresh_libraries()
+        return learned
+
+    def _personal_feedback(self):
+        st = getattr(self, "_fb", None)
+        if not st or st["sending"] or st.get("drafting") or not self._feedback_owner(st):
             return
         expected = self._feedback_text()
         if not expected or expected == st["heard"].strip():
             return
-        st["sending"] = True
-        st["entry"].configure(state="disabled")
-        st["submitted_text"] = expected
-        self._sync_feedback_send()
-        st["status"].configure(text="Sending…", fg=C["subtext"])
-        wav = st["audio"] if st["include"] else None
-        report = self._feedback_report(st["item"], expected, wav)
-
-        def _done(ok):
-            self._ui_after(0, self._feedback_sent, st, ok)
-
-        self._db.send_feedback(report, wav_path=wav, on_done=_done)
-
-    def _feedback_sent(self, st: dict, ok: bool) -> None:
-        if getattr(self, "_fb", None) is not st:
-            return                      # closed (or reopened) while in flight
-        st["sending"] = False
         try:
-            st["entry"].configure(state="normal")
-            if ok:
-                learned = []
-                if (st.get("spoken_owner") and self._db
-                        and st["spoken_owner"] == self._db._user_id):
-                    import word_fixes
-                    result = word_fixes.learn(st["heard"], st["submitted_text"])
-                    learned = result["learned"]
-                    try:
-                        undo = word_fixes.apply_learned(
-                            self._config, result["learned"], self._account_email())
-                        if undo:
-                            self._sync_library("vocabulary")
-                            self.refresh_libraries()
-                    except Exception as exc:
-                        print(f"[SpokenFeedback] Learning failed: {exc}")
-                        st["status"].configure(text="Sent. Learning failed.", fg=C["error"])
-                        return
-                status = (word_fixes.summary(learned) if learned else
-                          "Sent. No safe word fixes to learn." if st.get("spoken_owner") else "Sent. Thanks.")
-                st["status"].configure(text=status,
-                                       fg=C["success"])
-                self._root.after(1200, lambda: (
-                    self._close_feedback()
-                    if getattr(self, "_fb", None) is st else None))
-            else:
-                st["status"].configure(text="Couldn't send. Try again.",
-                                       fg=C["error"])
-                self._sync_feedback_send()
-        except tk.TclError:
-            pass
+            learned = self._learn_feedback(st, expected)
+        except Exception as exc:
+            print(f"[Feedback] Personal correction failed: {exc}")
+            st["status"].configure(text="Could not save the word fix. Try again.", fg=C["error"])
+            return
+        if not learned:
+            st["status"].configure(text="No safe word fix found. Use a specific word correction or send for review.", fg=C["subtext"])
+            return
+        st["sending"] = True
+        self._sync_feedback_send()
+        st["status"].configure(text="Applied. Backing up to your account...", fg=C["subtext"])
+        def done(ok):
+            if getattr(self, "_fb", None) is not st or not self._feedback_owner(st):
+                return
+            st["sending"] = False
+            st["status"].configure(text=("Word fix saved to your account. No shared report sent." if ok else
+                "Applied on this device. Account backup failed. Press Improve for me to retry."),
+                fg=C["success"] if ok else C["error"])
+            self._sync_feedback_send()
+        self._sync_library("vocabulary", on_done=done)
+
+    def _send_feedback(self):
+        st = getattr(self, "_fb", None)
+        if not st or st["sending"] or st.get("drafting") or not self._feedback_owner(st):
+            return
+        expected, notes = self._feedback_text(), self._feedback_notes()
+        changed = bool(expected) and expected != st["heard"].strip()
+        if len(notes) > 4000 or not (changed or notes):
+            return
+        st["sending"] = True
+        for key in ("entry", "notes"):
+            st[key].configure(state="disabled")
+        self._sync_feedback_send()
+        st["status"].configure(text="Sending for review...", fg=C["subtext"])
+        wav = st["audio"] if changed and st["include"] else None
+        report = self._feedback_report(st["item"] if changed else {}, expected if changed else "", wav)
+        report["feedback_text"] = notes or None
+        # Shared reports never change other users' dictionaries automatically.
+        def done(ok):
+            self._ui_after(0, self._feedback_sent, st, ok)
+        self._db.send_feedback(report, wav_path=wav, on_done=done, user_id=st["owner"])
+
+    def _feedback_sent(self, st, ok):
+        if getattr(self, "_fb", None) is not st or not self._feedback_owner(st):
+            return
+        st["sending"] = False
+        for key in ("entry", "notes"):
+            st[key].configure(state="normal")
+        st["status"].configure(text=("Sent for review. Use Improve for me to apply a personal word fix." if ok
+            else "Could not send. Try again."), fg=C["success"] if ok else C["error"])
+        self._sync_feedback_send()
 
     def _close_feedback(self) -> None:
         st, self._fb = getattr(self, "_fb", None), None
@@ -11355,11 +11434,13 @@ class AppWindow:
         self._sync_library(kind)
         self._refresh_library_counts()
 
-    def _sync_library(self, kind: str) -> None:
+    def _sync_library(self, kind: str, on_done=None) -> None:
         """Push this account's entries to Supabase, fire-and-forget. The local
         copy is already saved and already live, so a missing table or a dead
         connection costs nothing."""
         if self._db is None or not hasattr(self._db, "push_library"):
+            if on_done:
+                on_done(False)
             return
 
         import vocab_store
@@ -11368,9 +11449,12 @@ class AppWindow:
 
         def _worker():
             try:
-                self._db.push_library(kind, entries, user_id=owner)
+                ok = self._db.push_library(kind, entries, user_id=owner) is True
             except Exception as exc:
+                ok = False
                 print(f"[UI] {kind} sync failed (non-fatal): {exc}")
+            if on_done:
+                self._ui_after(0, on_done, ok)
 
         threading.Thread(target=_worker, daemon=True,
                          name=f"{kind}-sync").start()

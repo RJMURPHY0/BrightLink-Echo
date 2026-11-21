@@ -72,12 +72,12 @@ def main():
             draft = correction_draft(item["transcribed_text"], feedback,
                                      SimpleNamespace(is_available=False))
             def prepare():
-                def send(report, wav_path=None, on_done=None):
+                def send(report, wav_path=None, on_done=None, **kw):
                     sent.append({"report": report, "audio": wav_path})
                     on_done(True)
                 win._db = SimpleNamespace(_user_id=auth.user_id,
                     can_send_feedback=True, local_meta=lambda _: {},
-                    send_feedback=send, push_library=lambda *a, **kw: None)
+                    send_feedback=send, push_library=lambda *a, **kw: True)
                 win._audio_path_for = lambda _: None
                 win._open_spoken_feedback(item, draft, feedback, auth.user_id)
             ui(prepare)
@@ -93,6 +93,19 @@ def main():
                       <= win._root.winfo_rootx() + win._root.winfo_width())
             assert ui(lambda: win._feedback_text()) == draft
             assert not ui(lambda: win._fb["include"])
+            assert ui(win._feedback_notes) == feedback
+            ui(lambda: win._fb["pane"].yview_moveto(1))
+            time.sleep(0.3)
+            ui(lambda: shot("echo-feedback-actions-375.png"))
+            ui(lambda: setattr(win._db, "push_library", lambda *a, **kw: False))
+            ui(win._personal_feedback)
+            time.sleep(0.3)
+            assert "backup failed" in ui(lambda: win._fb["status"].cget("text"))
+            ui(lambda: setattr(win._db, "push_library", lambda *a, **kw: True))
+            ui(win._personal_feedback)
+            time.sleep(0.3)
+            assert not sent, "Personal action must not submit a shared report"
+            assert "saved to your account" in ui(lambda: win._fb["status"].cget("text"))
             ui(win._send_feedback)
             time.sleep(0.25)
             ui(lambda: shot("echo-feedback-learned.png"))
@@ -102,6 +115,22 @@ def main():
             assert any(r["term"] == "Uniserve" for r in rows), rows
             from text_expansion import apply_vocabulary
             assert apply_vocabulary("Remind me to email UNICEF after lunch.", rows) == draft, rows
+            assert sent[0]["report"]["feedback_text"] == feedback
+            assert vocab_store.load(cfg, "vocabulary", "other-account@example.test") == []
+            def software_feedback():
+                win._open_feedback(item)
+                win._fb["notes"].insert("1.0", "Please add a keyboard shortcut guide")
+                win._send_feedback()
+            ui(software_feedback)
+            time.sleep(0.25)
+            assert sent[1]["report"]["transcribed_text"] == ""
+            assert sent[1]["report"]["expected_text"] == ""
+            assert sent[1]["audio"] is None
+            result["typed_software_feedback_excludes_dictation"] = True
+            result["account_backup_failure_and_retry_verified"] = True
+            result["personal_action_does_not_share_report"] = True
+            result["other_account_unaffected"] = True
+            result["editable_notes_verified"] = True
             result["future_dictation_correction_verified"] = True
             result["report_pair_verified"] = True
             result["account_vocabulary_learning_verified"] = True
