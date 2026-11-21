@@ -1122,7 +1122,11 @@ class Recorder:
         def speaking(m):
             return m[3] and m[2] >= floor
 
-        if not any(speaking(m) for m in lead if m[0] <= release_ts):
+        # Marks timestamp the END of each capture block. A block straddling
+        # key-up still contains pre-release speech; ignoring it can stop
+        # capture halfway through the final word. Entirely post-release noise
+        # must still leave an already-finished sentence alone.
+        if not any(speaking(m) for m in lead if m[0] - m[1] < release_ts):
             return True
         if marks[-1][0] < release_ts:
             return False  # mid-word: the release itself has not arrived yet
@@ -1149,6 +1153,10 @@ class Recorder:
         started = time.monotonic()
         deadline = release + _TAIL_MAX_SECONDS
         with self._lock:
+            # Quiet audio already proves the tail settled. Avoid percentile
+            # work on the stop path unless speech-level blocks need judging.
+            if self._tail_settled(self._tail_marks, release):
+                return
             level = self._speech_level(
                 [m for m in self._tail_marks if m[0] <= release])
         while True:
@@ -1564,6 +1572,18 @@ class Recorder:
         # leaves us with nothing (some minimal systems only expose MME).
         non_mme = [(i, d) for i, d in inputs if "mme" not in _api_name(d["hostapi"])]
         pool = non_mme or inputs
+        # Prefer the shared Windows endpoint over legacy DirectSound and raw
+        # kernel capture. Keep same-name alternatives if that API cannot open.
+        def api_rank(item):
+            name = _api_name(item[1]["hostapi"])
+            return (0 if "wasapi" in name else
+                    1 if "directsound" in name else
+                    3 if "wdm-ks" in name else 2)
+
+        pool = sorted(pool, key=api_rank)
+        aliases: dict[str, list[int]] = {}
+        for i, dev in pool:
+            aliases.setdefault(str(dev["name"]).strip().lower(), []).append(i)
 
         seen: set = set()
         result: list[dict] = []
@@ -1579,6 +1599,8 @@ class Recorder:
                 "channels": dev["max_input_channels"],
                 "sample_rate": dev["default_samplerate"],
             })
+        self._input_api_fallbacks = {
+            indices[0]: indices[1:] for indices in aliases.values()}
         print(f"[Recorder] Enumerated {len(result)} input device(s): "
               f"{[d['name'] for d in result]}")
         return result
@@ -1641,6 +1663,7 @@ class Recorder:
         self, dev_index: Optional[int], callback=None
     ) -> sd.InputStream:
         rates = [int(self.sample_rate)]
+        extra_settings = {}
         try:
             dev_info = (
                 sd.query_devices(dev_index)
@@ -1652,6 +1675,13 @@ class Recorder:
             )
             if default_rate > 0 and default_rate not in rates:
                 rates.append(default_rate)
+            api = sd.query_hostapis(dev_info["hostapi"])
+            if "wasapi" in str(api.get("name", "")).lower():
+                # Shared mode keeps the mic available to calls. Let Windows
+                # convert its native format to 16 kHz for the existing voice
+                # isolation path rather than disabling it at 44.1/48 kHz.
+                extra_settings["extra_settings"] = sd.WasapiSettings(
+                    exclusive=False, auto_convert=True)
         except Exception:
             pass
 
@@ -1665,6 +1695,7 @@ class Recorder:
                     callback=callback or self._audio_callback,
                     blocksize=1024,
                     device=dev_index,
+                    **extra_settings,
                 )
                 if callback is None:
                     self._active_sample_rate = int(rate)
@@ -1688,12 +1719,17 @@ class Recorder:
         preferred = self._resolve_preferred_input(devices)
         if preferred is not None:
             candidates.append(preferred)
+            candidates.extend(getattr(self, "_input_api_fallbacks", {}).get(
+                preferred, []))
 
         default_idx = self._get_default_input_index()
         if default_idx is not None:
             candidates.append(default_idx)
 
-        candidates.extend(int(d["index"]) for d in devices)
+        for d in devices:
+            idx = int(d["index"])
+            candidates.append(idx)
+            candidates.extend(getattr(self, "_input_api_fallbacks", {}).get(idx, []))
 
         seen = set()
         ordered: list[int] = []
@@ -1718,11 +1754,18 @@ class Recorder:
         n = (name or "").lower()
         if any(v in n for v in (
                 "stereo mix", "sound mapper", "primary sound", "what u hear",
-                "wave out", "pc speaker", "loopback", "virtual", "cable",
+                "wave out", "pc speaker", "loopback", "cable",
                 # Localised Windows loopback endpoints — the probe must never
                 # prefer a device that hears the speakers, in any language.
                 "stereomix", "mixage", "mezcla", "missaggio",
                 "микшер", "ミキサー")):
+            return 4
+        # These are microphone inputs with the user's chosen noise processing,
+        # not speaker loopback. Do not demote them just for being virtual.
+        if ("microphone" in n or "mic " in n) and any(
+                vendor in n for vendor in ("nvidia broadcast", "krisp")):
+            return 0
+        if "virtual" in n:
             return 4
         if any(b in n for b in (
                 "bluetooth", "hands-free", "hfp", " ag audio")):

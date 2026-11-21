@@ -118,7 +118,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.8.48"
+APP_VERSION = "1.8.49"
 
 
 class _RECT(ctypes.Structure):

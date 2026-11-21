@@ -1147,6 +1147,8 @@ class Injector:
             # it an unreliable primary path. Clipboard never has that problem.
             if self._clipboard_paste(text):
                 return True
+            if self._partial_direct:
+                return False
             print("[Injector] Browser clipboard failed -> VK_PACKET fallback")
             self._note_typed_fallback(text, cls)
             return self._direct_inject(text)
@@ -1166,6 +1168,8 @@ class Injector:
         if self.method == "clipboard":
             if self._clipboard_paste(text):
                 return True
+            if self._partial_direct:
+                return False
             print("[Injector] Clipboard mode fallback -> direct methods")
             self._note_typed_fallback(text, cls)
             return self._direct_inject(text)
@@ -1180,6 +1184,8 @@ class Injector:
 
         if self._clipboard_paste(text):
             return True
+        if self._partial_direct:
+            return False
         print("[Injector] Auto mode fallback -> direct methods")
         self._note_typed_fallback(text, cls)
         return self._direct_inject(text)
@@ -1196,6 +1202,11 @@ class Injector:
 
     def _direct_inject(self, text: str) -> bool:
         cls = _get_fg_class()
+        target_focused = (not self._target_hwnd or
+                          _u32.GetForegroundWindow() == self._target_hwnd)
+        if not target_focused and (_is_browser_class(cls) or not self._target_child):
+            self._paste_refusal = "foreground changed before direct input"
+            return False
 
         if _is_game_class(cls):
             # Game/overlay windows don't process WM_CHAR or VK_PACKET reliably —
@@ -1235,6 +1246,9 @@ class Injector:
                     print("[Injector] Partial WM_CHAR injection — not retrying to avoid duplicates")
                     return False
                 # Nothing landed at all — safe to try VK_PACKET
+                if (self._target_hwnd and
+                        _u32.GetForegroundWindow() != self._target_hwnd):
+                    return False
                 sent, total = _send_unicode_counted(text)
                 ok = sent == total
                 if not ok and sent > 0:
@@ -1478,7 +1492,8 @@ class Injector:
                 return False
             with _clip_lock:
                 my_gen = _clip_gen
-            time.sleep(0.04)  # settle (write already readback-verified)
+            # The clipboard is already readback-verified. Its restore waits
+            # on a background thread, so neither side needs a fixed sleep.
 
             # Release ALL held modifiers (Alt → Paste Special in Office,
             # Ctrl → Ctrl+Ctrl+V, Shift → Ctrl+Shift+V paste-without-format,
@@ -1504,6 +1519,7 @@ class Injector:
                       f"{self._target_hwnd:#x} — skip Ctrl+V, fall back to direct")
                 self._paste_refusal = (f"foreground {fg_now:#x} != target "
                                        f"{self._target_hwnd:#x}")
+                self._clipboard_restore(original, my_gen)
                 return False
             print(f"[Injector] Sending Ctrl+V, fg_hwnd={fg_now:#x}")
             ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
@@ -1517,7 +1533,7 @@ class Injector:
             )
             arr = (_Input * 4)(ctrl_dn, v_dn, v_up, ctrl_up)
             sent = u32.SendInput(4, arr, ctypes.sizeof(_Input))
-            time.sleep(0.08)  # let app process the paste before restoring clipboard
+            self._check_paste_send(sent, 4)
 
             self._clipboard_restore(original, my_gen)
 
@@ -1545,6 +1561,7 @@ class Injector:
         Ctrl+V in a terminal emulator sends a raw ^V byte to the shell process
         instead of triggering a paste — only the terminal app's own paste shortcut works.
         """
+        self._paste_refusal = ""
         try:
             VK_CTRL = 0x11
             VK_SHIFT = 0x10
@@ -1555,10 +1572,20 @@ class Injector:
                 text = _one_line(text)
             ok, original = self._clipboard_set(text)
             if not ok:
+                self._paste_refusal = "clipboard write could not be verified"
                 return False
             with _clip_lock:
                 my_gen = _clip_gen
-            time.sleep(0.04)
+            _release_modifiers()
+            fg_now = u32.GetForegroundWindow()
+            if self._target_hwnd and fg_now != self._target_hwnd:
+                fg_now = _await_foreground(u32, self._target_hwnd,
+                                           _FOREGROUND_GRACE_SECS)
+            if self._target_hwnd and fg_now != self._target_hwnd:
+                self._paste_refusal = (f"foreground {fg_now:#x} != target "
+                                       f"{self._target_hwnd:#x}")
+                self._clipboard_restore(original, my_gen)
+                return False
 
             ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
             shift_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_SHIFT))
@@ -1568,10 +1595,11 @@ class Injector:
             ctrl_up = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL, dwFlags=_KEYEVENTF_KEYUP))
             arr = (_Input * 6)(ctrl_dn, shift_dn, v_dn, v_up, shift_up, ctrl_up)
             sent = u32.SendInput(6, arr, ctypes.sizeof(_Input))
-            time.sleep(0.08)
+            self._check_paste_send(sent, 6)
 
             self._clipboard_restore(original, my_gen)
             if sent != 6:
+                self._paste_refusal = f"Ctrl+Shift+V SendInput blocked ({sent}/6)"
                 print(f"[Injector] Terminal Ctrl+Shift+V blocked (sent={sent}/6)")
                 return False
             self.last_method = "terminal-paste"
@@ -1580,4 +1608,21 @@ class Injector:
 
         except Exception as e:
             print(f"[Injector] Terminal paste failed: {e}")
+            self._paste_refusal = f"exception: {str(e)[:120]}"
             return False
+
+    def _check_paste_send(self, sent: int, total: int) -> None:
+        """An accepted V-down may already have pasted. Never resend its text.
+
+        A partial batch can also leave Ctrl or Shift down. Send their key-ups
+        even if Windows has not yet reflected the queued down events.
+        """
+        if sent == total:
+            return
+        if sent >= (3 if total == 6 else 2):
+            self._partial_direct = True
+        events = [_Input(type=_INPUT_KEYBOARD,
+                         ki=_KbdInput(wVk=vk, dwFlags=_KEYEVENTF_KEYUP))
+                  for vk in (0x56, 0x10, 0x11)]
+        arr = (_Input * len(events))(*events)
+        ctypes.windll.user32.SendInput(len(events), arr, ctypes.sizeof(_Input))

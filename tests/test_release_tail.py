@@ -83,6 +83,22 @@ def _m(end, voiced, rms=None):
 
 
 class TailSettledTests(unittest.TestCase):
+    def test_speech_block_crossing_release_is_not_mistaken_for_finished(self):
+        # Real capture blocks are 64 ms at 16 kHz. The voiced block includes
+        # the key release even though its END timestamp is after key-up.
+        marks = [_m(9.94, False), _m(9.96, False),
+                 (10.024, 0.064, 0.07, True)]
+        self.assertFalse(Recorder._tail_settled(marks, 10.0, 0.07))
+
+    def test_first_delivered_speech_block_crossing_release_waits(self):
+        marks = [(10.024, 0.064, 0.07, True)]
+        self.assertFalse(Recorder._tail_settled(marks, 10.0, 0.07))
+
+    def test_crossing_speech_settles_after_trailing_quiet(self):
+        marks = [(10.024, 0.064, 0.07, True)]
+        marks += [_m(10.044 + 0.02 * i, False) for i in range(6)]
+        self.assertTrue(Recorder._tail_settled(marks, 10.0, 0.07))
+
     def test_nothing_delivered_near_the_release_waits(self):
         marks = [_m(9.7, False)] * 10
         self.assertFalse(Recorder._tail_settled(marks, 10.0, 0.07))
