@@ -101,6 +101,25 @@ class DefaultOffTests(TempHistory):
                                          "name": "n", "trigger": "t", "body": "b"}]
         self.assertEqual(log.fetch_library("snippets")[0]["id"], "s1")
 
+    def test_queued_library_upload_never_changes_owner(self):
+        log = _logger(sync=False)
+        client = _FakeClient()
+        log._client = client
+        entries = [{"id": "1", "term": "Vercel"}]
+        log.set_user("user-b")
+        log.push_library("vocabulary", entries, user_id="user-a")
+        self.assertNotIn("user_vocabulary", client.upserts)
+
+    def test_rows_pin_owner_even_if_account_changes_during_request(self):
+        log = _logger(sync=False)
+        client = _FakeClient()
+        def switched_client():
+            log._user_id = "user-b"
+            return client
+        log._get_client = switched_client
+        log.push_library("vocabulary", [{"id": "1", "term": "Vercel"}], user_id="user-a")
+        self.assertEqual(client.upserts["user_vocabulary"][0]["user_id"], "user-a")
+
     def test_signed_out_vocabulary_never_touches_the_network(self):
         log = _logger(sync=False, user=None)
         with mock.patch.object(log, "_get_client",

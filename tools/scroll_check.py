@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.join(REPO, "tools"))
 os.chdir(REPO)
 
 SCREEN = "--screen" in sys.argv
+WAIT_FOR_POINTER = "--wait-for-pointer" in sys.argv
 _ONLY = [a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--only=")]
 SURFACE = "--surface" in sys.argv
 _ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -103,7 +104,7 @@ _SOFT_RADIUS = 1
 log = []          # (page, phase, perf_counter, detail)
 refs = {}         # page -> [(top, grey array)] read from the settled window
 steps = []        # (page, ms) for every scroll step the app ran
-shown = []        # (page, perf_counter, (w, h, BGRA), pane box) put on a cover
+shown = []        # (page, perf_counter, (w, h, grey bytes)) shown in the pane
 uncovered = []    # (page, perf_counter) scroll steps with nothing covering
 
 
@@ -137,7 +138,14 @@ def main() -> int:
             box = (pane.winfo_rootx() - r.winfo_rootx(),
                    pane.winfo_rooty() - r.winfo_rooty(),
                    pane.winfo_width(), pane.winfo_height())
-            shown.append((page, t, pic, box))
+            from PIL import Image
+            w, h, raw = pic
+            x, y, pw, ph = box
+            im = Image.frombuffer("RGBA", (w, h), raw, "raw", "BGRA", 0, 1)
+            grey = im.crop((x, y, x + pw, y + ph)).convert("L")
+            # Keep only the pixels the verdict judges. Retaining a whole BGRA
+            # window for every step across six long pages used gigabytes.
+            shown.append((page, t, (pw, ph, grey.tobytes())))
         kept["ms"] += (time.perf_counter() - t) * 1000
         return ok
     aw.snapshot_cover.SnapshotCover.refresh = _kept_refresh
@@ -161,7 +169,7 @@ def main() -> int:
     failed = []
     result = {}
 
-    def on_ui(fn):
+    def on_ui(fn, timeout=10):
         """Run fn on the Tk thread and wait for its result."""
         box, done = {}, threading.Event()
 
@@ -172,8 +180,10 @@ def main() -> int:
                 box["e"] = exc
             done.set()
         win._ui_after(0, run)
-        if not done.wait(10):
-            raise RuntimeError("UI thread did not answer")
+        if not done.wait(timeout):
+            import faulthandler
+            faulthandler.dump_traceback()
+            raise RuntimeError(f"UI thread did not answer on {current['page']}")
         if "e" in box:
             raise box["e"]
         return box.get("v")
@@ -207,7 +217,12 @@ def main() -> int:
 
     def record_page(page):
         current["page"] = page
-        on_ui(lambda: win._switch_dash_tab(page))
+        # First mapping a seeded library lays out forty full widget rows.
+        # Give that preparation the first-paint allowance; scroll steps keep
+        # the strict ten-second response limit below.
+        started = time.perf_counter()
+        on_ui(lambda: win._switch_dash_tab(page), timeout=60)
+        print(f"  {page}: page prepared in {time.perf_counter() - started:.2f}s")
         time.sleep(1.5)
         pane = pane_of(page)
 
@@ -303,6 +318,13 @@ def main() -> int:
             if SCREEN:
                 on_ui(lambda: (win._root.attributes("-topmost", True),
                                win._root.lift()))
+                if WAIT_FOR_POINTER:
+                    open(os.path.join(OUT, "screen-ready.txt"), "w").close()
+                    deadline = time.monotonic() + 60
+                    while not os.path.exists(os.path.join(OUT, "pointer-ready.txt")):
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError("Pointer setup was not completed")
+                        time.sleep(0.1)
             else:
                 # Behind every other window: DWM keeps drawing it (the
                 # recorder reads the window's own surface), nobody's work
@@ -358,14 +380,21 @@ def _match(ref, prof, a, soft=False):
         # the true one, so more candidates go to the full-pixel check.
         a = _soft(a)
     fp = a.mean(axis=1)
-    ssd = np.array([np.square(prof[y:y + h] - fp).sum()
-                    for y in range(len(prof) - h + 1)])
+    # The same sliding sum of squared differences, evaluated in NumPy rather
+    # than thousands of Python slices per recorded frame.
+    ssd = (np.convolve(np.square(prof), np.ones(h), mode="valid")
+           - 2 * np.correlate(prof, fp, mode="valid") + np.square(fp).sum())
     best, best_y = 1.0, 0
-    for y in np.argsort(ssd)[:48 if soft else 8]:
+    # Repeated library rows can have nearly identical row averages. Check
+    # enough full-pixel candidates to include the true row, including in the
+    # unscaled buffer check. The pixel tolerance itself stays unchanged.
+    for y in np.argsort(ssd)[:48]:
         r = _soft(ref[y:y + h]) if soft else ref[y:y + h]
         frac = float((np.abs(r - a) > _PIXEL_TOL).mean())
         if frac < best:
             best, best_y = frac, int(y)
+            if best == 0.0:
+                break
     return best, best_y
 
 
@@ -374,12 +403,11 @@ def _shown_frames(page):
     import numpy as np
     from PIL import Image
     out = []
-    for i, (p, t, (w, h, raw), (x, y, pw, ph)) in enumerate(shown):
+    for i, (p, t, (w, h, raw)) in enumerate(shown):
         if p != page:
             continue
-        im = Image.frombuffer("RGBA", (w, h), raw, "raw", "BGRA", 0, 1)
-        out.append((t, f"cover{i:05d}.png", np.asarray(
-            im.crop((x, y, x + pw, y + ph)).convert("L"), dtype=np.int16)))
+        im = Image.frombytes("L", (w, h), raw)
+        out.append((t, f"cover{i:05d}.png", np.asarray(im, dtype=np.int16)))
     return out
 
 

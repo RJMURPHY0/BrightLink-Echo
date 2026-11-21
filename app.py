@@ -448,6 +448,12 @@ class WhisperFlowApp:
             on_trigger=self._on_refine_selection,
         )
 
+        from spoken_feedback import SpokenFeedback
+        self.spoken_feedback = SpokenFeedback(self)
+        self.feedback_hotkey_manager = TriggerHotkeyManager(
+            hotkey="alt+f", on_trigger=lambda: self.app_window._ui_after(
+                0, self.spoken_feedback.toggle))
+
         # Build the heavy pipeline off the UI thread so the window paints
         # immediately (this is where numpy/sounddevice/pystray get imported).
         threading.Thread(target=self._init_core, daemon=True,
@@ -460,7 +466,9 @@ class WhisperFlowApp:
         """True when nothing is being recorded or transcribed, so a restart
         loses no words. Thread-safe; False when the state cannot be read."""
         try:
-            return self.hotkey_manager.state == AppState.IDLE
+            return (self.hotkey_manager.state == AppState.IDLE
+                    and not getattr(getattr(self, "spoken_feedback", None), "active", False)
+                    and not getattr(getattr(self, "spoken_feedback", None), "busy", False))
         except Exception:
             return False
 
@@ -548,7 +556,9 @@ class WhisperFlowApp:
                 print(f"[App] audio prune failed (non-fatal): {e}")
 
             self.popup.set_voice_capture_fns(
-                start=self.recorder.start_aux_capture,
+                start=lambda: (not self.spoken_feedback.active
+                               and not self.spoken_feedback.busy
+                               and self.recorder.start_aux_capture()),
                 read=lambda: (self.recorder.read_aux_audio(),
                               self.recorder.active_sample_rate),
                 stop=lambda: (self.recorder.stop_aux_capture(),
@@ -1031,6 +1041,13 @@ class WhisperFlowApp:
         # Register global hotkeys
         self.hotkey_manager.register()
         self.refine_hotkey_manager.register()
+        feedback_conflict = "alt+f" in {
+            str(self.config.hotkey).lower(), str(self.config.refine_hotkey).lower(),
+            str(getattr(self.config, "ptt_hotkey", "")).lower()}
+        if feedback_conflict or not self.feedback_hotkey_manager.register():
+            print("[SpokenFeedback] Alt+F unavailable")
+            self.app_window._ui_after(0, lambda: self.app_window.show_toast(
+                "Alt+F feedback unavailable. Check shortcut conflicts."))
         print(f"[App] Hotkey: '{self.config.hotkey}' | Mode: {self.config.mode}")
         print(f"[App] Refine hotkey: '{self.config.refine_hotkey}'")
 
@@ -2088,10 +2105,16 @@ class WhisperFlowApp:
             if active:
                 if self.hotkey_manager.state == AppState.RECORDING:
                     self._on_cancel_recording()
+                self.spoken_feedback.cancel()
+                self.feedback_hotkey_manager.suspend()
                 self.hotkey_manager.suspend()
                 self.refine_hotkey_manager.suspend()
                 print("[App] Global hotkeys suspended for shortcut capture.")
             else:
+                if "alt+f" not in {str(self.config.hotkey).lower(),
+                                    str(self.config.refine_hotkey).lower(),
+                                    str(getattr(self.config, "ptt_hotkey", "")).lower()}:
+                    self.feedback_hotkey_manager.resume()
                 self.hotkey_manager.resume()
                 self.refine_hotkey_manager.resume()
                 print("[App] Global hotkeys resumed.")
@@ -4645,6 +4668,7 @@ class WhisperFlowApp:
         self.cloud_sync.start()
 
     def _sign_out(self) -> None:
+        self.spoken_feedback.cancel()
         print("[App] Signing out...")
         self._auth.sign_out()
         self._auth.sign_in_offline()   # back to offline state immediately
@@ -4671,6 +4695,8 @@ class WhisperFlowApp:
         print("[App] Shutting down...")
         if crash_watch.get():
             crash_watch.get().mark_exit("quit")
+        self.feedback_hotkey_manager.unregister()
+        self.spoken_feedback.cancel()
         self.hotkey_manager.unregister()
         self.refine_hotkey_manager.unregister()
         if self.recorder is not None and self.recorder.is_recording:

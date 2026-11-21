@@ -320,6 +320,34 @@ class DialogTests(unittest.TestCase):
         self._type("push it to main")
         self.assertIsNotNone(self.w._fb["send"]._command)
 
+    def test_spoken_draft_reuses_report_and_excludes_audio_by_default(self):
+        self.w._db._user_id = "owner-a"
+        self.w._open_spoken_feedback(ITEM, "push it to main",
+                                     "replace maine with main", "owner-a")
+        self.assertEqual(self.w._feedback_text(), "push it to main")
+        self.assertEqual(self.w._fb["spoken_feedback"], "replace maine with main")
+        self.assertFalse(self.w._fb["include"])
+        self.w._send_feedback()
+        self.assertEqual(self.sent[0][0]["expected_text"], "push it to main")
+        self.assertIsNone(self.sent[0][1])
+
+    def test_spoken_draft_cannot_send_as_a_different_account(self):
+        self.w._db._user_id = "owner-a"
+        self.w._open_spoken_feedback(ITEM, "push it to main", "fix the name", "owner-a")
+        self.w._db._user_id = "owner-b"
+        self.w._send_feedback()
+        self.assertEqual(self.sent, [])
+        self.assertIn("Account changed", self.w._fb["status"].cget("text"))
+
+    def test_auth_change_closes_the_previous_accounts_feedback(self):
+        self.w._db._user_id = "owner-a"
+        self.w._auth.is_authenticated = True
+        self.w._refresh_spacing_btn = lambda: None
+        self.w._open_spoken_feedback(ITEM, "push it to main", "fix the name", "owner-a")
+        self.w._db._user_id = "owner-b"
+        self.w._apply_auth_ui()
+        self.assertIsNone(self.w._fb)
+
     def test_recording_is_attached_when_ticked(self):
         self.w._open_feedback(ITEM)
         self.assertTrue(self.w._fb["include"])

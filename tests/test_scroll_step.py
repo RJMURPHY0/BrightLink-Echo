@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -67,6 +68,21 @@ class ScrollStepTests(unittest.TestCase):
 
     def tearDown(self):
         self.root.destroy()
+
+    def test_images_are_invalidated_before_the_cover_reads_the_paint(self):
+        events = []
+        self.w._paint_now = lambda: events.append("paint") or True
+        with mock.patch("app_window.ctypes.windll.user32.RedrawWindow",
+                        side_effect=lambda *args: events.append("invalidate") or 1):
+            self.w._scroll_step(self.pane, lambda: events.append("move"))
+        self.assertEqual(events, ["move", "invalidate", "paint"])
+        self.assertEqual(self.w.covers[0].refreshes, 1)
+
+    def test_failed_invalidation_never_reaches_the_cover(self):
+        with mock.patch("app_window.ctypes.windll.user32.RedrawWindow", return_value=0):
+            self.w._scroll_step(self.pane, lambda: None)
+        self.assertEqual(self.w.covers[0].refreshes, 0)
+        self.assertEqual(self.w.covers, self.w.handed)
 
     def test_a_step_that_raises_still_hands_the_cover_over(self):
         def boom():

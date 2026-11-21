@@ -116,10 +116,19 @@ def main() -> int:
     guard, spoiled = [], []
 
     def act(name, fn):
+        finished = threading.Event()
         def run():
             actions.append((name, time.perf_counter()))
-            fn()
+            try:
+                fn()
+            finally:
+                finished.set()
         win._ui_after(0, run)
+        # The settle interval starts after the handler returns. Starting it at
+        # queue time let slow first visits overlap the next action, attributing
+        # two complete pages to a single click and skipping pages entirely.
+        if not finished.wait(30):
+            raise RuntimeError(f"UI did not finish {name}")
         time.sleep(_SETTLE_S)
 
     def driver():
@@ -205,6 +214,9 @@ def _report(win) -> int:
         return out
 
     bad = 0
+    import json
+    with open(os.path.join(OUT, "actions.json"), "w") as fh:
+        json.dump(actions, fh)
     print(f"frames kept in {OUT}")
     start = [t for n, t in actions if n == "(warm-up done)"][0]
     if warm:

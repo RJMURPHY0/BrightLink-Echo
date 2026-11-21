@@ -632,7 +632,7 @@ class SupabaseLogger:
     _LIBRARY_TABLES = {"vocabulary": "user_vocabulary",
                        "snippets": "user_snippets"}
 
-    def push_library(self, kind: str, entries) -> None:
+    def push_library(self, kind: str, entries, *, user_id=_CURRENT_USER) -> None:
         """Upsert this account's entries, tombstones included.
 
         Blocking (callers already run it on a background thread) and entirely
@@ -641,10 +641,11 @@ class SupabaseLogger:
         user nothing — which matters here because this project has shipped
         migrations that were never applied to the live project.
         """
+        owner = self._user_id if user_id is _CURRENT_USER else user_id
         table = self._LIBRARY_TABLES.get(kind)
         if not table or not self.library_active or not entries:
             return
-        if not self._user_id or self._user_id == "local":
+        if not owner or owner == "local" or owner != self._user_id:
             return
         rows = []
         for e in entries:
@@ -652,7 +653,7 @@ class SupabaseLogger:
                 continue
             row = {
                 "id": e["id"],
-                "user_id": self._user_id,
+                "user_id": owner,
                 "updated_at": e.get("updated_at"),
                 "deleted": bool(e.get("deleted")),
             }

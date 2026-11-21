@@ -25,7 +25,8 @@ your recordings stay on your computer, except for these:
   Your Work with what you wrote about it. You can switch it off in Settings.
 - **Cloud Sync** (Settings > Account, off by default), described below.
 - **Voice training**, if you turn it on.
-- **A feedback report** from History, when you choose to send one (and its
+- **A feedback report** from History or Alt+F spoken feedback, when you review
+  and choose to send one (and its
   recording, when you tick "Include the recording").
 
 ## Your words are always backed up
@@ -111,3 +112,11 @@ within 30 days.
 ## Changes
 
 If this policy changes, the date at the top changes with it.
+
+Alt+F recognises your spoken feedback on this device. Exact "replace X with Y"
+corrections are prepared locally. Other feedback uses the same AI service as
+refinement, sending the dictation text and feedback transcript to propose a
+correction for review. Sending a reviewed report can also teach safe word fixes
+to your account vocabulary. This does not retrain the speech model. The feedback
+recording is not uploaded, and the original dictation recording is excluded
+unless you tick "Include the recording".
