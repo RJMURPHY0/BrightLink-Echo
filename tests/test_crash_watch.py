@@ -85,6 +85,36 @@ class RealProcessEnd(unittest.TestCase):
         self.assertEqual(verdict, "clean")
         self.assertEqual(_pending(self.folder), [])
 
+    def _log_update(self, line, at=None):
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(at or time.time()))
+        with open(os.path.join(self.folder, crash_watch.UPDATE_LOG_FILE), "a",
+                  encoding="utf-8") as f:
+            f.write(f"[{stamp}] {line}\n")
+
+    def test_a_run_replaced_by_this_update_is_not_a_crash(self):
+        # Every update 1.8.47-1.8.51 reached run-state.json with no exit mark
+        # and was reported as "vanished" (Error Log 21-22 Nov 2026).
+        _run_child(self.folder, "killed")
+        self._log_update("[app] Handing over to activate.ps1 for 10.0.0.")
+        self._log_update("[activate 10.0.0] Started. Mode=Update WaitPid=1 Relaunch=True Dir=x")
+        _, verdict = self._next_run()
+        self.assertEqual(verdict, "update")
+        self.assertEqual(_pending(self.folder), [])
+
+    def test_a_handover_to_another_version_still_reports(self):
+        _run_child(self.folder, "killed")
+        self._log_update("[app] Handing over to activate.ps1 for 9.9.8.")
+        _, verdict = self._next_run()
+        self.assertEqual(verdict, "vanished")
+        self.assertEqual(_pending(self.folder)[0]["detail"]["cause"], "vanished")
+
+    def test_an_old_handover_line_still_reports(self):
+        _run_child(self.folder, "killed")
+        self._log_update("[app] Handing over to activate.ps1 for 10.0.0.",
+                         at=time.time() - 6 * 3600)
+        _, verdict = self._next_run()
+        self.assertEqual(verdict, "vanished")
+
 
 class Classify(unittest.TestCase):
     def test_verdicts(self):

@@ -87,6 +87,42 @@ def _log_tail(folder: str) -> str:
     return "\n".join(text.splitlines()[-LOG_TAIL_LINES:])[-TEXT_CAP:]
 
 
+UPDATE_LOG_FILE = "update.log"
+# Seconds after the last beat a handover line may still belong to that run:
+# the beat is at most BEAT_S old when the handover is written, plus clock slack.
+HANDOVER_SLACK_S = 120.0
+
+
+def handed_over_to(folder: str, version: str, state) -> bool:
+    """True when update.log shows the previous run handing over to *version*
+    (the version now starting) while it was alive. Such a run was replaced by
+    an update, not crashed, even if its exit mark never reached run-state.json:
+    every update from 1.8.47 to 1.8.51 was reported as an app_crashed
+    "vanished" although activate.ps1 logged a healthy switch each time
+    (Error Log 21-22 Nov 2026)."""
+    try:
+        started = float(state.get("started") or 0)
+        beat = float(state.get("beat") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return False
+    if not version or not beat:
+        return False
+    v = version.lstrip("vV")
+    markers = (f"[app] Handing over to activate.ps1 for {v}.",
+               f"[activate {v}] Started. Mode=Update")
+    tail = _read_tail(os.path.join(folder, UPDATE_LOG_FILE), cap=64 * 1024)
+    for line in tail.splitlines():
+        if not line.startswith("[") or not any(m in line for m in markers):
+            continue
+        try:
+            at = time.mktime(time.strptime(line[1:20], "%Y-%m-%d %H:%M:%S"))
+        except (ValueError, OverflowError):
+            continue
+        if started - HANDOVER_SLACK_S <= at <= beat + HANDOVER_SLACK_S:
+            return True
+    return False
+
+
 def classify_previous(state, boot_time: float, native_trace: str = "") -> str:
     """How the last run ended: none, clean, machine_restart, native_crash or
     vanished (killed, or died without a trace)."""
@@ -150,6 +186,11 @@ class CrashWatch:
         state = _read_json(self._path(STATE_FILE), None)
         trace = _read_tail(self._path(NATIVE_FILE))
         verdict = classify_previous(state, self._boot_time(), trace)
+        if verdict == "vanished" and handed_over_to(self.folder, self.version, state):
+            # Logged so the lost exit mark itself stays findable in echo.log.
+            print(f"[CrashWatch] v{state.get('version')} handed over to v{self.version} "
+                  "without an exit mark; counted as an update, not a crash.")
+            verdict = "update"
         if verdict in ("native_crash", "vanished"):
             detail = {
                 "cause": verdict,
