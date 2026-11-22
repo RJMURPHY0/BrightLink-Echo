@@ -1050,6 +1050,20 @@ class Injector:
                 self._target_child = 0
                 self._single_line = False
 
+    def retain_dictation(self, text: str, injected: bool) -> bool:
+        """Keep a manual-paste fallback without interrupting a queued paste.
+
+        SendInput returns before the receiving app reads the clipboard. Opening
+        and emptying it again here can make that read fail. Successful clipboard
+        routes already verified the text and keep_clipboard prevents restoration.
+        Direct input and failed injections still need an explicit clipboard copy.
+        """
+        if (injected and self.keep_clipboard and
+                self.last_method in ("clipboard", "terminal-paste")):
+            return True
+        ok, _ = self._clipboard_set(text)
+        return ok
+
     def inject_immediate(self, text: str) -> bool:
         """
         Skip the internal lock — called from streaming loop which has its own lock.

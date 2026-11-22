@@ -472,6 +472,7 @@ class SupabaseLogger:
         """
         if not self._enabled or not self._diagnostics_enabled:
             return
+        owner = self._user_id
         payload = {
             "event_type": event_type,
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -490,12 +491,15 @@ class SupabaseLogger:
             payload["app_version"] = app_version
         if transcription_created_at:
             payload["transcription_created_at"] = transcription_created_at
-        if self._user_id and self._user_id != "local":
-            payload["user_id"] = self._user_id
+        if owner and owner != "local":
+            payload["user_id"] = owner
         payload = telemetry_scrub.scrub_event(payload)
 
         def _insert():
             try:
+                if not self._diagnostics_enabled or self._user_id != owner:
+                    print("[Supabase] error_event discarded: diagnostics or account changed.")
+                    return
                 # returning=minimal: the default reads the row back, which
                 # needs SELECT, and clients only have INSERT on error_events
                 # (every report was refused with 401/403 until v1.8.10).

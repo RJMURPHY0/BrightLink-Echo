@@ -143,6 +143,15 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual([("Uniserve", ["unisurf"])],
                          [(e["term"], e["sounds_like"]) for e in self.entries()])
 
+    def test_learning_and_undo_are_isolated_between_accounts(self):
+        lesson = [{"heard": "UNICEF", "term": "Uniserve"}]
+        undo = word_fixes.apply_learned(self.cfg, lesson, "first@example.com")
+        self.assertEqual([], vocab_store.load(self.cfg, "vocabulary", "second@example.com"))
+        word_fixes.apply_learned(self.cfg, lesson, "second@example.com")
+        word_fixes.undo_learned(self.cfg, undo, "first@example.com")
+        self.assertEqual([], vocab_store.load(self.cfg, "vocabulary", "first@example.com"))
+        self.assertEqual(1, len(vocab_store.load(self.cfg, "vocabulary", "second@example.com")))
+
     def test_summary_is_one_short_line(self):
         self.assertEqual("Learned: UNICEF → Uniserve (+1 more)",
                          word_fixes.summary([{"heard": "UNICEF", "term": "Uniserve"},

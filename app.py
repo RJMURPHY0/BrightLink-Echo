@@ -118,7 +118,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.8.50"
+APP_VERSION = "1.8.51"
 
 
 class _RECT(ctypes.Structure):
@@ -1579,6 +1579,22 @@ class WhisperFlowApp:
             )
         except Exception as e:
             print(f"[App] error-event log failed (non-fatal): {e}")
+
+    def _retain_dictation_for_recovery(self, text: str, injected: bool) -> bool:
+        """Record failed recovery copies without sending dictated words."""
+        try:
+            if self.injector.retain_dictation(text, injected):
+                print("[App] Dictation left on clipboard for manual Ctrl+V")
+                return True
+            reason = "write_not_verified"
+        except Exception:
+            # An exception may contain clipboard contents. Report a fixed code.
+            reason = "write_exception"
+        print(f"[App] Copy-to-clipboard failed: {reason}")
+        self._log_error_event("clipboard_copy_failed", {
+            "chars": len(text), "injected": bool(injected), "reason": reason,
+        })
+        return False
 
     # ── Speech-engine health (visible + logged when nothing can transcribe) ──
 
@@ -3143,22 +3159,12 @@ class WhisperFlowApp:
                     pass
                 kb.send("enter")
 
-            # Keep the dictation on the clipboard for a manual Ctrl+V fallback,
-            # if the user enabled it. Runs AFTER injection so it wins: a
-            # clipboard-paste injection schedules a ~1.5s restore of the user's
-            # old clipboard, but _clipboard_set bumps the clip generation, which
-            # supersedes that pending restore — so the dictated text stays put.
-            # Direct-inject paths never touch the clipboard, so this is the only
-            # writer there. Fires whether injection succeeded or not: the whole
-            # point is a paste to fall back on when the text landed in the wrong
-            # box (or nowhere).
+            # Keep a manual Ctrl+V fallback when enabled. A successful paste
+            # already left its verified text there: rewriting it now races the
+            # target's queued Ctrl+V. Direct input and failures still need a copy.
             if getattr(self.config, "copy_to_clipboard", False) and transcribed_text:
-                try:
-                    from injector import Injector
-                    Injector._clipboard_set(_text_to_inject)
-                    print("[App] Dictation left on clipboard for manual Ctrl+V")
-                except Exception as e:
-                    print(f"[App] Copy-to-clipboard failed (non-fatal): {e}")
+                self._retain_dictation_for_recovery(
+                    _text_to_inject, result and not _streamed_live)
 
             self.feedback.transcription_complete(transcribed_text)
             # Impact stats: count this dictation for the signed-in account.

@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -112,6 +113,27 @@ class LogErrorEventTests(unittest.TestCase):
         logger.log_error_event("inject_failed", detail={"x": 1})
         time.sleep(0.2)
         self.assertEqual(fake.inserts, [])
+
+    def test_queued_report_respects_account_and_diagnostics_changes(self):
+        for change in ("account", "diagnostics"):
+            with self.subTest(change=change):
+                logger, fake = self._logger()
+                logger.set_user("first-account")
+                pending = []
+                def capture_thread(*, target, **kwargs):
+                    pending.append(target)
+                    class Deferred:
+                        def start(self):
+                            pass
+                    return Deferred()
+                with patch("supabase_client.threading.Thread", capture_thread):
+                    logger.log_error_event("inject_failed", {"chars": 12})
+                if change == "account":
+                    logger.set_user("second-account")
+                else:
+                    logger.set_diagnostics_enabled(False)
+                pending[0]()
+                self.assertEqual(fake.inserts, [])
 
 
 if __name__ == "__main__":
