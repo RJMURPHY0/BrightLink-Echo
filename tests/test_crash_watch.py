@@ -108,6 +108,26 @@ class RealProcessEnd(unittest.TestCase):
         self.assertEqual(verdict, "vanished")
         self.assertEqual(_pending(self.folder)[0]["detail"]["cause"], "vanished")
 
+    def test_the_updated_version_crashing_right_after_its_handover_reports(self):
+        # The handover to 9.9.9 was written just before the 9.9.9 run started
+        # (an update landing), then that run itself died: a real crash.
+        self._log_update("[app] Handing over to activate.ps1 for 9.9.9.",
+                         at=time.time() - 30)
+        _run_child(self.folder, "killed")
+        watch = CrashWatch(self.folder, "9.9.9", boot_time=lambda: 0.0)
+        self.assertEqual(watch._judge_previous(), "vanished")
+        self.assertEqual(_pending(self.folder)[0]["detail"]["cause"], "vanished")
+
+    def test_a_handover_before_the_run_started_still_reports(self):
+        _run_child(self.folder, "killed")
+        with open(os.path.join(self.folder, crash_watch.STATE_FILE),
+                  encoding="utf-8") as f:
+            state = json.load(f)
+        self._log_update("[app] Handing over to activate.ps1 for 10.0.0.",
+                         at=float(state["started"]) - 60)
+        _, verdict = self._next_run()
+        self.assertEqual(verdict, "vanished")
+
     def test_an_old_handover_line_still_reports(self):
         _run_child(self.folder, "killed")
         self._log_update("[app] Handing over to activate.ps1 for 10.0.0.",
@@ -261,8 +281,24 @@ class Celebration(unittest.TestCase):
         holder = app_window.AppWindow.__new__(app_window.AppWindow)
         holder._root = root
         holder.show_update_celebration("1.0.0", "1.0.1", "BrightLink Echo")
-        root.update()
-        tops = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)]
+        # The card is drawn on a background thread that hands back through
+        # root.after. tkinter accepts that cross-thread call only while
+        # mainloop runs (as in the app), so run a real mainloop until the card
+        # opens. Destroying Tk while that thread is still running aborted the
+        # whole test process ("Tcl_AsyncDelete: async handler deleted by the
+        # wrong thread").
+        tops = []
+        deadline = time.time() + 15
+
+        def _poll():
+            tops[:] = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)]
+            if tops or time.time() > deadline:
+                root.quit()
+            else:
+                root.after(20, _poll)
+
+        root.after(20, _poll)
+        root.mainloop()
         self.assertEqual(len(tops), 1)
         self.assertEqual(tops[0].winfo_children()[0].winfo_class(), "Canvas")
 

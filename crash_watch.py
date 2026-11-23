@@ -91,6 +91,8 @@ UPDATE_LOG_FILE = "update.log"
 # Seconds after the last beat a handover line may still belong to that run:
 # the beat is at most BEAT_S old when the handover is written, plus clock slack.
 HANDOVER_SLACK_S = 120.0
+# update.log stamps drop the fraction of a second.
+STAMP_S = 1.0
 
 
 def handed_over_to(folder: str, version: str, state) -> bool:
@@ -105,9 +107,14 @@ def handed_over_to(folder: str, version: str, state) -> bool:
         beat = float(state.get("beat") or 0)
     except (TypeError, ValueError, AttributeError):
         return False
-    if not version or not beat:
+    if not version or not beat or not started:
         return False
     v = version.lstrip("vV")
+    # Only a run of an OLDER version can hand over to this one. A run of this
+    # same version that vanished is a real crash, even right after an update.
+    prev = str(state.get("version") or "").lstrip("vV")
+    if not prev or prev == v:
+        return False
     markers = (f"[app] Handing over to activate.ps1 for {v}.",
                f"[activate {v}] Started. Mode=Update")
     tail = _read_tail(os.path.join(folder, UPDATE_LOG_FILE), cap=64 * 1024)
@@ -118,7 +125,10 @@ def handed_over_to(folder: str, version: str, state) -> bool:
             at = time.mktime(time.strptime(line[1:20], "%Y-%m-%d %H:%M:%S"))
         except (ValueError, OverflowError):
             continue
-        if started - HANDOVER_SLACK_S <= at <= beat + HANDOVER_SLACK_S:
+        # The handover must happen while the previous run was alive: never
+        # before it started (log stamps are whole seconds, hence STAMP_S), at
+        # most HANDOVER_SLACK_S after its last beat.
+        if started - STAMP_S <= at <= beat + HANDOVER_SLACK_S:
             return True
     return False
 
