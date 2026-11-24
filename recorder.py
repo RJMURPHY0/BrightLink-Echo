@@ -157,6 +157,11 @@ _DEVICE_REFRESH_QUIET_SECONDS = 20.0  # never run the periodic default-follow wi
 # only knows about those two — calls it healthy forever and the watchdog never
 # fires. This is the second, content-based liveness signal.
 _SILENT_STREAM_SECONDS = 25.0
+# A block whose loudest sample is at or below this carries no real signal
+# (about -80 dBFS; room noise on a live mic peaks near 0.0007). Same value as
+# mic_access.DEAD_PEAK (pinned by tests/test_mic_failed_pill.py). Used only by
+# the live "Mic failed" check: a mic that has never gone above it.
+_DEAD_PEAK = 0.0001
 # Backoff between silence-triggered reopens. A hardware-muted mic also delivers
 # exact zeros, and must settle into an occasional retry rather than a reopen
 # every _SILENT_STREAM_SECONDS. Reset as soon as any real signal arrives.
@@ -345,6 +350,11 @@ class Recorder:
         # Start of the current unbroken run of bit-exact-silent callbacks, or
         # 0.0 when the last buffer carried signal. See _SILENT_STREAM_SECONDS.
         self._silent_run_started_ts: float = 0.0
+        # Start of the current run of blocks at or below _DEAD_PEAK (0.0 when
+        # the last block carried real signal), and every device that has ever
+        # carried real signal since launch. Read by live_health() only.
+        self._dead_run_started_ts: float = 0.0
+        self._live_devices: set = set()
         self._silence_recovery_count: int = 0
         self._silence_retry_after: float = 0.0
         # Set when the watchdog reopened a silently-dead stream. Polled and
@@ -512,6 +522,11 @@ class Recorder:
                         self._silence_retry_after = 0.0
                 elif self._silent_run_started_ts == 0.0:
                     self._silent_run_started_ts = now
+                if peak > _DEAD_PEAK:
+                    self._dead_run_started_ts = 0.0
+                    self._live_devices.add(self._active_device_name)
+                elif self._dead_run_started_ts == 0.0:
+                    self._dead_run_started_ts = now
             if self._aux_active:
                 self._aux_chunks.append(data)
             # Adaptive floor: drops fast onto quiet, creeps up slowly, so a
@@ -584,6 +599,18 @@ class Recorder:
         # force_fresh re-inits PortAudio so a device plugged in after launch
         # is actually visible to the enumeration.
         self._ensure_warm_stream(force_fresh=True)
+
+    def live_health(self) -> tuple[float, float, str, float, bool]:
+        """(heartbeat age, exact-silence run, device name, dead-input run,
+        device has ever carried real signal) for the live "Mic failed" check
+        (mic_health). Read-only; never touches the stream."""
+        with self._lock:
+            dead_ts = self._dead_run_started_ts
+            device = self._active_device_name or ""
+            ever_live = self._active_device_name in self._live_devices
+        dead = (time.monotonic() - dead_ts) if dead_ts > 0.0 else 0.0
+        return (self._heartbeat_age(), self._silent_run_seconds(), device,
+                dead, ever_live)
 
     def _heartbeat_age(self) -> float:
         """Seconds since the last audio callback (inf if none ever fired)."""

@@ -211,6 +211,99 @@ def _choose_inject_target(start_hwnd: int, start_child: int,
     return start_hwnd, start_child, False
 
 
+class _MicHealthWatch:
+    """One recording's live "Mic failed" check, ticked from the mic level loop
+    (never the press path). mic_health decides; this holds the per-recording
+    state, asks Windows (once, off-thread) whether a silent mic is switched
+    off or muted, flips the pill and logs the first failure."""
+
+    def __init__(self, recorder, popup, log_event, opened_at):
+        self._recorder = recorder
+        self._popup = popup
+        self._log = log_event
+        # When recorder.start() returned for the current press (monotonic),
+        # 0.0 while it is still opening. Nothing is judged before it returns:
+        # a slow but working open (dead warm stream, Bluetooth profile switch,
+        # busy process) must never flash "Mic failed".
+        self._opened_at = opened_at
+        self._opened_seen = 0.0
+        self._t0 = 0.0
+        self._start_samples = 0
+        self._failed = False
+        self._logged = False
+        self._blocked = None      # None = not asked yet, then True/False
+        self._cause = ""
+
+    def _begin(self, opened: float) -> None:
+        """A new recording's mic is open: start judging it from scratch."""
+        self._opened_seen = opened
+        self._t0 = opened
+        self._start_samples = self._recorder.total_recorded_samples
+        self._failed = False      # a new press re-draws the pill anyway
+        self._logged = False
+        self._blocked = None
+        self._cause = ""
+
+    def _ask_windows(self, device: str) -> None:
+        self._blocked = False     # asked; stays False unless Windows says so
+
+        def _run():
+            try:
+                import mic_access
+                cause, _diag = mic_access.diagnose(0.0, device)
+                self._cause = cause
+                # Exact silence alone is not proof (noise suppression); only a
+                # switch, mute or zero volume Windows reports counts.
+                self._blocked = (mic_access.is_blocking(cause)
+                                 and cause != mic_access.DIGITAL_SILENCE)
+            except Exception as e:
+                print(f"[App] Mic block check failed (non-fatal): {e}")
+
+        threading.Thread(target=_run, daemon=True, name="mic-block-check").start()
+
+    def tick(self) -> None:
+        import mic_health
+        opened = self._opened_at() or 0.0
+        if opened <= 0.0:
+            return                # start() has not returned yet
+        if opened != self._opened_seen:
+            self._begin(opened)
+        heartbeat, silent, device, dead, ever_live = self._recorder.live_health()
+        now = time.monotonic()
+        elapsed = now - self._t0
+        # Only silence inside THIS dictation counts: a mic idle all morning
+        # behind noise suppression has a long dead run before the press.
+        silent = min(silent, elapsed)
+        dead = min(dead, elapsed)
+        if self._blocked is None and mic_health.needs_block_check(silent):
+            self._ask_windows(device)
+        new = self._recorder.total_recorded_samples - self._start_samples
+        failed = mic_health.mic_failed(elapsed, new, heartbeat, silent,
+                                       bool(self._blocked), dead, ever_live)
+        if failed == self._failed:
+            return
+        self._failed = failed
+        self._popup.set_mic_failed(failed)
+        print(f"[App] Mic {'FAILED' if failed else 'back'} while recording "
+              f"(device={device or 'default'}, samples={new}, "
+              f"heartbeat={heartbeat:.2f}s, silent={silent:.2f}s, "
+              f"dead={dead:.2f}s, ever_live={ever_live}, "
+              f"cause={self._cause or '-'})")
+        if failed and not self._logged:
+            self._logged = True
+            self._log("mic_failed_live", {
+                "device": device,
+                "elapsed_ms": int(elapsed * 1000),
+                "new_samples": int(new),
+                "heartbeat_age_ms": (int(heartbeat * 1000)
+                                     if heartbeat != float("inf") else -1),
+                "silent_ms": int(silent * 1000),
+                "dead_ms": int(dead * 1000),
+                "ever_live": bool(ever_live),
+                "cause": self._cause,
+            })
+
+
 class WhisperFlowApp:
     """
     Main application controller.
@@ -2514,6 +2607,7 @@ class WhisperFlowApp:
 
     def _on_start_recording(self) -> None:
         self._last_dictation_ts = time.time()
+        mic_open = False
         try:
             # _on_state_change captures the target synchronously on the hotkey
             # thread. Preserve that snapshot: by the time this daemon callback
@@ -2555,6 +2649,8 @@ class WhisperFlowApp:
             # speak, so audio must already be flowing when they hear it. (With
             # the warm mic this also captures ~0.8s of pre-roll.)
             self.recorder.start()
+            mic_open = True
+            self._mic_open_ts = time.monotonic()
             self._press_mark("capture")
             # Instant press = warm stream was live + pre-roll seeded: nothing
             # lost. Any other start had a window where speech was dropped —
@@ -2659,6 +2755,17 @@ class WhisperFlowApp:
                 self._live_inject_active = False
         except Exception as e:
             print(f"[App] Failed to start recording: {e}")
+            # The pill went up as "Starting…"; never leave it implying the
+            # mic is listening. Say it failed, then clear it. Only when the mic
+            # itself would not open: any later error is not the mic's fault.
+            try:
+                if not mic_open:
+                    self.popup.flash_mic_failed(
+                        hwnd=getattr(self, "_recording_hwnd", 0) or 0,
+                        cursor_x=getattr(self, "_rec_anchor_x", 0),
+                        cursor_y=getattr(self, "_rec_anchor_y", 0))
+            except Exception as pe:
+                print(f"[App] Mic failed pill not shown: {pe}")
             self.feedback.error_occurred(str(e))
             self.hotkey_manager.set_idle()
 
@@ -3854,6 +3961,7 @@ class WhisperFlowApp:
         if state == AppState.RECORDING:
             self._press_t0 = time.perf_counter()
             self._press_marks = {}
+            self._mic_open_ts = 0.0   # the live mic check waits for start()
         self.app_window.update_status(
             state.value
         )  # "idle" / "recording" / "processing"
@@ -3966,7 +4074,8 @@ class WhisperFlowApp:
             self._mic_loop_running.clear()
             self._caption_stop_event.set()
             self._caption_loop_running.clear()
-            if not self.popup.is_user_facing:
+            if not (self.popup.is_user_facing
+                    or getattr(self.popup, "holding_mic_failed", False)):
                 self.popup.hide()
 
     def _mic_level_loop(self) -> None:
@@ -3979,7 +4088,14 @@ class WhisperFlowApp:
                 break
             time.sleep(0.04)
 
+        health = _MicHealthWatch(
+            self.recorder, self.popup, self._log_error_event,
+            lambda: getattr(self, "_mic_open_ts", 0.0))
         while self.recorder.is_recording and self._mic_loop_running.is_set():
+            try:
+                health.tick()
+            except Exception as e:
+                print(f"[App] Mic health check failed (non-fatal): {e}")
             try:
                 rms, peak = self.recorder.get_live_levels()
                 # High gain — typical Windows mic RMS is 0.001-0.02 at default

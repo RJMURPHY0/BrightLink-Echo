@@ -14,13 +14,18 @@ leaves "a big" as spoken. Each candidate is tried against:
 
   1. _ALIASES: the everyday names people actually say ("laughing face",
      "smiley", "heart", "star"), mapped to the emoji they mean. These win over
-     the Unicode name when the two disagree ("smiling face" is the old
-     text-style U+263A in Unicode; people mean 😊).
-  2. The Unicode character name, so any emoji works by its official name
-     ("face with rolling eyes", "rocket", "pizza"), also tried with " face"
-     and " sign" added ("thinking" -> THINKING FACE, "thumbs up" -> THUMBS UP
-     SIGN). Only code points in the emoji blocks count, so "letter a emoji"
-     never produces a stray letter.
+     the official name when the two disagree ("smiling face" is the old
+     text-style U+263A officially; people mean 😊).
+  2. emoji_names.py: Unicode's official emoji list (CLDR names, the ones
+     Windows' emoji panel shows), every emoji including flags ("united
+     kingdom flag"), skin tones ("thumbs up medium skin tone"), keycaps and
+     joined emoji ("man technologist"). Also tried with " face" added
+     ("thinking" -> thinking face). Loaded on the first spoken emoji only.
+  3. The Unicode character name ("heavy dollar sign"), also with " face" and
+     " sign" added.
+
+Whatever is found must be on the official list, so a symbol that is not an
+emoji ("letter a", U+1F5CE DOCUMENT) never comes out.
 
 If nothing resolves, the text is left exactly as spoken ("I sent an emoji").
 """
@@ -28,11 +33,12 @@ If nothing resolves, the text is left exactly as spoken ("I sent an emoji").
 import re
 import unicodedata
 
-_MAX_WORDS = 6
+_MAX_WORDS = 14   # longest official name: 13 words (mixed skin-tone couples)
 _VS16 = "️"   # emoji presentation selector for BMP symbols (❤ -> ❤️)
 
 # Everyday names -> emoji. Keys are lower case, single spaces.
 _ALIASES = {
+    "smiling": "😊",
     # faces
     "smiling face": "\U0001F60A", "smiley face": "\U0001F60A",
     "smiley": "\U0001F60A", "smile": "\U0001F60A", "happy face": "\U0001F60A",
@@ -198,15 +204,22 @@ _EMOJI_RANGES = (
 _EMOJI_SINGLES = frozenset((0x00A9, 0x00AE, 0x203C, 0x2049, 0x2122, 0x2139,
                             0x3030, 0x303D, 0x3297, 0x3299))
 
-# A word as the speech engine writes it: letters, digits, an inner apostrophe
-# or hyphen ("t-rex", "four-leaf").
-_WORD = r"[A-Za-z0-9]+(?:['\-][A-Za-z0-9]+)*"
-# The name words may not themselves be "emoji": "pizza emoji ok hand emoji"
-# is two emoji, never one name "pizza emoji ok hand".
-_TRIGGER = re.compile(
-    rf"((?:(?!emoji(?:s|es)?\b){_WORD}[ \t,]+){{1,{_MAX_WORDS}}})emoji(?:s|es)?\b",
+# A word as the speech engine writes it: letters (accented too, "Côte"),
+# digits, an inner apostrophe or hyphen ("t-rex", "d'Ivoire").
+_WORD = r"[^\W_]+(?:['’\-][^\W_]+)*"
+# Each "emoji" said: the trigger word, standing on its own.
+_TRIGGER_WORD = re.compile(r"(?<![^\s,:])emoji(?:s|es)?\b", re.IGNORECASE)
+# The run of words right before it (up to _MAX_WORDS). The words may not
+# themselves be "emoji": "pizza emoji ok hand emoji" is two emoji, never one
+# name "pizza emoji ok hand". Words may be split by spaces, a comma or a colon
+# ("thumbs up, medium skin tone", "flag: France").
+_NAME_RUN = re.compile(
+    rf"((?:(?!emoji(?:s|es)?\b){_WORD}[ \t,:]+){{1,{_MAX_WORDS}}})$",
     re.IGNORECASE,
 )
+# Only this much text before each "emoji" is searched, so a long dictation
+# costs the same as a short one (the longest name is well under it).
+_LOOKBACK = 240
 _WORDS = re.compile(_WORD)
 
 
@@ -234,34 +247,116 @@ def _by_unicode_name(name: str):
     return None
 
 
+def normalise(name: str) -> str:
+    """One form for spoken and table names: lower case, accents and
+    apostrophes dropped, every run of spaces, hyphens, colons, commas one
+    space, and anything else that is not a letter or digit
+    ("Flag: Côte d'Ivoire" -> "flag cote divoire", "A button (blood type)"
+    -> "a button blood type")."""
+    s = unicodedata.normalize("NFKD", name)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r"['’]", "", s.lower())
+    return " ".join(re.split(r"[^a-z0-9]+", s)).strip()
+
+
+_TABLE = None
+_FULL = None
+_COMMA_KEYS = frozenset()   # official names that themselves hold a comma   # emoji with its presentation marks dropped -> official form
+
+
+def _load() -> None:
+    """The Unicode emoji list (emoji_names.py), loaded on the first spoken
+    emoji only, so ordinary dictation never pays for it."""
+    global _TABLE, _FULL, _COMMA_KEYS
+    if _TABLE is not None:
+        return
+    try:
+        from emoji_names import NAMES, COMMA_NAMES
+    except Exception as e:   # never break dictation over the table
+        print(f"[Emoji] Name table unavailable: {e}")
+        NAMES, COMMA_NAMES = {}, frozenset()
+    _COMMA_KEYS = frozenset(COMMA_NAMES)
+    _TABLE = NAMES
+    _FULL = {}
+    for v in NAMES.values():
+        _FULL.setdefault(v.replace(_VS16, ""), v)
+
+
+def _official_form(ch: str):
+    """ch as the official list writes it, or None if it is not an emoji.
+    Without the list (it failed to load) BMP symbols get their colour mark."""
+    if not _FULL:
+        return _present(ch)
+    return _FULL.get(ch.replace(_VS16, ""))
+
+
 def lookup(name: str):
-    """The emoji for a spoken name, or None. Case and hyphens do not matter."""
-    key = " ".join(re.split(r"[\s\-]+", name.strip().lower()))
+    """The emoji for a spoken name, or None.
+
+    Order: everyday aliases (what people mean), then Unicode's official emoji
+    list by name (every emoji: flags, skin tones, keycaps, joined emoji), then
+    the name with "face" added ("thinking" -> thinking face), then the Unicode
+    character name ("heavy dollar sign"). Whatever is found must be on the
+    official list, so a symbol that is not an emoji (U+1F5CE DOCUMENT) never
+    comes out."""
+    key = normalise(name)
     if not key:
         return None
+    _load()
     ch = _ALIASES.get(key)
     if ch is None:
+        ch = _TABLE.get(key) or _TABLE.get(key + " face")
+    if ch is None:
         ch = _by_unicode_name(key)
-    return _present(ch) if ch else None
+    return _official_form(ch) if ch else None
 
 
-def _sub(m: "re.Match") -> str:
-    before = m.group(1)
-    spans = [w for w in _WORDS.finditer(before)]
+def _comma_ok(name: str) -> bool:
+    """A name may cross a comma only where the official name has one
+    ("family: man, woman, boy") or a skin tone follows it ("thumbs up,
+    medium skin tone"). Prose before a comma is never part of the name:
+    "Okay, hand emoji" is not the OK hand."""
+    if "," not in name:
+        return True
+    _load()
+    if normalise(name) in _COMMA_KEYS:
+        return True
+    return normalise(name.rsplit(",", 1)[1]).endswith("skin tone")
+
+
+def _resolve(before: str):
+    """before (the words ahead of "emoji") with its name swapped for the
+    emoji, or None when no run of its words is a name."""
+    spans = list(_WORDS.finditer(before))
     # Longest name first, always ending on the word right before "emoji".
     for start in range(len(spans)):
         name = before[spans[start].start():spans[-1].end()]
-        # A name never spans a comma: "great, star emoji" is "great," + star.
-        if "," in name:
+        if not _comma_ok(name):
             continue
         ch = lookup(name)
         if ch:
             return before[:spans[start].start()] + ch
-    return m.group(0)
+    return None
 
 
 def apply_spoken_emoji(text: str) -> str:
     """Replace "<name> emoji" with the emoji. Unknown names stay as spoken."""
     if not text or "emoji" not in text.lower():
         return text
-    return _TRIGGER.sub(_sub, text)
+    out = []
+    done = 0                       # text before this is already in out
+    for m in _TRIGGER_WORD.finditer(text):
+        lo = max(done, m.start() - _LOOKBACK)
+        run = _NAME_RUN.search(text, lo, m.start())
+        if not run:
+            continue
+        swapped = _resolve(run.group(1))
+        if swapped is None:
+            continue
+        out.append(text[done:run.start()])
+        out.append(swapped)
+        done = m.end()
+    if not out:
+        return text
+    out.append(text[done:])
+    return "".join(out)

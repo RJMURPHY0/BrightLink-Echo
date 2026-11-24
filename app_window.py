@@ -6,6 +6,7 @@ Dark theme with rounded-corner cards via Canvas.
 """
 
 import brand
+from glass import GLASS_ALPHA
 import bisect
 import json
 import threading
@@ -282,9 +283,9 @@ def show_toast(root: tk.Misc, message: str, duration_ms: int = 5000) -> None:
 
     def _fade(alpha: float, step: float):
         try:
-            alpha = max(0.0, min(1.0, alpha + step))
+            alpha = max(0.0, min(GLASS_ALPHA, alpha + step))
             toast.attributes("-alpha", alpha)
-            if step > 0 and alpha < 1.0:
+            if step > 0 and alpha < GLASS_ALPHA:
                 toast.after(25, _fade, alpha, step)
             elif step < 0:
                 if alpha > 0.0:
@@ -12091,7 +12092,7 @@ class AppWindow:
                     pop.after(16, _fade, a)
                 except tk.TclError:
                     pass
-            _fade(1.0)
+            _fade(GLASS_ALPHA)
 
         def _auto_dismiss():
             # Held while the pointer rests on the card, so it never vanishes
@@ -12140,9 +12141,9 @@ class AppWindow:
             try:
                 if state["closing"]:
                     return
-                a = min(1.0, a + 0.14)
+                a = min(GLASS_ALPHA, a + 0.14)
                 pop.attributes("-alpha", a)
-                if a < 1.0:
+                if a < GLASS_ALPHA:
                     pop.after(16, _fade_in, a)
             except tk.TclError:
                 pass

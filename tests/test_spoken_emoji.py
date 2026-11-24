@@ -9,13 +9,14 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from spoken_commands import apply_spoken_commands as sc
 from spoken_emoji import apply_spoken_emoji as se, lookup
 
-SMILE, LAUGH, STAR = "\U0001F60A", "\U0001F602", "⭐️"
+SMILE, LAUGH, STAR = "😊", "😂", "⭐"
 
 
 class NamesBecomeEmoji(unittest.TestCase):
@@ -69,7 +70,84 @@ class NamesBecomeEmoji(unittest.TestCase):
         self.assertEqual(se("star emojis"), STAR)
 
 
+class EveryOfficialEmoji(unittest.TestCase):
+    """Ryan (24 Nov 2026): "make sure absolutely all emojis work"."""
+
+    def test_every_official_name_turns_into_its_emoji(self):
+        from emoji_names import NAMES
+        from spoken_emoji import _ALIASES
+        self.assertGreater(len(NAMES), 4000)
+        bad = [k for k, v in NAMES.items()
+               if k not in _ALIASES and se(f"{k} emoji") != v]
+        self.assertEqual(bad, [])
+
+    def test_every_official_name_works_mid_sentence(self):
+        from emoji_names import NAMES
+        from spoken_emoji import _ALIASES
+        bad = [k for k, v in NAMES.items() if k not in _ALIASES
+               and sc(f"Great news {k} emoji see you soon")
+               != f"Great news {v} see you soon"]
+        self.assertEqual(bad, [])
+
+    def test_flags_skin_tones_keycaps_and_joined(self):
+        for said, want in [
+            ("united kingdom flag emoji", "\U0001F1EC\U0001F1E7"),
+            ("flag: France emoji", "\U0001F1EB\U0001F1F7"),
+            ("Côte d'Ivoire flag emoji", "\U0001F1E8\U0001F1EE"),
+            ("thumbs up medium skin tone emoji", "\U0001F44D\U0001F3FD"),
+            ("thumbs up, medium skin tone emoji", "\U0001F44D\U0001F3FD"),
+            ("keycap 7 emoji", "7️⃣"),
+            ("man technologist emoji", "\U0001F468‍\U0001F4BB"),
+            ("rainbow flag emoji", "\U0001F3F3️‍\U0001F308"),
+            ("beaming face with smiling eyes emoji", "\U0001F601"),
+            ("grinning squinting face emoji", "\U0001F606"),
+            ("a button blood type emoji", "🅰️"),
+        ]:
+            with self.subTest(said=said):
+                self.assertEqual(se(said), want)
+
+    def test_aliases_are_all_real_emoji(self):
+        from spoken_emoji import _ALIASES
+        self.assertEqual([k for k in _ALIASES if lookup(k) is None], [])
+
+    def test_symbols_that_are_not_emoji_never_come_out(self):
+        # Unicode names a few pictographs that are not emoji (they draw as
+        # empty boxes): "document" is U+1F5CE.
+        for said in ["document emoji", "page emoji", "overlap emoji",
+                     "perspective emoji", "screen emoji"]:
+            with self.subTest(said=said):
+                self.assertEqual(se(said), said)
+
+    def test_table_failure_never_breaks_dictation(self):
+        import spoken_emoji as m
+        saved = (m._TABLE, m._FULL, m._COMMA_KEYS)
+        try:
+            m._TABLE = m._FULL = None
+            with mock.patch.dict(sys.modules, {"emoji_names": None}):
+                self.assertEqual(se("I sent an emoji"), "I sent an emoji")
+                self.assertEqual(se("rocket emoji"), "\U0001F680")
+        finally:
+            m._TABLE, m._FULL, m._COMMA_KEYS = saved
+
+
 class ProseStaysAsSaid(unittest.TestCase):
+
+    def test_prose_before_a_comma_is_never_part_of_a_name(self):
+        for said in ["Okay, hand emoji", "No, entry emoji"]:
+            with self.subTest(said=said):
+                self.assertEqual(se(said), said)
+        self.assertEqual(se("red, heart emoji"), "red, ❤️")
+        self.assertEqual(se("family: man, woman, boy emoji"),
+                         "👨‍👩‍👦")
+
+    def test_long_dictations_stay_fast(self):
+        import time
+        text = " ".join(["word"] * 3000) + " laughing face emoji"
+        se(text)
+        t = time.perf_counter()
+        for _ in range(10):
+            self.assertTrue(se(text).endswith(LAUGH))
+        self.assertLess((time.perf_counter() - t) / 10, 0.05)
 
     def test_talking_about_emoji(self):
         for said in ["I sent an emoji", "I would like emoji in Echo",

@@ -12,6 +12,7 @@ import ctypes
 import ctypes.wintypes
 import math
 import brand
+from glass import GLASS_ALPHA
 import os
 import threading
 import time
@@ -994,6 +995,10 @@ class FloatingPopup:
         def _apply() -> None:
             if self._mode != "status":
                 return
+            # A live "Mic failed" is only cleared by set_mic_failed(False),
+            # never by a late "Recording" flip.
+            if getattr(self, "_mic_failed_shown", False):
+                return
             try:
                 if self._status_label.cget("text"):
                     with self._pill_edit():
@@ -1002,6 +1007,59 @@ class FloatingPopup:
                 pass
 
         self.root.after(0, _apply)
+
+    def set_mic_failed(self, failed: bool, text: str = "Mic failed") -> None:
+        """Flip the recording pill between "Recording" and a red "Mic failed"
+        while the user holds the key (mic_health decides). Flips back when
+        audio returns. No-op outside status mode. Safe from any thread."""
+        if not self.root:
+            return
+
+        def _apply() -> None:
+            if self._mode != "status":
+                return
+            try:
+                if failed:
+                    label = text
+                else:
+                    # Caption mode keeps its label empty (the caption bar is
+                    # the cue there).
+                    label = "" if self._captions_enabled else "Recording"
+                with self._pill_edit():
+                    self._status_label.configure(
+                        text=label,
+                        fg=CP["error"] if failed else CP["subtext"])
+                self._mic_failed_shown = failed
+            except tk.TclError:
+                pass
+
+        self.root.after(0, _apply)
+
+    def flash_mic_failed(self, hwnd: int = 0, cursor_x: int = 0,
+                         cursor_y: int = 0, text: str = "Mic failed",
+                         ms: int = 2600) -> None:
+        """The press could not open any microphone: show a red "Mic failed"
+        pill instead of "Recording", then hide it."""
+        # Set before anything is queued: the app goes idle right after this
+        # and must not hide the pill it is showing (holding_mic_failed).
+        self._mic_failed_until = time.time() + ms / 1000.0
+        self.flash_status(text, hwnd=hwnd, cursor_x=cursor_x,
+                          cursor_y=cursor_y, ms=ms)
+        if not self.root:
+            return
+
+        def _red() -> None:
+            if self._mode != "status":
+                return
+            try:
+                with self._pill_edit():
+                    self._status_label.configure(fg=CP["error"])
+                self._mic_failed_shown = True
+            except tk.TclError:
+                pass
+
+        # Queued after flash_status's own after(0) entry into status mode.
+        self.root.after(0, _red)
 
     def show_cursor_icon(
         self,
@@ -1083,6 +1141,11 @@ class FloatingPopup:
     def is_user_facing(self) -> bool:
         return self._mode in ("icon", "refinement")
 
+    @property
+    def holding_mic_failed(self) -> bool:
+        """True while a "Mic failed" flash is up; its own timer hides it."""
+        return time.time() < getattr(self, "_mic_failed_until", 0.0)
+
     # ── Tkinter setup ──────────────────────────────────────────────────────────
 
     def initialize(self, main_root: tk.Tk) -> None:
@@ -1140,7 +1203,7 @@ class FloatingPopup:
             win.geometry("+-4000+-4000")
             win.overrideredirect(True)
             win.attributes("-topmost", True)
-            win.attributes("-alpha", 0.97)
+            win.attributes("-alpha", GLASS_ALPHA)
             win.attributes("-toolwindow", True)
             win.configure(bg=CP["bg"])
             win.withdraw()
@@ -1744,11 +1807,16 @@ class FloatingPopup:
             # Colour is a one-off, not a per-frame job: the bars are orange for
             # the whole recording. Re-sending the same fill for every bar at
             # 25fps was ~500 no-op Tcl round-trips a second on the UI thread.
-            if not getattr(self, "_bars_active", False):
+            # A failed mic shows flat grey bars: no fake idle motion that
+            # would look like it is still listening.
+            failed = getattr(self, "_mic_failed_shown", False)
+            want = "failed" if failed else "active"
+            if getattr(self, "_bars_active", False) != want:
+                fill = CP["bar_idle"] if failed else CP["bar_active"]
                 for bid in self._bar_ids:
-                    self._wave_canvas.itemconfigure(bid, fill=CP["bar_active"])
-                self._bars_active = True
-            level = self._mic_level
+                    self._wave_canvas.itemconfigure(bid, fill=fill)
+                self._bars_active = want
+            level = 0.0 if failed else self._mic_level
             t     = time.time()
             self._last_activity = t
             mid   = CANVAS_H // 2
@@ -1761,7 +1829,8 @@ class FloatingPopup:
                 phase = self._bar_phases[i]
 
                 # Gentle idle wave — always visible even with no microphone input
-                idle_osc = math.sin(t * 4.0 + phase) * 0.5 + 0.5        # 0 → 1
+                idle_osc = 0.0 if failed else (
+                    math.sin(t * 4.0 + phase) * 0.5 + 0.5)              # 0 → 1
                 h_idle   = BAR_MIN_H + (idle_max - BAR_MIN_H) * idle_osc
 
                 # Voice spike — grows with mic level, faster oscillation per bar
@@ -2090,6 +2159,13 @@ class FloatingPopup:
         self._hide_all_frames()
 
         with self._pill_edit():
+            # A red "Mic failed" from an earlier press never carries over, and
+            # a new recording ends an earlier failed press's hold on the pill
+            # (a quick retry must still be hidden when it goes idle).
+            self._status_label.configure(fg=CP["subtext"])
+            self._mic_failed_shown = False
+            if recording:
+                self._mic_failed_until = 0.0
             # Always remove timer/canvas/caption from pack order first so we control placement
             self._timer_lbl.pack_forget()
             self._wave_canvas.pack_forget()
