@@ -333,8 +333,28 @@ def _endpoints_with_timeout() -> list:
 
 # ── Diagnosis ────────────────────────────────────────────────────────────────
 
+# Loudest sample at or below this over a clip of DEAD_MIN_S or longer means
+# the input carries no signal at all (about -80 dBFS). Room noise on a live
+# mic peaks around 0.0007 and speech far above; James Murphy's Focusrite
+# (24 Nov 2026) gave 0.00001 on every press and was reported "ok", so he only
+# ever saw "No speech detected".
+DEAD_PEAK = 0.0001
+DEAD_MIN_S = 1.5
+
+
+def is_dead_input(peak: float, duration_s=None) -> bool:
+    """True when the clip proves the input sent nothing: exact zeros, or a
+    near-zero peak over a clip long enough to have held speech."""
+    p = float(peak or 0.0)
+    if p == 0.0:
+        return True
+    return (duration_s is not None and float(duration_s) >= DEAD_MIN_S
+            and p <= DEAD_PEAK)
+
+
 def diagnose(peak: float, device_name: str = "", *, state=None,
-             endpoints=None, privacy_only: bool = False) -> tuple:
+             endpoints=None, privacy_only: bool = False,
+             duration_s=None) -> tuple:
     """(cause, detail) for a dictation that came back with no speech.
 
     peak is the loudest sample of the clip (0..1). Only causes that are
@@ -367,7 +387,7 @@ def diagnose(peak: float, device_name: str = "", *, state=None,
         elif ep.get("volume") is not None and ep["volume"] < _VOLUME_FLOOR:
             cause = VOLUME_ZERO
     detail["endpoints"] = len(endpoints)
-    if cause == OK and float(peak or 0.0) == 0.0:
+    if cause == OK and is_dead_input(peak, duration_s):
         cause = DIGITAL_SILENCE
     detail["cause"] = cause
     return cause, detail
@@ -400,7 +420,7 @@ def message_for(cause: str, device_name: str = "") -> tuple:
                 "Sound settings", SOUND_URI)
     if cause == DIGITAL_SILENCE:
         return (f"{mic[0].upper() + mic[1:]} is sending no sound at all.\n"
-                "Check its mute key or switch, or pick another mic.",
+                "Check its cable, gain knob and mute switch, or pick another mic.",
                 "Sound settings", SOUND_URI)
     return ("", "", "")
 

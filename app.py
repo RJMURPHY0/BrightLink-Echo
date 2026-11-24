@@ -1920,8 +1920,9 @@ class WhisperFlowApp:
         either way so the fleet log can tell these cases apart."""
         try:
             import mic_access
-            cause, diag = mic_access.diagnose(peak, device,
-                                              privacy_only=privacy_only)
+            cause, diag = mic_access.diagnose(
+                peak, device, privacy_only=privacy_only,
+                duration_s=detail.get("duration_s"))
             detail["privacy"] = diag.get("privacy")
             if "endpoint" in diag:
                 detail["endpoint"] = diag["endpoint"]
@@ -1936,6 +1937,12 @@ class WhisperFlowApp:
                           if k in ("endpoints", "endpoint_error")})
             self._log_error_event("mic_blocked", event)
             self._report_mic_blocked(cause, message, event)
+            if cause == mic_access.DIGITAL_SILENCE:
+                # A stream left silent by a sample-rate change or a driver
+                # reset only recovers when reopened; off the stop path.
+                threading.Thread(target=self.recorder.restart_warm,
+                                 daemon=True,
+                                 name="warm-restart-silent").start()
             self._mic_fix = (message, button, uri, cause, device)
             self.feedback.error_occurred(message)
             return True

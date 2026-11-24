@@ -50,6 +50,25 @@ class DiagnoseTests(unittest.TestCase):
         self.assertEqual(mic_access.DIGITAL_SILENCE, mic_access.diagnose(
             0.0, EP_OK["name"], state=ALLOW, endpoints=[EP_OK])[0])
 
+    def test_near_zero_over_a_real_press_is_digital_silence(self):
+        # James Murphy, 24 Nov 2026: Focusrite peak 0.00001 over 2-7 s
+        # presses was "ok", so he only saw "No speech detected".
+        for secs in (2.22, 6.91):
+            self.assertEqual(mic_access.DIGITAL_SILENCE, mic_access.diagnose(
+                0.00001, EP_OK["name"], state=ALLOW, endpoints=[EP_OK],
+                duration_s=secs)[0])
+
+    def test_near_zero_on_a_tap_or_without_a_length_is_not_blamed(self):
+        for secs in (None, 0.6):
+            self.assertEqual(mic_access.OK, mic_access.diagnose(
+                0.00001, EP_OK["name"], state=ALLOW, endpoints=[EP_OK],
+                duration_s=secs)[0])
+
+    def test_room_noise_over_a_long_press_is_not_blamed(self):
+        self.assertEqual(mic_access.OK, mic_access.diagnose(
+            0.0007, EP_OK["name"], state=ALLOW, endpoints=[EP_OK],
+            duration_s=6.0)[0])
+
     def test_a_live_quiet_mic_is_not_a_problem(self):
         # Room noise, nobody spoke: never prompt.
         cause, _ = mic_access.diagnose(0.0007, EP_OK["name"], state=ALLOW,
