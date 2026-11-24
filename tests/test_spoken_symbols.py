@@ -197,6 +197,32 @@ class ExistingBehaviourTests(unittest.TestCase):
         self.assertEqual(sc(src), "line one\n\nline two/three")
 
 
+class DigitRunTests(unittest.TestCase):
+    """Numbers said digit by digit (Ryan's Alt+F feedback, 24 Nov 2026:
+    "three one zero zero" came back as words, not 3100)."""
+
+    def test_the_reported_port(self):
+        self.assertEqual(sc("Three one zero zero."), "3100.")
+        self.assertEqual(sc("running locally on my three one zero zero host"),
+                         "running locally on my 3100 host")
+
+    def test_codes_phone_numbers_and_years(self):
+        self.assertEqual(sc("one zero one"), "101")
+        self.assertEqual(sc("four oh four page"), "404 page")
+        self.assertEqual(sc("two zero two six"), "2026")
+        self.assertEqual(sc("call zero seven seven one two three four five six seven eight"),
+                         "call 07712345678")
+
+    def test_symbol_rules_see_the_number(self):
+        self.assertEqual(sc("three one zero zero percent"), "3100%")
+
+    def test_prose_and_short_counts_stay_words(self):
+        for s in ("one two three go", "one or two", "zero zero", "the one two",
+                  "it's one-on-one", "oh one two three", "nine nine nine",
+                  "one, two, three, four", "someone two three", "four oh"):
+            self.assertEqual(sc(s), s)
+
+
 class CorpusRegressionTests(unittest.TestCase):
     """Run every real stored transcript through the converter. A transcript
     with no address shape and no percentage must come back byte-identical —
@@ -232,6 +258,9 @@ class CorpusRegressionTests(unittest.TestCase):
                          r"|equals? sign|plus sign|pipe symbol|vertical bar"
                          r"|exclamation|quotation|back ?tick|less ?than sign"
                          r"|greater ?than sign|at symbol|emojis?)\b", text, re.I):
+                continue
+            from spoken_commands import _DIGIT_RUN, _sub_digit_run
+            if any(_sub_digit_run(m) != m.group(0) for m in _DIGIT_RUN.finditer(text)):
                 continue
             if re.search(r"\d\s+times\b|\btimes\s+by\s+\d", text, re.I):
                 continue
