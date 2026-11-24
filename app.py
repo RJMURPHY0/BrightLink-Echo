@@ -2024,6 +2024,9 @@ class WhisperFlowApp:
                 return False
             if privacy_only and not mic_access.is_privacy(cause):
                 return False
+            if (cause == mic_access.DIGITAL_SILENCE
+                    and self._switch_from_dead_mic(device, detail)):
+                return True
             message, button, uri = mic_access.message_for(cause, device)
             event = dict(detail, cause=cause)
             event.update({k: v for k, v in diag.items()
@@ -2042,6 +2045,27 @@ class WhisperFlowApp:
         except Exception as e:
             print(f"[App] mic check failed (non-fatal): {e}")
             return False
+
+    def _switch_from_dead_mic(self, device: str, detail: dict) -> bool:
+        """Auto mode: the mic sent pure silence, so move to the next mic and
+        prove it carries sound (Recorder.switch_to_next_input), off the stop
+        path. A pinned mic is the user's choice and is never switched.
+        Returns True when a switch was started and the user told."""
+        try:
+            to = self.recorder.switch_from_dead_input()
+        except Exception as e:
+            print(f"[App] dead-mic switch failed (non-fatal): {e}")
+            return False
+        if not to:
+            return False
+        self._log_error_event("mic_switched", dict(
+            detail, reason="dead_input", switched_to=to))
+        threading.Thread(target=self.recorder.switch_to_next_input,
+                         daemon=True, name="warm-restart-dead").start()
+        self.feedback.error_occurred(
+            f"No sound from '{device or 'the selected mic'}', switched to "
+            f"'{to}'.\nPlease dictate again.")
+        return True
 
     def _report_mic_blocked(self, cause: str, message: str, event: dict) -> None:
         """Once per cause per session to the BrightLink error log (Admin >

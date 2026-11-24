@@ -162,6 +162,9 @@ _SILENT_STREAM_SECONDS = 25.0
 # mic_access.DEAD_PEAK (pinned by tests/test_mic_failed_pill.py). Used only by
 # the live "Mic failed" check: a mic that has never gone above it.
 _DEAD_PEAK = 0.0001
+# After Auto moves off a dead mic, the new one must show real signal within
+# this long or it is dropped too and the next one tried.
+_DEAD_VERIFY_SECONDS = 1.5
 # Backoff between silence-triggered reopens. A hardware-muted mic also delivers
 # exact zeros, and must settle into an occasional retry rather than a reopen
 # every _SILENT_STREAM_SECONDS. Reset as soon as any real signal arrives.
@@ -355,6 +358,10 @@ class Recorder:
         # carried real signal since launch. Read by live_health() only.
         self._dead_run_started_ts: float = 0.0
         self._live_devices: set = set()
+        # Monotonic time of the last block carrying real signal (above
+        # _DEAD_PEAK). Compared with _stream_opened_ts to prove a newly
+        # opened mic really carries sound.
+        self._last_live_ts: float = 0.0
         self._silence_recovery_count: int = 0
         self._silence_retry_after: float = 0.0
         # A dictation found the input dead (peak at or below _DEAD_PEAK, not
@@ -530,6 +537,7 @@ class Recorder:
                     self._silent_run_started_ts = now
                 if peak > _DEAD_PEAK:
                     self._dead_run_started_ts = 0.0
+                    self._last_live_ts = now
                     self._live_devices.add(self._active_device_name)
                     if self._dead_reopen_count:
                         self._dead_reopen_count = 0
@@ -1614,6 +1622,79 @@ class Recorder:
         self._evidence_preferred = ""
         with self._lock:
             self._mic_advice = None
+
+    # ------------------------------------------------------------------
+    # Dead-mic fallback (Auto only)
+    # ------------------------------------------------------------------
+
+    def switch_from_dead_input(self) -> str:
+        """A dictation proved the current mic sends no sound at all (pure
+        digital silence: an audio interface with nothing plugged in, a dead
+        port). Auto mode only: drop it for this session and return the mic
+        Auto uses next, or '' when the mic is pinned or no other real mic
+        exists. The drop lasts until something is plugged in or out or the
+        user picks a mic (same reset rules as the probe's demotions). Opens
+        nothing: the caller starts switch_to_next_input() off the stop path."""
+        if not self.is_auto_device(self.input_device):
+            return ""
+        dead = (self._active_device_name or "").strip()
+        if not dead:
+            return ""
+        return self._demote_dead_input(dead, self.get_input_devices())
+
+    def _demote_dead_input(self, dead: str, devices: list[dict]) -> str:
+        """Demote `dead` and return Auto's next pick, undoing the demotion
+        when there is no real alternative (never a loopback endpoint)."""
+        key = dead.strip().lower()
+        if not devices or key in self._demoted_devices:
+            return ""
+        self._demoted_devices.add(key)
+        if (self._evidence_preferred or "").strip().lower() == key:
+            self._evidence_preferred = ""
+        self._demotion_topology = frozenset(
+            d["name"].strip().lower() for d in devices)
+        nxt = self.pick_best_input_name(devices)
+        if (not nxt or nxt.strip().lower() in self._demoted_devices
+                or self._auto_rank(nxt) > 3):
+            self._demoted_devices.discard(key)
+            return ""
+        print(f"[Recorder] '{dead}' sends no sound; Auto switching to '{nxt}'.")
+        # The cached fast-path index still points at the dead device.
+        self._active_device_index = None
+        return nxt
+
+    def switch_to_next_input(self) -> None:
+        """Reopen the warm stream on Auto's new pick, then prove it carries
+        sound; a mic that is dead too is dropped and the next one tried.
+        Bounded, Auto only, and abandoned the moment a dictation starts.
+        Runs on a background thread, like every restart_warm call site."""
+        try:
+            self.restart_warm()
+            for _ in range(_PROBE_MAX_CANDIDATES):
+                if not self.is_auto_device(self.input_device):
+                    return
+                with self._lock:
+                    opened = self._stream_opened_ts
+                    name = self._active_device_name
+                deadline = time.monotonic() + _DEAD_VERIFY_SECONDS
+                while time.monotonic() < deadline:
+                    if self.is_recording:
+                        return
+                    with self._lock:
+                        if self._last_live_ts > opened:
+                            print(f"[Recorder] '{name}' carries sound.")
+                            return
+                    time.sleep(0.1)
+                if self.is_recording or not name:
+                    return
+                nxt = self._demote_dead_input(name, self.get_input_devices())
+                if not nxt:
+                    print(f"[Recorder] '{name}' sends no sound either; "
+                          "no other mic to try.")
+                    return
+                self.restart_warm()
+        except Exception as e:
+            print(f"[Recorder] Dead-mic switch failed (non-fatal): {e}")
 
     def get_input_devices(self) -> list[dict]:
         """List available input audio devices, one clean entry per mic.
