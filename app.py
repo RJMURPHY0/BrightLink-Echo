@@ -278,6 +278,13 @@ class _MicHealthWatch:
         if self._blocked is None and mic_health.needs_block_check(silent):
             self._ask_windows(device)
         new = self._recorder.total_recorded_samples - self._start_samples
+        # stop() clears _recording BEFORE it resets the sample counter, so a
+        # count read while still recording is a real count. A tick that lands
+        # on the release (or a counter reset) is never a verdict: Ryan's
+        # 24 Nov 19:44 "Mic failed" was samples=-13824 read mid-stop on a
+        # working mic.
+        if new < 0 or not self._recorder.is_recording:
+            return
         failed = mic_health.mic_failed(elapsed, new, heartbeat, silent,
                                        bool(self._blocked), dead, ever_live)
         if failed == self._failed:

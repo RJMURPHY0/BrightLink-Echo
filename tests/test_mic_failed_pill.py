@@ -70,6 +70,7 @@ class _Recorder:
         self.silent = 0.0
         self.dead = 0.0
         self.ever_live = True
+        self.is_recording = True
 
     def live_health(self):
         return (self.heartbeat, self.silent, "Test Mic", self.dead,
@@ -160,6 +161,21 @@ class Watch(unittest.TestCase):
             self.rec.total_recorded_samples += 640
             self._tick(i * 0.1)
         self.popup.set_mic_failed.assert_not_called()
+
+    def test_release_mid_tick_never_flips(self):
+        # Ryan, 24 Nov 2026 19:44: a working mic, 16 s dictation, the key
+        # released while the level loop ticked. stop() reset the counter and
+        # the tick read samples=-13824, which looked like "no audio".
+        for i in range(1, 20):
+            self.rec.total_recorded_samples += 640
+            self._tick(i * 0.1)
+        self.rec.is_recording = False
+        self.rec.total_recorded_samples = 0      # stop() reset the counter
+        self._tick(2.0)
+        self.rec.is_recording = True             # counter reset, still flagged
+        self._tick(2.1)
+        self.popup.set_mic_failed.assert_not_called()
+        self.log.assert_not_called()
 
     def test_privacy_switch_off_flips_after_windows_says_so(self):
         import mic_access
