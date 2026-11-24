@@ -238,6 +238,29 @@ def _apply_times(text: str) -> str:
     return _TIMES_COMPARE.sub(r"\1x", out)
 
 
+# Digit-by-digit numbers: "three one zero zero" -> "3100" (ports, PINs, phone
+# numbers, codes). Only a run with the shape of a spoken code converts: four or
+# more single digits, or three with a "zero"/"nought" in it ("one zero one").
+# "one two three" and "five four three" stay as words (counting, countdowns).
+# "oh" counts as 0 only inside a run ("four oh four"), never as its first or
+# last word, where it is far more often the interjection.
+_DIGIT = {"zero": "0", "nought": "0", "oh": "0", "one": "1", "two": "2",
+          "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7",
+          "eight": "8", "nine": "9"}
+_DIGIT_WORD = r"(?:zero|nought|one|two|three|four|five|six|seven|eight|nine)"
+_DIGIT_RUN = re.compile(
+    rf"(?<![\w-])({_DIGIT_WORD}(?:[ \t-]+(?:oh|{_DIGIT_WORD}))*[ \t-]+{_DIGIT_WORD})(?![\w-])",
+    re.IGNORECASE)
+
+
+def _sub_digit_run(m: "re.Match") -> str:
+    words = [w.lower() for w in re.split(r"[ \t-]+", m.group(1))]
+    has_zero = any(w in ("zero", "nought", "oh") for w in words)
+    if len(words) < 3 or (len(words) == 3 and not has_zero):
+        return m.group(0)
+    return "".join(_DIGIT[w] for w in words)
+
+
 def _sub_percent_words(m: "re.Match") -> str:
     phrase = m.group(1).strip().lower()
     # "a hundred percent" is prose — digitising the bare scale word gives the
@@ -334,6 +357,8 @@ def apply_spoken_commands(text: str) -> str:
         # Function replacement — literal symbol, immune to "\\"/"$" escaping.
         out = pat.sub(lambda m, s=sym: s, out)
     # Numbers last: "dollar sign fifty" has to become "$fifty" first.
+    # Digit runs before percent words, which would add "one zero zero" up to 1.
+    out = _DIGIT_RUN.sub(_sub_digit_run, out)
     out = _PERCENT_WORDS.sub(_sub_percent_words, out)
     out = _PERCENT_DIGITS.sub(r"\1%", out)
     out = _CURRENCY_WORDS.sub(_sub_currency_words, out)
