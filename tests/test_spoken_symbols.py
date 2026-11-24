@@ -231,7 +231,7 @@ class CorpusRegressionTests(unittest.TestCase):
                          r"|brace|paren|percent|dollar sign|pound sign|euro sign"
                          r"|equals? sign|plus sign|pipe symbol|vertical bar"
                          r"|exclamation|quotation|back ?tick|less ?than sign"
-                         r"|greater ?than sign|at symbol)\b", text, re.I):
+                         r"|greater ?than sign|at symbol|emojis?)\b", text, re.I):
                 continue
             if re.search(r"\d\s+times\b|\btimes\s+by\s+\d", text, re.I):
                 continue

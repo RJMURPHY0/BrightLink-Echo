@@ -28,6 +28,7 @@ import re
 
 from tech_terms import apply_tech_terms
 from common_terms import apply_common_terms
+from spoken_emoji import apply_spoken_emoji
 
 _S = r"[ \t]*"  # horizontal space only — never swallow newlines
 
@@ -324,6 +325,8 @@ def apply_spoken_commands(text: str) -> str:
     if not text:
         return text
     out = text
+    # Emoji first: "heavy dollar sign emoji" must not lose "dollar sign" to $.
+    out = apply_spoken_emoji(out)
     # Addresses first: they own "dot"/"dash"/"at", and their tokens may already
     # contain the punctuation a later rule would otherwise have to re-parse.
     out = _ADDR_RUN.sub(_rewrite_address, out)
