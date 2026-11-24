@@ -2032,10 +2032,10 @@ class WhisperFlowApp:
             self._report_mic_blocked(cause, message, event)
             if cause == mic_access.DIGITAL_SILENCE:
                 # A stream left silent by a sample-rate change or a driver
-                # reset only recovers when reopened; off the stop path.
-                threading.Thread(target=self.recorder.restart_warm,
-                                 daemon=True,
-                                 name="warm-restart-silent").start()
+                # reset only recovers when reopened. Never here: a press right
+                # after the toast would wait on the reopen and lose its first
+                # words. The watchdog does it in a quiet spell, with backoff.
+                self.recorder.request_dead_input_reopen()
             self._mic_fix = (message, button, uri, cause, device)
             self.feedback.error_occurred(message)
             return True

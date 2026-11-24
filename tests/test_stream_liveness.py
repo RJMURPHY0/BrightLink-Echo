@@ -158,6 +158,47 @@ class SilentStreamTests(unittest.TestCase):
         rec._silence_retry_after = time.monotonic() - 0.01
         self.assertTrue(rec._stream_is_silently_dead())
 
+    def test_dead_input_reopen_is_queued_never_done_on_the_stop_path(self):
+        # Review of 1.8.55: reopening straight after a dead dictation held the
+        # stream lock, so a press right after the toast lost its first words.
+        rec = _warm_recorder()
+        self.assertTrue(rec._ensure_warm_stream(force_fresh=True))
+        opened_before = rec.opened
+        self.assertTrue(rec.request_dead_input_reopen())
+        self.assertEqual(rec.opened, opened_before)
+        self.assertTrue(rec._dead_reopen_requested)
+
+    def test_dead_input_reopen_waits_for_a_quiet_spell(self):
+        rec = _warm_recorder()
+        self.assertTrue(rec._ensure_warm_stream(force_fresh=True))
+        opened_before = rec.opened
+        rec.request_dead_input_reopen()
+        rec._last_record_activity_ts = time.monotonic()   # just dictated
+        self.assertFalse(rec._recover_dead_input())
+        self.assertEqual(rec.opened, opened_before)
+        self.assertTrue(rec._dead_reopen_requested)       # still queued
+        rec._last_record_activity_ts = (
+            time.monotonic() - recorder._DEVICE_REFRESH_QUIET_SECONDS - 1.0)
+        self.assertTrue(rec._recover_dead_input())
+        self.assertEqual(rec.opened, opened_before + 1)
+        self.assertFalse(rec._dead_reopen_requested)
+
+    def test_dead_input_reopen_backs_off_and_real_audio_resets_it(self):
+        # A hardware-muted mic must not be reopened after every empty press.
+        rec = _warm_recorder()
+        self.assertTrue(rec.request_dead_input_reopen())
+        self.assertFalse(rec.request_dead_input_reopen())
+        rec._dead_reopen_after = time.monotonic() - 0.01
+        self.assertTrue(rec.request_dead_input_reopen())
+        self.assertEqual(rec._dead_reopen_count, 2)
+        _feed(rec, 0.0005)            # live noise floor, above _DEAD_PEAK
+        self.assertEqual(rec._dead_reopen_count, 0)
+        self.assertEqual(rec._dead_reopen_after, 0.0)
+        _feed(rec, 0.00001)           # James's dead Focusrite level
+        rec._dead_reopen_count = 2
+        _feed(rec, 0.00001)
+        self.assertEqual(rec._dead_reopen_count, 2)
+
     def test_real_audio_resets_the_backoff(self):
         rec = _warm_recorder()
         rec._silence_recovery_count = 3

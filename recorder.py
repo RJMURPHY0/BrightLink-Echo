@@ -357,6 +357,12 @@ class Recorder:
         self._live_devices: set = set()
         self._silence_recovery_count: int = 0
         self._silence_retry_after: float = 0.0
+        # A dictation found the input dead (peak at or below _DEAD_PEAK, not
+        # always exact zeros, so the silent-run check above never sees it).
+        # The watchdog reopens in a quiet spell; backoff as for silence.
+        self._dead_reopen_requested: bool = False
+        self._dead_reopen_count: int = 0
+        self._dead_reopen_after: float = 0.0
         # Set when the watchdog reopened a silently-dead stream. Polled and
         # cleared by the app for the fleet log, same contract as
         # last_start_recovery above.
@@ -525,6 +531,9 @@ class Recorder:
                 if peak > _DEAD_PEAK:
                     self._dead_run_started_ts = 0.0
                     self._live_devices.add(self._active_device_name)
+                    if self._dead_reopen_count:
+                        self._dead_reopen_count = 0
+                        self._dead_reopen_after = 0.0
                 elif self._dead_run_started_ts == 0.0:
                     self._dead_run_started_ts = now
             if self._aux_active:
@@ -599,6 +608,39 @@ class Recorder:
         # force_fresh re-inits PortAudio so a device plugged in after launch
         # is actually visible to the enumeration.
         self._ensure_warm_stream(force_fresh=True)
+
+    def request_dead_input_reopen(self) -> bool:
+        """A dictation came back with a dead input: ask the watchdog to reopen
+        the stream once nobody is dictating. Never reopens here (the caller is
+        on the stop path, and a reopen holds the stream lock a press needs).
+        Backs off like the silence recovery, so a hardware-muted mic is not
+        reopened after every empty press; real signal resets it. Returns True
+        when a reopen was queued."""
+        with self._lock:
+            now = time.monotonic()
+            if now < self._dead_reopen_after:
+                return False
+            idx = min(self._dead_reopen_count, len(_SILENCE_RETRY_BACKOFF) - 1)
+            self._dead_reopen_count += 1
+            self._dead_reopen_after = now + _SILENCE_RETRY_BACKOFF[idx]
+            self._dead_reopen_requested = True
+            return True
+
+    def _recover_dead_input(self) -> bool:
+        """Watchdog side of request_dead_input_reopen(): reopen only in a quiet
+        spell (same hold as the periodic refresh), else leave it queued for a
+        later tick. Returns True when it reopened."""
+        if (time.monotonic() - self._last_record_activity_ts
+                <= _DEVICE_REFRESH_QUIET_SECONDS):
+            return False
+        with self._lock:
+            if not self._dead_reopen_requested:
+                return False
+            self._dead_reopen_requested = False
+        print("[Recorder] Watchdog: last dictation heard a dead input, "
+              "reopening the warm stream.")
+        self._ensure_warm_stream(force_fresh=True)
+        return True
 
     def live_health(self) -> tuple[float, float, str, float, bool]:
         """(heartbeat age, exact-silence run, device name, dead-input run,
@@ -839,6 +881,9 @@ class Recorder:
                 elif not self._stream_looks_alive():
                     print("[Recorder] Watchdog: warm stream dead, recovering.")
                     self._ensure_warm_stream(force_fresh=True)
+                elif (self._dead_reopen_requested
+                      and self._recover_dead_input()):
+                    pass
                 elif self._stream_is_silently_dead():
                     # Callbacks still arriving, but carrying nothing at all —
                     # the stream outlived its device (audio-engine restart).

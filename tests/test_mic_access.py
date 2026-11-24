@@ -158,8 +158,9 @@ def _bare_app():
     a = object.__new__(app.WhisperFlowApp)
     a.recorder = types.SimpleNamespace(
         last_recording_seconds=3.0, _active_device_name="Mic",
-        restart_warm=lambda: None, voiced_seconds=0.0, probe_in_flight=False,
-        consume_mic_advice=lambda: None)
+        restart_warm=mock.Mock(), voiced_seconds=0.0, probe_in_flight=False,
+        consume_mic_advice=lambda: None,
+        request_dead_input_reopen=mock.Mock(return_value=True))
     a.feedback = mock.Mock()
     a._log_error_event = mock.Mock()
     a.app_window = mock.Mock()
@@ -190,6 +191,16 @@ class AppWiringTests(unittest.TestCase):
         self.assertEqual(ALLOW, payload["privacy"])
         report.assert_called_once()
         self.assertEqual("fake-token", report.call_args.kwargs["token"])
+
+    def test_dead_input_is_told_and_queues_a_reopen_off_the_stop_path(self):
+        # James Murphy, 24 Nov 2026. The reopen must never run here: a press
+        # straight after the toast would wait on it and lose first words.
+        a = _bare_app()
+        handled, _r = self._no_speech(a, mic_access.DIGITAL_SILENCE, peak=0.00001)
+        self.assertTrue(handled)
+        self.assertIn("sending no sound", a.feedback.error_occurred.call_args[0][0])
+        a.recorder.request_dead_input_reopen.assert_called_once_with()
+        a.recorder.restart_warm.assert_not_called()
 
     def test_report_goes_once_per_cause(self):
         a = _bare_app()
